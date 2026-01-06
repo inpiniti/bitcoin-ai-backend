@@ -2,7 +2,8 @@ import yahooFinance from 'yahoo-finance2';
 
 export const config = {
     name: "fetch-stock-data",
-    type: "task", // 내부 로직 수행용 Task
+    type: "event",
+    subscribes: ["fetch-stock-data"],
 };
 
 export const handler = async (input: any) => {

@@ -1,6 +1,7 @@
 export const config = {
     name: "format-forecast-result",
-    type: "task",
+    type: "event",
+    subscribes: ["format-forecast-result"],
 };
 
 export const handler = async (input: any) => {

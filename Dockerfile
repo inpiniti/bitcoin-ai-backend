@@ -14,20 +14,17 @@ RUN apt-get update && apt-get install -y \
     && ln -s /usr/local/bin/python /usr/local/bin/python3.13 \
     && rm -rf /var/lib/apt/lists/*
 
-# 패키지 파일 복사 및 설치
 # 패키지 파일 복사 및 설치 (Node.js)
 COPY package.json ./
 RUN npm install
 
 # 패키지 파일 복사 및 설치 (Python) - 캐싱 효과 극대화
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Motia 설치 (무거운 Python 라이브러리 설치 포함) - 소스 변경과 무관하게 캐싱됨
+RUN npx motia@latest install
 
 # 소스 코드 복사
 COPY . .
-
-# Motia 전용 설치 명령 수행
-RUN npx motia@latest install
 
 # Hugging Face Spaces 포트 설정
 ENV PORT=7860

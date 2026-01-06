@@ -28,7 +28,8 @@ def get_model():
 # Motia Python Step Configuration
 config = {
     "name": "bitcoin-forecast",
-    "type": "task",
+    "type": "event",
+    "subscribes": ["bitcoin-forecast"],
     "emits": []
 }
 

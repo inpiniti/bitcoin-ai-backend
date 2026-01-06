@@ -12,7 +12,7 @@ export const config = {
 
 export const handler = async ({ req, step }: any) => {
   try {
-    const body = await req.json();
+    const body = req.body;
     const symbol = body.symbol || "BTC-USD";
 
     // 1. 야후 파이낸스 데이터 수집
@@ -36,16 +36,13 @@ export const handler = async ({ req, step }: any) => {
       symbol: stockData.symbol
     });
 
-    return Response.json({
+    return {
       success: true,
       data: finalResult,
-    });
+    };
   } catch (error: any) {
     console.error("Workflow Error:", error);
-    return Response.json({
-      success: false,
-      error: error.message,
-      stack: error.stack
-    }, { status: 500 });
+    // 프레임워크가 에러를 처리하도록 throw
+    throw error;
   }
 };
