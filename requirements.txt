@@ -1,3 +1,4 @@
+torch
 timesfm
 jax[cpu]
 numpy

@@ -5,7 +5,9 @@
 export const config = {
   name: "bitcoin-api",
   type: "api",
-  route: "POST /v1/forecast",
+  path: "/v1/forecast",
+  method: "POST",
+  emits: []
 };
 
 export const handler = async ({ req, step }: any) => {
