@@ -10,9 +10,10 @@ export const config = {
   emits: []
 };
 
-export const handler = async ({ req, step }: any) => {
+export const handler = async (req: any, { step }: any) => {
   try {
-    const body = req.body;
+    // API Step의 경우 첫 번째 인자로 req 객체가 직접 넘어옵니다.
+    const body = req.body || {};
     const symbol = body.symbol || "BTC-USD";
 
     // 1. 야후 파이낸스 데이터 수집
