@@ -78,6 +78,69 @@ Motia 프레임워크를 기반으로 Node.js와 Python 환경을 통합하여 A
 
 ---
 
+## 모티아 공식문서
+
+아래 공식문서를 숙지한뒤 개발하시기 바랍니다.
+에러가 너무 많이 발생하기 때문에 공식문서를 숙지한뒤 개발하시기 바랍니다.
+
+https://www.motia.dev/docs
+
+## 시작하기
+https://www.motia.dev/docs/getting-started/quick-start
+https://www.motia.dev/docs/getting-started/build-your-first-motia-app
+https://www.motia.dev/docs/getting-started/build-your-first-motia-app/api-endpoints
+https://www.motia.dev/docs/getting-started/build-your-first-motia-app/background-jobs
+https://www.motia.dev/docs/getting-started/build-your-first-motia-app/workflows
+https://www.motia.dev/docs/getting-started/build-your-first-motia-app/ai-agents
+https://www.motia.dev/docs/getting-started/build-your-first-motia-app/streaming-agents
+
+## 핵심개념
+https://www.motia.dev/docs/concepts/overview
+https://www.motia.dev/docs/concepts/steps
+https://www.motia.dev/docs/concepts/workbench
+
+## 제품소개
+https://www.motia.dev/docs/product-showcase
+https://www.motia.dev/docs/product-showcase/chessarena-ai
+
+## 예제
+https://www.motia.dev/docs/examples
+https://www.motia.dev/docs/examples/sentiment-analysis
+https://www.motia.dev/docs/examples/multi-language-data-processing
+https://www.motia.dev/docs/examples/ai-content-moderation
+https://www.motia.dev/docs/examples/rag-docling-weaviate
+https://www.motia.dev/docs/examples/trello-automation
+https://www.motia.dev/docs/examples/uptime-discord-monitor
+https://www.motia.dev/docs/examples/github-stars-counter
+https://www.motia.dev/docs/examples/github-integration-workflow
+https://www.motia.dev/docs/examples/gmail-automation
+https://www.motia.dev/docs/examples/finance-agent
+https://www.motia.dev/docs/examples/ai-deep-research-agent
+https://www.motia.dev/docs/examples/adapter-configuration
+https://www.motia.dev/docs/examples/human-in-the-loop-workflows
+
+## 개발 가이드
+https://www.motia.dev/docs/development-guide/project-structure
+https://www.motia.dev/docs/development-guide/state-management
+https://www.motia.dev/docs/development-guide/streams
+https://www.motia.dev/docs/development-guide/flows
+https://www.motia.dev/docs/development-guide/infrastructure
+https://www.motia.dev/docs/development-guide/adapters
+https://www.motia.dev/docs/development-guide/observability
+https://www.motia.dev/docs/development-guide/customizing-flows
+https://www.motia.dev/docs/development-guide/plugins
+https://www.motia.dev/docs/development-guide/middleware
+https://www.motia.dev/docs/development-guide/testing
+https://www.motia.dev/docs/development-guide/environment-variables
+https://www.motia.dev/docs/development-guide/cli
+https://www.motia.dev/docs/development-guide/motia-config
+
+## 그외
+https://www.motia.dev/docs/ai-development-guide
+https://www.motia.dev/docs/api-reference
+
+---
+
 ## ⚡ 최적화 및 배포 전략
 
 ### Docker 빌드 최적화 (Layer Caching)

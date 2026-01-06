@@ -2,6 +2,7 @@
   "name": "bitcoin-ai-backend",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "motia dev",
     "start": "motia start --port 7860"

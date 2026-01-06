@@ -1,6 +1,7 @@
-import { YahooFinance } from 'yahoo-finance2';
+import yahooFinance from 'yahoo-finance2';
 
-const yahooFinance = new YahooFinance();
+// const yahooFinance = new YahooFinance(); // Named export unavailable
+
 
 export const config = {
     name: "fetch-stock-data",
