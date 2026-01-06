@@ -30,6 +30,7 @@ config = {
     "name": "bitcoin-forecast",
     "type": "event",
     "subscribes": ["bitcoin-forecast"],
+    "flows": ["bitcoin-forecast-flow"],
     "emits": []
 }
 

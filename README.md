@@ -43,11 +43,15 @@ Motia 프레임워크를 기반으로 Node.js와 Python 환경을 통합하여 A
    - `any` 사용을 지양하고 구체적인 인터페이스나 타입을 정의합니다.
 
 ### TypeScript (Steps) 구현 규칙
-- **API Step 핸들러 시그니처**: API Step의 핸들러는 `(req, context)` 형태의 인자를 받습니다. `req` 객체에서 직접 `body` 등에 접근해야 합니다.
+- **API Step 핸들러 시그니처**: API Step의 핸들러는 `(req, context)` 형태의 인자를 받습니다. `context`에는 `{ emit, logger }` 등이 포함됩니다.
   ```typescript
-  export const handler = async (req: any, { step }: any) => { ... }
+  export const handler = async (req: any, { emit }: any) => { ... }
   ```
-- **Step 통신**: 현재 Motia 버전 호환성을 위해 `task` 타입 대신 **`event` 타입**을 사용해야 합니다.
+- **Flow 시각화**: 모든 Step의 `config`에 `flows: ['flow-name']`을 명시해야 Workbench 다이어그램에 표시됩니다.
+- **Event 기반 통신**: `step.call` 대신 `emit`을 사용하여 이벤트를 발행합니다.
+  ```typescript
+  await emit({ topic: 'event-name', data: { ... } });
+  ```
   ```typescript
   // 권장사항
   export const config = {

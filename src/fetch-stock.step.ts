@@ -4,6 +4,7 @@ export const config = {
     name: "fetch-stock-data",
     type: "event",
     subscribes: ["fetch-stock-data"],
+    flows: ['bitcoin-forecast-flow'],
     emits: [],
 };
 

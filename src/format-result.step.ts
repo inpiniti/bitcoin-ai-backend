@@ -2,6 +2,7 @@ export const config = {
     name: "format-forecast-result",
     type: "event",
     subscribes: ["format-forecast-result"],
+    flows: ['bitcoin-forecast-flow'],
     emits: [],
 };
 
