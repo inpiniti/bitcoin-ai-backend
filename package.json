@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "motia dev",
-    "start": "motia start"
+    "start": "motia start --port 7860"
   },
   "dependencies": {
     "motia": "latest"
