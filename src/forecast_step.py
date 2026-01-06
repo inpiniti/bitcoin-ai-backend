@@ -29,7 +29,8 @@ def get_model():
 config = {
     "name": "bitcoin-forecast",
     "type": "event",
-    "subscribe": ["bitcoin.forecast.requested"]
+    "subscribes": ["bitcoin.forecast.requested"],
+    "emits": []
 }
 
 def handler(event, context):
