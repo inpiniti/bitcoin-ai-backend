@@ -1,4 +1,6 @@
-import yahooFinance from 'yahoo-finance2';
+import { YahooFinance } from 'yahoo-finance2';
+
+const yahooFinance = new YahooFinance();
 
 export const config = {
     name: "fetch-stock-data",
@@ -16,7 +18,15 @@ export const handler = async (input: any) => {
 
     try {
         // 최근 60일 데이터 가져오기 (TimesFM 입력용)
-        const queryOptions = { period1: '60d', interval: '1h' }; // 1시간 간격, 60일
+        // period1을 계산된 날짜로 변경 (라이브러리 안정성 확보)
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - 60);
+
+        const queryOptions = {
+            period1: startDate.toISOString().split('T')[0], // YYYY-MM-DD
+            interval: '1h'
+        };
+
         // @ts-ignore
         const result = await yahooFinance.historical(ticker, queryOptions);
 
