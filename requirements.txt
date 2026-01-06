@@ -1,0 +1,7 @@
+motia
+timesfm
+jax[cpu]
+numpy
+pandas
+utilsforecast
+huggingface_hub

@@ -1,0 +1,12 @@
+{
+  "name": "bitcoin-ai-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "motia dev",
+    "start": "motia start"
+  },
+  "dependencies": {
+    "motia": "latest"
+  }
+}
