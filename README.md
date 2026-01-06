@@ -11,46 +11,95 @@ pinned: false
 
 이 프로젝트는 [Motia](https://motia.dev) 프레임워크를 사용하여 구축된 Bitcoin 분석 및 예측 백엔드 서버입니다. Hugging Face Spaces의 Docker SDK를 통해 배포됩니다.
 
-## 🏗 아키텍처 요약
+## 🏗 아키텍처 요약 (Polyglot)
 
-Motia 프레임워크를 기반으로 다중 언어(Polyglot) 환경을 구축하여 AI 모델 추론과 API 서빙을 효율적으로 통합합니다.
+Motia 프레임워크를 기반으로 Node.js와 Python 환경을 통합하여 AI 모델 추론과 API 서빙을 효율적으로 처리합니다.
 
-### 1. AI Step (Python)
-- **목적**: TimesFM (Time-series Foundation Model)을 이용한 비트코인 시계열 예측.
-- **환경**: Python 3.11+ 환경에서 실행되며, Motia의 `Python Step`을 통해 정의됩니다.
-- **역할**: 대규모 시계열 데이터를 입력받아 향후 가격 변동성을 예측하고 이벤트를 방출합니다.
+### 1. API Step (Node.js/TypeScript)
+- **목적**: 클라이언트 통신 및 전체 워크플로우 제어
+- **구성**:
+  - `src/api.step.ts`: 엔트리포인트. 요청을 받아 하위 스텝들을 호출하고 응답을 반환.
+  - `src/fetch-stock.step.ts`: Yahoo Finance API를 통해 실시간/과거 주가 데이터 수집.
+  - `src/format-result.step.ts`: 예측 결과를 UI에 적합한 형태로 가공.
 
-### 2. API Step (Node.js/TypeScript)
-- **목적**: React 앱 및 외부 클라이언트와의 통신을 위한 엔드포인트 제공.
-- **환경**: Node.js/TypeScript 환경에서 실행되며, Motia의 `API Step`을 통해 정의됩니다.
-- **역할**: RESTful API를 통해 클라이언트 요청을 처리하고, AI Step에서 생성된 데이터를 반환하거나 워크플로우를 트리거합니다.
+### 2. AI Step (Python 3.11+)
+- **목적**: TimesFM (Time-series Foundation Model)을 이용한 고성능 시계열 예측
+- **구성**:
+  - `src/forecast_step.py`: Google TimesFM 모델 로드 및 추론 수행 (JAX/CPU 활용).
+
+---
+
+## 👩‍💻 개발 가이드라인 (Coding Guidelines)
+
+이 프로젝트는 안정성과 유지보수성을 위해 엄격한 코딩 규칙을 따릅니다.
+
+### 공통 원칙
+1. **함수형 프로그래밍 지향 (FP)**:
+   - 상태 변경(Mutation)을 최소화합니다.
+   - 모든 함수는 가능한 한 순수 함수(Pure Function)로 작성하여 부작용(Side Effect)을 제거합니다.
+2. **불변성 (Immutability)**:
+   - 데이터 객체는 직접 수정하지 않고, 새로운 객체를 반환하는 방식을 사용합니다 (`Spread syntax`, `map`, `filter` 등 활용).
+3. **명시적 타입 사용**:
+   - `any` 사용을 지양하고 구체적인 인터페이스나 타입을 정의합니다.
+
+### TypeScript (Steps) 구현 규칙
+- **Step 통신**: 현재 Motia 버전 호환성을 위해 `task` 타입 대신 **`event` 타입**을 사용해야 합니다.
+  ```typescript
+  // 권장사항
+  export const config = {
+      type: "event",
+      subscribes: ["my-event-name"]
+  };
+  // 호출 시: step.call("my-event-name", { ... })
+  ```
+- **에러 처리**: `try-catch` 내부에서 에러를 묵살하지 않고, `throw error`를 통해 프레임워크 수준으로 전파하여 중앙에서 처리되도록 합니다.
+- **요청 처리**: `req.json()` 대신 이미 파싱된 `req.body`를 사용합니다.
+
+### Python (AI Models) 구현 규칙
+- **모델 캐싱**: 무거운 AI 모델은 전역 변수나 싱글톤 패턴을 사용하여 **콜드 스타트(Cold Start)** 비용을 줄입니다.
+  ```python
+  # 초기화 예시
+  tfm_model = None
+  def get_model():
+      global tfm_model
+      if tfm_model is None:
+         # Load Model...
+      return tfm_model
+  ```
+- **타입 명시**: 함수의 입력과 반환 값에 Type Hint를 적극 활용합니다.
+
+---
+
+## ⚡ 최적화 및 배포 전략
+
+### Docker 빌드 최적화 (Layer Caching)
+허깅페이스 배포 속도 향상을 위해 `Dockerfile`의 레이어 순서를 최적화했습니다.
+
+1. **의존성 우선 설치**: `package.json`과 `requirements.txt`를 소스 코드보다 먼저 복사(`COPY`)합니다.
+2. **캐시 활용**: 소스 코드가 변경되더라도 의존성 파일이 변경되지 않았다면, 무거운 `pip install` (Torch, TimesFM 등) 과정을 캐시에서 불러와 즉시 건너뜁니다.
+3. **결과**: 라이브러리 변경이 없는 배포는 **수 초 내에 완료**됩니다.
+
+### 개발 환경 (Docker Compose)
+로컬 Python 버전 이슈를 해결하기 위해 `docker-compose`를 사용합니다.
+- **Hot Reloading**: 소스 코드를 수정하면 컨테이너 재시작 없이 즉시 반영됩니다.
+- **Volume Mount**: 로컬 소스와 컨테이너 내부를 동기화하되, `node_modules`와 `python_modules`는 컨테이너 내부 버전을 유지하여 충돌을 방지합니다.
+
+---
 
 ## 🚀 시작하기
 
-### 도커이미지 활용
-본 프로젝트는 `motiadev/motia:latest` 기반의 커스텀 Dockerfile을 사용하여 구축됩니다.
+### 실행 방법
+```powershell
+docker-compose up
+```
+*최초 실행 시 이미지를 빌드하며, 이후에는 즉시 실행됩니다.*
 
-### 개발 로드맵 및 진행 상태
-- [x] **1. Motia 서버 초기 설정**: 기본 프로젝트 구조 (`package.json`, `Dockerfile`) 및 의존성 설정 완료.
-- [x] **2. API Step 기초 구현**: React 앱과 통신할 `src/api.step.ts` 완성.
-- [x] **3. AI Step (TimesFM) 구현**: `src/forecast_step.py`에서 Google TimesFM 모델 추론 로직 구현 완료.
-    - [x] Google TimesFM 체크포인트 로드 (Hugging Face Hub 연동)
-    - [x] 시계열 데이터 전처리 및 입력 파이프라인 구축
-    - [x] 추론 결과 후처리 및 JSON 응답 반환
-- [ ] **4. Docker 및 배포 최적화**: Hugging Face Spaces 환경에 최적화된 빌드 및 런타임 검증.
+---
 
-## 🧠 TimesFM 구현 상세
+## 🛠 문제 해결 (Troubleshooting)
 
-TimesFM (Time-series Foundation Model)은 Google Research에서 개발한 시계열 예측 파운데이션 모델입니다. 이 프로젝트에서는 다음과 같이 활용합니다:
-
-- **Model**: `google/timesfm-1.0-200m`
-- **Input**: 비트코인 과거 OHLCV 데이터
-- **Output**: 향후 N개 시점에 대한 가격 예측 값 및 신뢰 구간
-- **Flow**:
-    1. 클라이언트가 API Step(`POST /v1/forecast`)으로 과거 데이터 전송
-    2. API Step이 `step.call("bitcoin-forecast", ...)`를 통해 Python Step 호출
-    3. Python Step이 `TimesFM` 모델로 추론 수행 (JAX/CPU 활용)
-    4. 예측 결과를 JSON 객체로 즉시 반환하여 API 응답으로 전달
+- **Flow 그래프 누락**: Step 타입을 `event`로 설정하고 명시적으로 `subscribes`를 지정해야 Flow UI에 정상적으로 표시됩니다.
+- **500 Internal Server Error**: API 반환 시 `Response.json()` 대신 일반 객체를 반환해야 프레임워크가 정상 처리합니다. JSON 파싱은 `req.body`를 사용하세요.
 
 ---
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference

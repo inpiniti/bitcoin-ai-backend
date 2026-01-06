@@ -26,6 +26,9 @@ RUN npx motia@latest install
 # 소스 코드 복사
 COPY . .
 
+# Motia Python 환경 경로 명시
+ENV PYTHON_MODULES_PATH=/app/python_modules
+
 # Hugging Face Spaces 포트 설정
 ENV PORT=7860
 EXPOSE 7860
