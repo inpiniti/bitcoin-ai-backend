@@ -15,8 +15,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 패키지 파일 복사 및 설치
+# 패키지 파일 복사 및 설치 (Node.js)
 COPY package.json ./
 RUN npm install
+
+# 패키지 파일 복사 및 설치 (Python) - 캐싱 효과 극대화
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 소스 코드 복사
 COPY . .
