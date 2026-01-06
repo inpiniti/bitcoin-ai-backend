@@ -1,29 +1,26 @@
-# Base image with Motia framework
+# Motia 공식 이미지 사용 (Python 3.13 사전 설치됨)
 FROM motiadev/motia:latest
 
 # 작업 디렉토리 설정
 WORKDIR /app
 
-# 루트 권한으로 필요한 패키지 설치 (Python 및 빌드 도구)
+# 루트 권한으로 빌드 도구 설치 (TimesFM 등 무거운 라이브러리용)
 USER root
 RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-venv \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # 패키지 파일 복사 및 설치
 COPY package.json ./
 RUN npm install
 
-# Python 의존성 설치
-COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt
-
 # 소스 코드 복사
 COPY . .
 
-# Hugging Face Spaces는 기본적으로 7860 포트를 사용합니다.
+# Motia 전용 설치 명령 수행 (requirements.txt 기반 가상환경 구축)
+RUN npx motia@latest install
+
+# Hugging Face Spaces 포트 설정
 ENV PORT=7860
 EXPOSE 7860
 
