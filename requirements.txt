@@ -1,4 +1,3 @@
-motia
 timesfm
 jax[cpu]
 numpy
