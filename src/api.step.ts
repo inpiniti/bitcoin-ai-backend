@@ -13,21 +13,39 @@ export const config = {
 export const handler = async ({ req, step }: any) => {
   try {
     const body = await req.json();
+    const symbol = body.symbol || "BTC-USD";
 
-    // Python Step('bitcoin-forecast') 직접 호출하여 결과 대기
-    const result = await step.call("bitcoin-forecast", {
-      data: body.historicalData,
-      symbol: body.symbol || "BTC/KRW",
+    // 1. 야후 파이낸스 데이터 수집
+    console.log("Step 1: Fetching data...");
+    const stockData = await step.call("fetch-stock-data", { symbol });
+
+    // 2. Python AI 모델 예측
+    console.log("Step 2: Forecasting...");
+    // Python Step은 'data' 키로 가격 배열을 받음
+    const forecastResult = await step.call("bitcoin-forecast", {
+      data: stockData.prices,
+    });
+
+    // Python 결과에서 예측 리스트 추출
+    const predictions = forecastResult.forecast;
+
+    // 3. 결과 포맷팅
+    console.log("Step 3: Formatting...");
+    const finalResult = await step.call("format-forecast-result", {
+      forecast: predictions,
+      symbol: stockData.symbol
     });
 
     return Response.json({
       success: true,
-      data: result,
+      data: finalResult,
     });
   } catch (error: any) {
+    console.error("Workflow Error:", error);
     return Response.json({
       success: false,
       error: error.message,
+      stack: error.stack
     }, { status: 500 });
   }
 };
