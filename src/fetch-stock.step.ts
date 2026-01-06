@@ -4,6 +4,7 @@ export const config = {
     name: "fetch-stock-data",
     type: "event",
     subscribes: ["fetch-stock-data"],
+    emits: [],
 };
 
 export const handler = async (input: any) => {

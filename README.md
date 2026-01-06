@@ -107,6 +107,7 @@ docker-compose up
 
 - **Flow 그래프 누락**: Step 타입을 `event`로 설정하고 명시적으로 `subscribes`를 지정해야 Flow UI에 정상적으로 표시됩니다.
 - **500 Internal Server Error**: API 반환 시 `Response.json()` 대신 일반 객체를 반환해야 프레임워크가 정상 처리합니다. JSON 파싱은 `req.body`를 사용하세요.
+- **Invalid input: expected array (emits)**: `config` 객체에 `emits: []` 필드가 누락되면 에러가 발생합니다. 이벤트를 방출하지 않더라도 빈 배열을 명시해야 합니다.
 
 ---
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
