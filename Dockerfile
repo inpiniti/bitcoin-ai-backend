@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
+    && ln -s /usr/local/bin/python /usr/local/bin/python3.13 \
     && rm -rf /var/lib/apt/lists/*
 
 # 패키지 파일 복사 및 설치
