@@ -69,17 +69,16 @@ export const handler = async (input: any, { emit, logger }: any) => {
             count: filteredPrices.length
         };
 
-        // 다음 단계(Python AI Step)로 이벤트 발행
-        await emit({
-            topic: "bitcoin-forecast",
-            data: output
-        });
+        // 다음 단계(Python AI Step)를 직접 호출하여 결과를 받아옵니다.
+        logger.info("[Fetch] Calling Python AI Step...");
+        const forecastResult = await call("bitcoin-forecast", output);
 
-        return output;
+        return forecastResult;
     } catch (error: any) {
-        logger.error(`Yahoo Fetch Error: ${error.message}`);
+        logger.error(`[Fetch] Error: ${error.message}`);
         throw new Error(`Failed to fetch stock data: ${error.message}`);
     }
 };
+
 
 

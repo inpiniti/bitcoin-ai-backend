@@ -11,36 +11,29 @@ export const config = {
   flows: ['bitcoin-forecast-flow']
 };
 
-export const handler = async (req: any, { emit, logger }: any) => {
+export const handler = async (req: any, { call, logger }: any) => {
   try {
     const body = req.body || {};
     const symbol = body.symbol || "BTC-USD";
 
-    logger.info(`Step 1: Starting forecast workflow for ${symbol}...`);
+    logger.info(`[API] Starting synchronous forecast for ${symbol}...`);
 
-    // Motia에서 emit은 설정에 따라 결과를 반환할 수 있는 동기적(RPC-like) 호출로 동작 가능합니다.
-    // 전체 flow(fetch -> forecast -> format)가 완료될 때까지 기다려 결과를 가져옵니다.
-    const result = await emit({
-      topic: "fetch-stock-data",
-      data: { symbol }
-    });
+    // emit 대신 call을 사용하여 체인의 최종 결과(formatted report)를 직접 받습니다.
+    const result = await call("fetch-stock-data", { symbol });
 
-    logger.info("Workflow completed successfully.");
+    logger.info("[API] Workflow completed. Returning report.");
 
-    // 최종적으로 format-result.step.ts에서 가공된 데이터가 result에 담겨 반환됩니다.
     return {
       status: 200,
       body: result
     };
   } catch (error: any) {
-    console.error("Workflow Error:", error);
+    logger.error(`[API] Workflow Error: ${error.message}`);
     return {
       status: 500,
-      body: {
-        success: false,
-        error: error.message || "Internal Server Error"
-      }
+      body: { success: false, error: error.message }
     };
   }
 };
+
 

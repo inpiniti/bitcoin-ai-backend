@@ -90,12 +90,14 @@ async def handler(event, context):
             "message": f"Successfully forecasted {len(result_list)} points"
         }
 
-        # 다음 단계(Formatting Step)로 이벤트 발행
-        # Motia Python SDK에서 emit은 통상 비동기이므로 await 사용
-        if hasattr(context, "emit"):
-            await context.emit("format-forecast-result", output)
+        # 다음 단계(Formatting Step)를 직접 호출하여 최종 보고서를 받아옵니다.
+        logging.info("[Forecast] Calling Formatting Step...")
+        if hasattr(context, "call"):
+            final_report = await context.call("format-forecast-result", output)
+            return final_report
         
         return output
+
 
     except Exception as e:
         logging.error(f"Error during forecasting: {str(e)}")
