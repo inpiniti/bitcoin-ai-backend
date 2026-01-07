@@ -94,15 +94,19 @@ async def handler(event, context):
             job["predictionCount"] = len(result_list)
             await context.state.set("forecasts", job_id, job)
         
-        # Step 4로 이벤트 발행
-        await context.emit("format-result", {
-            "jobId": job_id,
-            "symbol": symbol,
-            "lastDate": last_date,
-            "forecast": result_list,
-            "model": "TimesFM-2.5-200m",
-            "dataPoints": len(prices)
+        # Step 4로 이벤트 발행 (Motia Python emit은 단일 dict)
+        await context.emit({
+            "topic": "format-result",
+            "data": {
+                "jobId": job_id,
+                "symbol": symbol,
+                "lastDate": last_date,
+                "forecast": result_list,
+                "model": "TimesFM-2.5-200m",
+                "dataPoints": len(prices)
+            }
         })
+
         
     except Exception as e:
         context.logger.error(f"[Step3:Forecast] Error for job {job_id}: {str(e)}")
