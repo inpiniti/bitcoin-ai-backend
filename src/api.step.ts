@@ -32,9 +32,11 @@ export const handler = async (req: any, { emit }: any) => {
     // 그렇지 않다면, 이 구조는 비동기 처리(202 Accepted)로 변경되어야 함.
 
     return {
-      success: true,
-      message: "Forecast requested. Check logs for progress.",
-      // debug: result 
+      status: 200,
+      body: {
+        success: true,
+        message: "Forecast requested. Check logs for progress.",
+      }
     };
   } catch (error: any) {
     console.error("Workflow Error:", error);

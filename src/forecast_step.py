@@ -1,27 +1,31 @@
 import logging
 import numpy as np
 import pandas as pd
-from timesfm import TimesFm
+from timesfm import TimesFm, TimesFmHparams
 
-# 전역 변수로 모델 캐싱 (서버 시작 시 또는 첫 요청 시 로드)
+# 전역 변수로 모델 캐싱
 tfm_model = None
 
 def get_model():
     global tfm_model
     if tfm_model is None:
-        logging.info("Loading TimesFM model from Hugging Face Hub...")
-        # TimesFM 모델 초기화 및 체크포인트 로드
-        # google/timesfm-1.0-200m 기준 설정
-        tfm_model = TimesFm(
+        logging.info("Loading TimesFM v2.0 model...")
+        # TimesFM v2.0 (PyTorch/JAX) API 대응
+        # 하이퍼파라미터를 TimesFmHparams 객체로 래핑하여 전달
+        hparams = TimesFmHparams(
             context_len=512,
             horizon_len=128,
             input_patch_len=32,
             output_patch_len=128,
             num_layers=20,
             model_dims=1280,
-            backend="cpu",  # CPU 환경 기준 (Hugging Face Spaces 무료 티어 등)
+            backend="cpu", # CPU 환경
         )
-        tfm_model.load_from_checkpoint(repo_id="google/timesfm-1.0-200m")
+        
+        tfm_model = TimesFm(
+            hparams=hparams,
+            checkpoint="google/timesfm-1.0-200m", # 혹은 로컬 체크포인트 경로
+        )
         logging.info("TimesFM model loaded successfully.")
     return tfm_model
 
@@ -34,7 +38,7 @@ config = {
     "emits": ["format-forecast-result"]
 }
 
-def handler(event, context):
+async def handler(event, context):
     """
     Bitcoin 가격 예측을 수행하는 Python Step.
     TimesFM 모델을 사용하여 시계열 데이터를 분석합니다.
@@ -42,6 +46,7 @@ def handler(event, context):
     try:
         data = event.get("data", [])
         symbol = event.get("symbol", "BTC-USD")
+        last_date = event.get("lastDate")
         
         if not data:
             return {"status": "error", "message": "No data provided"}
@@ -63,6 +68,7 @@ def handler(event, context):
         })
         
         logging.info("Starting TimesFM inference...")
+        # forecast_on_df는 v2.0에서도 지원됨
         forecast_df = tfm.forecast_on_df(
             inputs=df,
             freq="H",
@@ -79,12 +85,15 @@ def handler(event, context):
             "status": "success",
             "model": "TimesFM-1.0-200m",
             "symbol": symbol,
+            "lastDate": last_date,
             "forecast": result_list,
             "message": f"Successfully forecasted {len(result_list)} points"
         }
 
         # 다음 단계(Formatting Step)로 이벤트 발행
-        context.emit("format-forecast-result", output)
+        # Motia Python SDK에서 emit은 통상 비동기이므로 await 사용
+        if hasattr(context, "emit"):
+            await context.emit("format-forecast-result", output)
         
         return output
 
