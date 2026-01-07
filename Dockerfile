@@ -15,26 +15,27 @@ ENV PORT=7860
 ENV PYTHON_MODULES_PATH=/app/python_modules
 ENV PATH="$PYTHON_MODULES_PATH/bin:$PATH"
 
-# 4. Copy dependency files (requirements.txt is now empty/minimal)
+# 4. Copy dependency files
 COPY package.json python-deps.txt ./
 
 # 5. Install Node.js dependencies
 RUN npm install
 
-# 6. Create placeholder for Motia to recognize Python environment
+# 6. MANUALLY create Python venv and install heavy packages (CACHED LAYER)
+# This is the 30-minute step - cached unless python-deps.txt changes
+RUN python -m venv $PYTHON_MODULES_PATH \
+    && . $PYTHON_MODULES_PATH/bin/activate \
+    && pip install --no-cache-dir -r python-deps.txt
+
+# 7. Create placeholder for Motia to recognize Python step
 RUN mkdir -p src && echo "def handler(event, context): pass" > src/placeholder.py
 
-# 7. Run Motia install to create venv structure
+# 8. Run Motia install (will reuse existing venv, just add core packages)
 RUN npx motia install
-
-# 8. HEAVY PACKAGES INSTALLATION (CACHED LAYER)
-# This is the 30-minute step - cached unless python-deps.txt changes
-RUN . $PYTHON_MODULES_PATH/bin/activate \
-    && pip install --no-cache-dir -r python-deps.txt
 
 # 9. Copy source code (only this layer changes on code edits)
 COPY . .
 
-# 10. Execution (NO second motia install - packages already installed)
+# 10. Execution
 EXPOSE 7860
 CMD ["npm", "start"]
