@@ -4,11 +4,12 @@ WORKDIR /app
 
 # 2. System Dependencies & Node.js
 RUN apt-get update && apt-get install -y \
-    build-essential curl \
+    build-essential curl git \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && ln -s /usr/local/bin/python /usr/local/bin/python3.13 \
     && rm -rf /var/lib/apt/lists/*
+
 
 # 3. Environments
 ENV PORT=7860
