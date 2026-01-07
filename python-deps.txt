@@ -1,7 +1,16 @@
+# PyTorch
 torch
-timesfm
+
+# TimesFM 최신 버전 (GitHub에서 직접 설치)
+timesfm @ git+https://github.com/google-research/timesfm.git
+
+# JAX (CPU)
 jax[cpu]
+
+# Data Processing
 numpy
 pandas
+
+# Utilities
 utilsforecast
 huggingface_hub
