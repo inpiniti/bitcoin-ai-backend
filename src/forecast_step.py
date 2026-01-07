@@ -36,11 +36,12 @@ config = {
     "emits": []
 }
 
-def handler(req, context):
+async def handler(req, context):
     """
     Bitcoin 가격 예측 API (내부용).
     POST /internal/forecast 로 호출하면 동기적으로 예측 결과 반환.
     """
+
     try:
         body = req.body if hasattr(req, 'body') else req
         data = body.get("data", [])
