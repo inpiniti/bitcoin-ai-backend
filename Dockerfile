@@ -1,11 +1,11 @@
-# Motia 공식 이미지 사용 (Python 3.13 사전 설치됨)
-# Python 3.11 사용 (TimesFM 호환성 위함)
+# 1. Base Image
 FROM python:3.11-slim
 
-# 작업 디렉토리 설정
+# 2. Workspace setup
 WORKDIR /app
 
-# 시스템 패키지 및 Node.js 설치
+# 3. System dependencies & Node.js installation
+# Motia가 내부적으로 python3.13 경로를 찾을 수 있으므로 심볼릭 링크 유지
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
@@ -14,30 +14,26 @@ RUN apt-get update && apt-get install -y \
     && ln -s /usr/local/bin/python /usr/local/bin/python3.13 \
     && rm -rf /var/lib/apt/lists/*
 
-# Motia Python 환경 경로 명시 (빌드 및 런타임 공유)
+# 4. Environment Variables
+ENV PORT=7860
 ENV PYTHON_MODULES_PATH=/app/python_modules
 
-# 패키지 파일 복사 및 설치 (Node.js)
-COPY package.json ./
+# 5. Dependency files copy (Caching Layer)
+COPY package.json requirements.txt ./
+
+# 6. Install Node.js dependencies
 RUN npm install
 
-# 패키지 파일 복사 및 설치 (Python) - 캐싱 효과 극대화
-# Motia가 나중에 인식할 수 있도록 미리 venv를 만들고 패키지를 설치해 둡니다.
-COPY requirements.txt ./
-RUN python -m venv $PYTHON_MODULES_PATH \
-    && . $PYTHON_MODULES_PATH/bin/activate \
-    && pip install --no-cache-dir -r requirements.txt
+# 7. Install Python dependencies via Motia (Heavy Layer)
+# 소스 코드가 복사되기 전에 실행하여, 소스 변경 시에도 이 레이어는 캐시를 활용함
+# npx motia@latest 대신 설치된 motia를 사용하기 위해 npx motia 사용
+RUN npx motia install
 
-# 소스 코드 복사 (이 단계 이후에는 캐싱이 깨질 수 있음)
+# 8. Copy Source Code
+# 이제 .ts나 .py 파일만 수정하는 경우, 위 단계들은 모두 캐시되어 건너뜁니다.
 COPY . .
 
-# Motia 설치 (소스 코드 인식 후 마무리 설정)
-# 이미 설치된 패키지는 건너뛰고 필요한 설정만 수행하므로 빠릅니다.
-RUN npx motia@latest install
-
-# Hugging Face Spaces 포트 설정
-ENV PORT=7860
+# 9. Port & Execution
 EXPOSE 7860
-
-# 앱 실행
 CMD ["npm", "start"]
+
