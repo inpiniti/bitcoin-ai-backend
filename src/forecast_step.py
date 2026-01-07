@@ -43,15 +43,34 @@ async def handler(req, context):
     """
 
     try:
-        body = req.body if hasattr(req, 'body') else req
-        data = body.get("data", [])
-        symbol = body.get("symbol", "BTC-USD")
-        last_date = body.get("lastDate")
+        # Motia Python API Step의 request 구조 파싱
+        # req가 dict일 수도 있고, object일 수도 있음
+        logging.info(f"[Forecast API] Received req type: {type(req)}")
+        
+        # 다양한 구조 처리
+        if isinstance(req, dict):
+            body = req.get("body", req)
+        elif hasattr(req, 'body'):
+            body = req.body
+        else:
+            body = req
+        
+        # body가 또 다른 레벨일 수 있음
+        if isinstance(body, dict) and "body" in body:
+            body = body["body"]
+            
+        logging.info(f"[Forecast API] Parsed body type: {type(body)}, keys: {body.keys() if isinstance(body, dict) else 'N/A'}")
+        
+        data = body.get("data", []) if isinstance(body, dict) else []
+        symbol = body.get("symbol", "BTC-USD") if isinstance(body, dict) else "BTC-USD"
+        last_date = body.get("lastDate") if isinstance(body, dict) else None
         
         if not data:
+            logging.error(f"[Forecast API] No data in body. Body content: {str(body)[:500]}")
             return {"status": 400, "body": {"error": "No data provided"}}
 
         logging.info(f"[Forecast API] Received {len(data)} points for {symbol}")
+
         
         input_data = np.array(data, dtype=np.float32)
         tfm = get_model()
