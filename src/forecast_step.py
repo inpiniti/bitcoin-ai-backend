@@ -1,7 +1,7 @@
 import logging
 import numpy as np
 import pandas as pd
-from timesfm import TimesFm, TimesFmHparams
+import timesfm
 
 # 전역 변수로 모델 캐싱
 tfm_model = None
@@ -9,22 +9,20 @@ tfm_model = None
 def get_model():
     global tfm_model
     if tfm_model is None:
-        logging.info("Loading TimesFM v2.0 model...")
-        hparams = TimesFmHparams(
-            context_len=512,
-            horizon_len=128,
-            input_patch_len=32,
-            output_patch_len=128,
-            num_layers=20,
-            model_dims=1280,
-            backend="cpu",
-        )
-        tfm_model = TimesFm(
-            hparams=hparams,
-            checkpoint="google/timesfm-1.0-200m",
-        )
-        logging.info("TimesFM model loaded successfully.")
+        logging.info("Loading TimesFM model via from_pretrained...")
+        try:
+            # TimesFM v1.3+ PyTorch 버전 사용 (Python 3.11)
+            tfm_model = timesfm.TimesFm.from_pretrained(
+                repo_id="google/timesfm-1.0-200m-pytorch",
+                context_len=512,
+                horizon_len=128,
+            )
+            logging.info("TimesFM model loaded successfully (PyTorch).")
+        except Exception as e:
+            logging.error(f"Failed to load TimesFM: {str(e)}")
+            raise
     return tfm_model
+
 
 # API 타입으로 변경 - 동기적 HTTP 호출 가능
 config = {
