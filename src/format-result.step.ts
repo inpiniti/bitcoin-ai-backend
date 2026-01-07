@@ -17,20 +17,25 @@ interface ForecastItem {
 }
 
 export const handler = async (input: any, { state, logger }: any) => {
-    const { jobId, symbol, lastDate, forecast, model, dataPoints } = input;
+    const { jobId, symbol, interval = "hour", lastDate, forecast, model, dataPoints } = input;
 
     try {
-        logger.info(`[Step4:Format] Formatting result for job ${jobId}`);
+        logger.info(`[Step4:Format] Formatting ${interval} result for job ${jobId}`);
+
+        // interval에 따른 설정
+        const intervalLabel = interval === "day" ? "일봉" : "시봉";
+        const maxPredictions = interval === "day" ? 30 : 24;
 
         // 결과 포맷팅
         const report = {
-            title: `${symbol} 가격 예측 보고서`,
+            title: `${symbol} ${intervalLabel} 가격 예측 보고서`,
             symbol,
+            interval,
             generatedAt: new Date().toISOString(),
             model,
             dataPoints,
-            predictionCount: forecast?.length || 0,
-            predictions: (forecast || []).slice(0, 24).map((item: ForecastItem, index: number) => ({
+            predictionCount: Math.min(forecast?.length || 0, maxPredictions),
+            predictions: (forecast || []).slice(0, maxPredictions).map((item: ForecastItem, index: number) => ({
                 step: index + 1,
                 date: item.ds,
                 price: Math.round(item.timesfm || item.y || 0),
@@ -40,6 +45,7 @@ export const handler = async (input: any, { state, logger }: any) => {
                 }).format(item.timesfm || item.y || 0)
             }))
         };
+
 
         // State에 완료된 결과 저장
         const job = await state.get('forecasts', jobId);

@@ -51,6 +51,7 @@ async def handler(event, context):
     """
     job_id = event.get("jobId")
     symbol = event.get("symbol", "BTC-USD")
+    interval = event.get("interval", "hour")  # "day" 또는 "hour"
     prices = event.get("prices", [])
     last_date = event.get("lastDate")
     
@@ -58,13 +59,14 @@ async def handler(event, context):
         if not prices:
             raise ValueError("No price data provided")
         
-        context.logger.info(f"[Step3:Forecast] Running AI prediction for {symbol} (Job: {job_id})")
+        context.logger.info(f"[Step3:Forecast] Running {interval} AI prediction for {symbol} (Job: {job_id})")
         
         input_data = np.array(prices, dtype=np.float32)
         tfm = get_model()
         
-        # TimesFM 2.5 예측
-        horizon = 24  # 24시간 예측
+        # interval에 따른 예측 설정
+        horizon = 30 if interval == "day" else 24  # 일봉: 30일, 시봉: 24시간
+        
         point_forecast, quantile_forecast = tfm.forecast(
             horizon=horizon,
             inputs=[input_data],
@@ -76,14 +78,18 @@ async def handler(event, context):
         from datetime import datetime, timedelta
         base_date = datetime.fromisoformat(last_date.replace('Z', '+00:00')) if last_date else datetime.now()
         
+        # interval에 따른 timedelta 단위
+        time_unit = timedelta(days=1) if interval == "day" else timedelta(hours=1)
+        
         result_list = []
         for i, val in enumerate(forecast_values):
-            forecast_date = base_date + timedelta(hours=i+1)
+            forecast_date = base_date + time_unit * (i + 1)
             result_list.append({
                 "ds": forecast_date.isoformat(),
                 "y": float(val),
                 "timesfm": float(val)
             })
+
         
         context.logger.info(f"[Step3:Forecast] Generated {len(result_list)} predictions for job {job_id}")
         
@@ -100,12 +106,14 @@ async def handler(event, context):
             "data": {
                 "jobId": job_id,
                 "symbol": symbol,
+                "interval": interval,
                 "lastDate": last_date,
                 "forecast": result_list,
                 "model": "TimesFM-2.5-200m",
                 "dataPoints": len(prices)
             }
         })
+
 
         
     except Exception as e:

@@ -27,14 +27,24 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
   try {
     const body = req.body || {};
     const symbol = body.symbol || "BTC-USD";
+    const interval = body.interval || "hour"; // "day" 또는 "hour"
     const jobId = uuidv4();
 
-    logger.info(`[Step1:API] Starting forecast job ${jobId} for ${symbol}`);
+    // interval 유효성 검사
+    if (!["day", "hour"].includes(interval)) {
+      return {
+        status: 400,
+        body: { error: 'interval must be "day" or "hour"' }
+      };
+    }
+
+    logger.info(`[Step1:API] Starting forecast job ${jobId} for ${symbol} (${interval})`);
 
     // State에 작업 시작 기록
     await state.set('forecasts', jobId, {
       jobId,
       symbol,
+      interval,
       status: 'pending',
       createdAt: new Date().toISOString(),
       result: null
@@ -43,8 +53,9 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
     // Step 2로 이벤트 발행 (비동기로 Flow 시작)
     await emit({
       topic: 'fetch-stock',
-      data: { jobId, symbol }
+      data: { jobId, symbol, interval }
     });
+
 
     logger.info(`[Step1:API] Flow started, polling for completion...`);
 

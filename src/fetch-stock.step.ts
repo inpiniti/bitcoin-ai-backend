@@ -11,15 +11,15 @@ export const config = {
 };
 
 export const handler = async (input: any, { emit, state, logger }: any) => {
-    const { jobId, symbol } = input;
+    const { jobId, symbol, interval = "hour" } = input;
 
     try {
-        logger.info(`[Step2:Fetch] Fetching data for ${symbol} (Job: ${jobId})`);
+        logger.info(`[Step2:Fetch] Fetching ${interval} data for ${symbol} (Job: ${jobId})`);
 
-        // Yahoo Finance API 호출
-        const interval = '1h';
-        const range = '60d';
-        const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
+        // interval에 따른 Yahoo Finance API 설정
+        const yahooInterval = interval === "day" ? "1d" : "1h";
+        const yahooRange = interval === "day" ? "2y" : "60d"; // 일봉: 2년, 시봉: 60일
+        const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${yahooInterval}&range=${yahooRange}`;
 
         const response = await fetch(yahooUrl, {
             headers: {
@@ -44,7 +44,7 @@ export const handler = async (input: any, { emit, state, logger }: any) => {
         const validPrices = closes.filter((p: any) => p !== null);
         const lastDate = new Date(timestamps[timestamps.length - 1] * 1000);
 
-        logger.info(`[Step2:Fetch] Retrieved ${validPrices.length} data points for ${symbol}`);
+        logger.info(`[Step2:Fetch] Retrieved ${validPrices.length} ${interval} data points for ${symbol}`);
 
         // State 업데이트
         const job = await state.get('forecasts', jobId);
@@ -60,11 +60,13 @@ export const handler = async (input: any, { emit, state, logger }: any) => {
             data: {
                 jobId,
                 symbol,
+                interval,
                 prices: validPrices,
                 lastDate: lastDate.toISOString(),
                 count: validPrices.length
             }
         });
+
 
         logger.info(`[Step2:Fetch] Data sent to forecast step for job ${jobId}`);
 

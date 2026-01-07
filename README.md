@@ -50,24 +50,39 @@ GET /v1/result/:jobId → State에서 결과 조회
 
 ### API 사용법
 
-#### 예측 요청 (Long Polling - 즉시 결과 반환!)
+#### 요청 파라미터
+| 파라미터 | 타입 | 기본값 | 설명 |
+|---------|------|--------|------|
+| `symbol` | string | "BTC-USD" | 예측할 종목 심볼 (Yahoo Finance 형식) |
+| `interval` | string | "hour" | 데이터 주기: `"day"` (일봉) 또는 `"hour"` (시봉) |
+
+#### 시봉 예측 (24시간)
 ```bash
 curl -X POST https://your-space.hf.space/v1/forecast \
   -H "Content-Type: application/json" \
-  -d '{"symbol": "BTC-USD"}'
+  -d '{"symbol": "BTC-USD", "interval": "hour"}'
+```
+
+#### 일봉 예측 (30일)
+```bash
+curl -X POST https://your-space.hf.space/v1/forecast \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "BTC-USD", "interval": "day"}'
 ```
 
 **응답 (최대 60초 대기 후 결과 반환):**
 ```json
 {
-  "title": "BTC-USD 가격 예측 보고서",
+  "title": "BTC-USD 시봉 가격 예측 보고서",
   "symbol": "BTC-USD",
+  "interval": "hour",
   "model": "TimesFM-2.5-200m",
   "predictionCount": 24,
   "predictions": [
     { "step": 1, "date": "2026-01-07T06:00:00Z", "price": 92500, "priceFormatted": "$92,500.00" }
   ]
 }
+
 ```
 
 #### 타임아웃 시 (60초 초과)
