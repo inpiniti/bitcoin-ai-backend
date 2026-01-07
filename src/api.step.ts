@@ -1,7 +1,18 @@
 /**
- * Bitcoin AI Backend API Step
- * 모든 로직을 동기적으로 직접 처리합니다.
+ * Bitcoin AI Backend - Main API Step
+ * 
+ * 이 Step은 외부 클라이언트의 예측 요청을 처리하는 유일한 진입점입니다.
+ * - POST /v1/forecast
+ * - Body: { symbol?: string } (기본값: "BTC-USD")
+ * 
+ * 내부적으로 모듈화된 함수들을 호출하여 처리합니다:
+ * 1. fetchStockData - Yahoo Finance 데이터 수집
+ * 2. Python AI API - TimesFM 예측
+ * 3. formatForecastReport - 결과 포맷팅
  */
+import { fetchStockData } from './lib/fetch-stock';
+import { formatForecastReport } from './lib/format-result';
+
 export const config = {
   name: "bitcoin-api",
   type: "api",
@@ -19,47 +30,18 @@ export const handler = async (req: any, { logger }: any) => {
     logger.info(`[API] Starting forecast for ${symbol}...`);
 
     // ========== 1. Yahoo Finance 데이터 수집 ==========
-    const interval = '1h';
-    const range = '60d';
-    const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
-
-    logger.info(`[API] Fetching Yahoo Finance data...`);
-    const yahooResponse = await fetch(yahooUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-
-    if (!yahooResponse.ok) {
-      throw new Error(`Yahoo API Error: ${yahooResponse.status}`);
-    }
-
-    const yahooData: any = await yahooResponse.json();
-    if (!yahooData.chart?.result?.[0]) {
-      throw new Error(`No data found for ${symbol}`);
-    }
-
-    const chartResult = yahooData.chart.result[0];
-    const timestamps = chartResult.timestamp;
-    const closes = chartResult.indicators.quote[0].close;
-
-    // null 값 필터링
-    const validPrices = closes.filter((p: any) => p !== null);
-    const lastDate = new Date(timestamps[timestamps.length - 1] * 1000);
-
-    logger.info(`[API] Fetched ${validPrices.length} data points.`);
+    const stockData = await fetchStockData(symbol, logger);
 
     // ========== 2. Python AI API 호출 ==========
-    logger.info(`[API] Calling Python AI API...`);
+    logger.info(`[API] Calling Python AI Step...`);
 
-    // 내부 API 호출 (같은 서버의 /internal/forecast)
     const forecastResponse = await fetch('http://localhost:7860/internal/forecast', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        symbol: symbol,
-        data: validPrices,
-        lastDate: lastDate.toISOString()
+        symbol: stockData.symbol,
+        data: stockData.prices,
+        lastDate: stockData.lastDate.toISOString()
       })
     });
 
@@ -72,24 +54,14 @@ export const handler = async (req: any, { logger }: any) => {
     logger.info(`[API] AI prediction completed: ${forecastData.predictionCount} predictions`);
 
     // ========== 3. 결과 포맷팅 ==========
-    const report = {
-      title: `${symbol} 가격 예측 보고서`,
-      generatedAt: new Date().toISOString(),
-      model: forecastData.model,
-      dataPoints: validPrices.length,
-      predictionCount: forecastData.predictionCount,
-      predictions: forecastData.forecast?.slice(0, 24).map((item: any, index: number) => ({
-        step: index + 1,
-        date: item.ds,
-        price: Math.round(item.timesfm || item.y || 0),
-        priceFormatted: new Intl.NumberFormat('en-US', {
-          style: 'currency',
-          currency: 'USD'
-        }).format(item.timesfm || item.y || 0)
-      })) || []
-    };
+    const report = formatForecastReport(
+      stockData.symbol,
+      forecastData.model,
+      stockData.count,
+      forecastData.forecast || []
+    );
 
-    logger.info(`[API] Report generated successfully.`);
+    logger.info(`[API] Report generated successfully for ${symbol}.`);
 
     return {
       status: 200,

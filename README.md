@@ -15,17 +15,56 @@ pinned: false
 
 Motia 프레임워크를 기반으로 Node.js와 Python 환경을 통합하여 AI 모델 추론과 API 서빙을 효율적으로 처리합니다.
 
+### 프로젝트 구조
+```
+src/
+├── api.step.ts          # 외부 API 엔드포인트 (POST /v1/forecast)
+├── forecast_step.py     # Python AI Step (내부 API)
+└── lib/
+    ├── fetch-stock.ts   # Yahoo Finance 데이터 수집 모듈
+    └── format-result.ts # 결과 포맷팅 모듈
+```
+
 ### 1. API Step (Node.js/TypeScript)
-- **목적**: 클라이언트 통신 및 전체 워크플로우 제어
-- **구성**:
-  - `src/api.step.ts`: 엔트리포인트. 요청을 받아 하위 스텝들을 호출하고 응답을 반환.
-  - `src/fetch-stock.step.ts`: Yahoo Finance API를 통해 실시간/과거 주가 데이터 수집.
-  - `src/format-result.step.ts`: 예측 결과를 UI에 적합한 형태로 가공.
+- **엔드포인트**: `POST /v1/forecast`
+- **역할**: 클라이언트 요청 처리, 데이터 수집, AI 예측 호출, 결과 포맷팅
+- **모듈화된 함수들**:
+  - `lib/fetch-stock.ts`: Yahoo Finance API 데이터 수집
+  - `lib/format-result.ts`: 예측 결과 포맷팅
 
 ### 2. AI Step (Python 3.11+)
-- **목적**: TimesFM (Time-series Foundation Model)을 이용한 고성능 시계열 예측
-- **구성**:
-  - `src/forecast_step.py`: Google TimesFM 모델 로드 및 추론 수행 (JAX/CPU 활용).
+- **엔드포인트**: `POST /internal/forecast` (내부 전용)
+- **역할**: TimesFM 2.5 모델을 이용한 시계열 예측
+- **구성**: `src/forecast_step.py`
+
+### API 사용법
+```bash
+# 기본 호출 (BTC-USD)
+curl -X POST https://your-space.hf.space/v1/forecast \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# 다른 심볼 지정
+curl -X POST https://your-space.hf.space/v1/forecast \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "ETH-USD"}'
+```
+
+### 응답 예시
+```json
+{
+  "title": "BTC-USD 가격 예측 보고서",
+  "symbol": "BTC-USD",
+  "generatedAt": "2026-01-07T05:00:00.000Z",
+  "model": "TimesFM-2.5-200m",
+  "dataPoints": 1401,
+  "predictionCount": 24,
+  "predictions": [
+    { "step": 1, "date": "2026-01-07T06:00:00Z", "price": 92500, "priceFormatted": "$92,500.00" }
+  ]
+}
+```
+
 
 ---
 
