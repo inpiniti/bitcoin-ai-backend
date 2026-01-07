@@ -1,7 +1,2 @@
-torch
-timesfm
-jax[cpu]
-numpy
-pandas
-utilsforecast
-huggingface_hub
+# Motia core dependencies only (lightweight)
+# Heavy packages are in python-deps.txt and pre-installed in Dockerfile
