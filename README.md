@@ -11,59 +11,95 @@ pinned: false
 
 이 프로젝트는 [Motia](https://motia.dev) 프레임워크를 사용하여 구축된 Bitcoin 분석 및 예측 백엔드 서버입니다. Hugging Face Spaces의 Docker SDK를 통해 배포됩니다.
 
-## 🏗 아키텍처 요약 (Polyglot)
+## 🏗 아키텍처 요약 (Event-Driven Flow)
 
-Motia 프레임워크를 기반으로 Node.js와 Python 환경을 통합하여 AI 모델 추론과 API 서빙을 효율적으로 처리합니다.
+Motia 프레임워크를 기반으로 **비동기 이벤트 기반 아키텍처**를 사용합니다.
 
 ### 프로젝트 구조
 ```
 src/
-├── api.step.ts          # 외부 API 엔드포인트 (POST /v1/forecast)
-├── forecast_step.py     # Python AI Step (내부 API)
-└── lib/
-    ├── fetch-stock.ts   # Yahoo Finance 데이터 수집 모듈
-    └── format-result.ts # 결과 포맷팅 모듈
+├── api.step.ts           # Step 1: API 엔드포인트 (POST /v1/forecast)
+├── fetch-stock.step.ts   # Step 2: Yahoo Finance 데이터 수집
+├── forecast_step.py      # Step 3: TimesFM AI 예측 (Python)
+├── format-result.step.ts # Step 4: 결과 포맷팅
+└── result.step.ts        # 결과 조회 API (GET /v1/result/:jobId)
 ```
 
-### 1. API Step (Node.js/TypeScript)
-- **엔드포인트**: `POST /v1/forecast`
-- **역할**: 클라이언트 요청 처리, 데이터 수집, AI 예측 호출, 결과 포맷팅
-- **모듈화된 함수들**:
-  - `lib/fetch-stock.ts`: Yahoo Finance API 데이터 수집
-  - `lib/format-result.ts`: 예측 결과 포맷팅
+### Flow 다이어그램
+```
+POST /v1/forecast
+       ↓
+┌──────────────────┐
+│ Step1: API       │ → jobId 생성, emit("fetch-stock")
+└────────┬─────────┘
+         ↓ (비동기)
+┌──────────────────┐
+│ Step2: Fetch     │ → Yahoo Finance 데이터 수집
+└────────┬─────────┘
+         ↓ emit("run-forecast")
+┌──────────────────┐
+│ Step3: Forecast  │ → TimesFM 2.5 AI 예측 (Python)
+└────────┬─────────┘
+         ↓ emit("format-result")  
+┌──────────────────┐
+│ Step4: Format    │ → 결과 포맷팅, State 저장
+└──────────────────┘
 
-### 2. AI Step (Python 3.11+)
-- **엔드포인트**: `POST /internal/forecast` (내부 전용)
-- **역할**: TimesFM 2.5 모델을 이용한 시계열 예측
-- **구성**: `src/forecast_step.py`
+GET /v1/result/:jobId → State에서 결과 조회
+```
 
 ### API 사용법
-```bash
-# 기본 호출 (BTC-USD)
-curl -X POST https://your-space.hf.space/v1/forecast \
-  -H "Content-Type: application/json" \
-  -d '{}'
 
-# 다른 심볼 지정
+#### 1. 예측 작업 시작
+```bash
 curl -X POST https://your-space.hf.space/v1/forecast \
   -H "Content-Type: application/json" \
-  -d '{"symbol": "ETH-USD"}'
+  -d '{"symbol": "BTC-USD"}'
 ```
 
-### 응답 예시
+**응답 (즉시 반환):**
+```json
+{
+  "jobId": "abc123-...",
+  "symbol": "BTC-USD",
+  "status": "pending",
+  "message": "예측 작업이 시작되었습니다.",
+  "resultUrl": "/v1/result/abc123-..."
+}
+```
+
+#### 2. 결과 조회 (폴링)
+```bash
+curl https://your-space.hf.space/v1/result/abc123-...
+```
+
+**진행 중 응답:**
+```json
+{
+  "jobId": "abc123-...",
+  "status": "forecasted",
+  "progress": 80,
+  "message": "작업이 진행 중입니다."
+}
+```
+
+**완료 응답:**
 ```json
 {
   "title": "BTC-USD 가격 예측 보고서",
   "symbol": "BTC-USD",
-  "generatedAt": "2026-01-07T05:00:00.000Z",
   "model": "TimesFM-2.5-200m",
-  "dataPoints": 1401,
   "predictionCount": 24,
   "predictions": [
     { "step": 1, "date": "2026-01-07T06:00:00Z", "price": 92500, "priceFormatted": "$92,500.00" }
   ]
 }
 ```
+
+### 데이터 정리 정책
+- **TTL**: 결과는 10분 후 자동 만료
+- **조회 후 삭제**: 완료된 결과는 조회 시 자동 삭제
+
 
 
 ---

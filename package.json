@@ -8,6 +8,7 @@
     "start": "motia start --port 7860"
   },
   "dependencies": {
-    "motia": "latest"
+    "motia": "latest",
+    "uuid": "^9.0.0"
   }
 }

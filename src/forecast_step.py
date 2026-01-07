@@ -1,7 +1,10 @@
+"""
+Step 3: TimesFM AI 예측
+Event Step - 'run-forecast' 이벤트 구독
+"""
 import logging
 import torch
 import numpy as np
-import pandas as pd
 import timesfm
 
 # 전역 변수로 모델 캐싱
@@ -15,7 +18,6 @@ def get_model():
     if tfm_model is None:
         logging.info("Loading TimesFM 2.5 model...")
         try:
-            # TimesFM 2.5 PyTorch 버전
             tfm_model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
                 "google/timesfm-2.5-200m-pytorch"
             )
@@ -33,69 +35,44 @@ def get_model():
     return tfm_model
 
 
-
-# API 타입으로 변경 - 동기적 HTTP 호출 가능
+# Event Step Configuration
 config = {
-    "name": "bitcoin-forecast-api",
-    "type": "api",
-    "path": "/internal/forecast",
-    "method": "POST",
-    "flows": ["bitcoin-forecast-flow"],
-    "emits": []
+    "name": "run-forecast",
+    "type": "event",
+    "subscribes": ["run-forecast"],
+    "emits": ["format-result"],
+    "flows": ["bitcoin-forecast-flow"]
 }
 
-async def handler(req, context):
-    """
-    Bitcoin 가격 예측 API (내부용).
-    POST /internal/forecast 로 호출하면 동기적으로 예측 결과 반환.
-    """
 
+async def handler(event, context):
+    """
+    TimesFM AI 예측 수행.
+    """
+    job_id = event.get("jobId")
+    symbol = event.get("symbol", "BTC-USD")
+    prices = event.get("prices", [])
+    last_date = event.get("lastDate")
+    
     try:
-        # Motia Python API Step의 request 구조 파싱
-        # req가 dict일 수도 있고, object일 수도 있음
-        logging.info(f"[Forecast API] Received req type: {type(req)}")
+        if not prices:
+            raise ValueError("No price data provided")
         
-        # 다양한 구조 처리
-        if isinstance(req, dict):
-            body = req.get("body", req)
-        elif hasattr(req, 'body'):
-            body = req.body
-        else:
-            body = req
+        context.logger.info(f"[Step3:Forecast] Running AI prediction for {symbol} (Job: {job_id})")
         
-        # body가 또 다른 레벨일 수 있음
-        if isinstance(body, dict) and "body" in body:
-            body = body["body"]
-            
-        logging.info(f"[Forecast API] Parsed body type: {type(body)}, keys: {body.keys() if isinstance(body, dict) else 'N/A'}")
-        
-        data = body.get("data", []) if isinstance(body, dict) else []
-        symbol = body.get("symbol", "BTC-USD") if isinstance(body, dict) else "BTC-USD"
-        last_date = body.get("lastDate") if isinstance(body, dict) else None
-        
-        if not data:
-            logging.error(f"[Forecast API] No data in body. Body content: {str(body)[:500]}")
-            return {"status": 400, "body": {"error": "No data provided"}}
-
-        logging.info(f"[Forecast API] Received {len(data)} points for {symbol}")
-
-        
-        input_data = np.array(data, dtype=np.float32)
+        input_data = np.array(prices, dtype=np.float32)
         tfm = get_model()
         
-        logging.info("[Forecast API] Running TimesFM 2.5 inference...")
-        
-        # TimesFM 2.5 API: model.forecast(horizon, inputs=[...])
+        # TimesFM 2.5 예측
         horizon = 24  # 24시간 예측
         point_forecast, quantile_forecast = tfm.forecast(
             horizon=horizon,
-            inputs=[input_data],  # 리스트로 감싸서 전달
+            inputs=[input_data],
         )
         
-        # 결과 변환: numpy array -> list of dicts
-        forecast_values = point_forecast[0].tolist()  # 첫 번째 입력에 대한 예측
+        forecast_values = point_forecast[0].tolist()
         
-        # 마지막 날짜 기준으로 예측 날짜 생성
+        # 결과 변환
         from datetime import datetime, timedelta
         base_date = datetime.fromisoformat(last_date.replace('Z', '+00:00')) if last_date else datetime.now()
         
@@ -108,24 +85,31 @@ async def handler(req, context):
                 "timesfm": float(val)
             })
         
-        logging.info(f"[Forecast API] Completed. Generated {len(result_list)} predictions.")
+        context.logger.info(f"[Step3:Forecast] Generated {len(result_list)} predictions for job {job_id}")
         
-        return {
-            "status": 200,
-            "body": {
-                "status": "success",
-                "model": "TimesFM-2.5-200m",
-                "symbol": symbol,
-                "lastDate": last_date,
-                "forecast": result_list,
-                "predictionCount": len(result_list)
-            }
-        }
-
-
+        # State 업데이트
+        job = await context.state.get("forecasts", job_id)
+        if job:
+            job["status"] = "forecasted"
+            job["predictionCount"] = len(result_list)
+            await context.state.set("forecasts", job_id, job)
+        
+        # Step 4로 이벤트 발행
+        await context.emit("format-result", {
+            "jobId": job_id,
+            "symbol": symbol,
+            "lastDate": last_date,
+            "forecast": result_list,
+            "model": "TimesFM-2.5-200m",
+            "dataPoints": len(prices)
+        })
+        
     except Exception as e:
-        logging.error(f"[Forecast API] Error: {str(e)}")
-        return {
-            "status": 500,
-            "body": {"error": str(e)}
-        }
+        context.logger.error(f"[Step3:Forecast] Error for job {job_id}: {str(e)}")
+        
+        # 에러 상태로 업데이트
+        job = await context.state.get("forecasts", job_id)
+        if job:
+            job["status"] = "error"
+            job["error"] = str(e)
+            await context.state.set("forecasts", job_id, job)
