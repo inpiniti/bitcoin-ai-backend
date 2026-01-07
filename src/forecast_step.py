@@ -1,4 +1,5 @@
 import logging
+import torch
 import numpy as np
 import pandas as pd
 import timesfm
@@ -6,22 +7,31 @@ import timesfm
 # 전역 변수로 모델 캐싱
 tfm_model = None
 
+# GPU 사용 설정
+torch.set_float32_matmul_precision("high")
+
 def get_model():
     global tfm_model
     if tfm_model is None:
-        logging.info("Loading TimesFM model via from_pretrained...")
+        logging.info("Loading TimesFM 2.5 model...")
         try:
-            # TimesFM v1.3+ PyTorch 버전 사용 (Python 3.11)
-            tfm_model = timesfm.TimesFm.from_pretrained(
-                repo_id="google/timesfm-1.0-200m-pytorch",
-                context_len=512,
-                horizon_len=128,
+            # TimesFM 2.5 PyTorch 버전
+            tfm_model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
+                "google/timesfm-2.5-200m-pytorch"
             )
-            logging.info("TimesFM model loaded successfully (PyTorch).")
+            tfm_model.compile(
+                timesfm.ForecastConfig(
+                    max_context=1024,
+                    max_horizon=128,
+                    normalize_inputs=True,
+                )
+            )
+            logging.info("TimesFM 2.5 model loaded successfully.")
         except Exception as e:
             logging.error(f"Failed to load TimesFM: {str(e)}")
             raise
     return tfm_model
+
 
 
 # API 타입으로 변경 - 동기적 HTTP 호출 가능
@@ -73,23 +83,30 @@ async def handler(req, context):
         input_data = np.array(data, dtype=np.float32)
         tfm = get_model()
         
-        df = pd.DataFrame({
-            "unique_id": [symbol] * len(input_data),
-            "ds": pd.date_range(start="2024-01-01", periods=len(input_data), freq="H"),
-            "y": input_data
-        })
+        logging.info("[Forecast API] Running TimesFM 2.5 inference...")
         
-        logging.info("[Forecast API] Running TimesFM inference...")
-        forecast_df = tfm.forecast_on_df(
-            inputs=df,
-            freq="H",
-            value_name="y",
+        # TimesFM 2.5 API: model.forecast(horizon, inputs=[...])
+        horizon = 24  # 24시간 예측
+        point_forecast, quantile_forecast = tfm.forecast(
+            horizon=horizon,
+            inputs=[input_data],  # 리스트로 감싸서 전달
         )
         
-        result_list = forecast_df.to_dict(orient="records")
-        for item in result_list:
-            if isinstance(item.get("ds"), pd.Timestamp):
-                item["ds"] = item["ds"].isoformat()
+        # 결과 변환: numpy array -> list of dicts
+        forecast_values = point_forecast[0].tolist()  # 첫 번째 입력에 대한 예측
+        
+        # 마지막 날짜 기준으로 예측 날짜 생성
+        from datetime import datetime, timedelta
+        base_date = datetime.fromisoformat(last_date.replace('Z', '+00:00')) if last_date else datetime.now()
+        
+        result_list = []
+        for i, val in enumerate(forecast_values):
+            forecast_date = base_date + timedelta(hours=i+1)
+            result_list.append({
+                "ds": forecast_date.isoformat(),
+                "y": float(val),
+                "timesfm": float(val)
+            })
         
         logging.info(f"[Forecast API] Completed. Generated {len(result_list)} predictions.")
         
@@ -97,13 +114,14 @@ async def handler(req, context):
             "status": 200,
             "body": {
                 "status": "success",
-                "model": "TimesFM-1.0-200m",
+                "model": "TimesFM-2.5-200m",
                 "symbol": symbol,
                 "lastDate": last_date,
                 "forecast": result_list,
                 "predictionCount": len(result_list)
             }
         }
+
 
     except Exception as e:
         logging.error(f"[Forecast API] Error: {str(e)}")
