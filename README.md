@@ -50,40 +50,14 @@ GET /v1/result/:jobId → State에서 결과 조회
 
 ### API 사용법
 
-#### 1. 예측 작업 시작
+#### 예측 요청 (Long Polling - 즉시 결과 반환!)
 ```bash
 curl -X POST https://your-space.hf.space/v1/forecast \
   -H "Content-Type: application/json" \
   -d '{"symbol": "BTC-USD"}'
 ```
 
-**응답 (즉시 반환):**
-```json
-{
-  "jobId": "abc123-...",
-  "symbol": "BTC-USD",
-  "status": "pending",
-  "message": "예측 작업이 시작되었습니다.",
-  "resultUrl": "/v1/result/abc123-..."
-}
-```
-
-#### 2. 결과 조회 (폴링)
-```bash
-curl https://your-space.hf.space/v1/result/abc123-...
-```
-
-**진행 중 응답:**
-```json
-{
-  "jobId": "abc123-...",
-  "status": "forecasted",
-  "progress": 80,
-  "message": "작업이 진행 중입니다."
-}
-```
-
-**완료 응답:**
+**응답 (최대 60초 대기 후 결과 반환):**
 ```json
 {
   "title": "BTC-USD 가격 예측 보고서",
@@ -93,6 +67,20 @@ curl https://your-space.hf.space/v1/result/abc123-...
   "predictions": [
     { "step": 1, "date": "2026-01-07T06:00:00Z", "price": 92500, "priceFormatted": "$92,500.00" }
   ]
+}
+```
+
+#### 타임아웃 시 (60초 초과)
+```json
+{
+  "jobId": "abc123-...",
+  "status": "processing",
+  "message": "작업이 아직 진행 중입니다.",
+  "resultUrl": "/v1/result/abc123-..."
+}
+```
+이 경우 `/v1/result/{jobId}`로 별도 조회가 필요합니다.
+
 }
 ```
 
