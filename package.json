@@ -8,7 +8,6 @@
     "start": "motia start --port 7860"
   },
   "dependencies": {
-    "motia": "latest",
-    "yahoo-finance2": "^3.11.2"
+    "motia": "latest"
   }
 }
