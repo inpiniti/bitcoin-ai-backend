@@ -11,36 +11,36 @@ export const config = {
   flows: ['bitcoin-forecast-flow']
 };
 
-export const handler = async (req: any, { emit }: any) => {
+export const handler = async (req: any, { emit, logger }: any) => {
   try {
     const body = req.body || {};
     const symbol = body.symbol || "BTC-USD";
 
-    // 1. 야후 파이낸스 데이터 수집 (Event Emission)
-    console.log("Step 1: Emitting 'fetch-stock-data'...");
+    logger.info(`Step 1: Starting forecast workflow for ${symbol}...`);
 
-    // emit은 비동기 이벤트이므로 결과를 직접 반환받지 못할 수 있습니다.
-    // 현재 구조에서는 Event-driven으로 동작하므로, 
-    // 결과를 받아오려면 RPC 패턴이나 별도 구현이 필요합니다.
-    // 우선 flow가 동작하는지 확인하기 위해 emit을 사용합니다.
+    // Motia에서 emit은 설정에 따라 결과를 반환할 수 있는 동기적(RPC-like) 호출로 동작 가능합니다.
+    // 전체 flow(fetch -> forecast -> format)가 완료될 때까지 기다려 결과를 가져옵니다.
     const result = await emit({
       topic: "fetch-stock-data",
       data: { symbol }
     });
 
-    // 만약 emit이 결과를 반환한다면 result를 사용할 수 있음.
-    // 그렇지 않다면, 이 구조는 비동기 처리(202 Accepted)로 변경되어야 함.
+    logger.info("Workflow completed successfully.");
 
+    // 최종적으로 format-result.step.ts에서 가공된 데이터가 result에 담겨 반환됩니다.
     return {
       status: 200,
-      body: {
-        success: true,
-        message: "Forecast requested. Check logs for progress.",
-      }
+      body: result
     };
   } catch (error: any) {
     console.error("Workflow Error:", error);
-    // 프레임워크가 에러를 처리하도록 throw
-    throw error;
+    return {
+      status: 500,
+      body: {
+        success: false,
+        error: error.message || "Internal Server Error"
+      }
+    };
   }
 };
+
