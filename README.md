@@ -99,6 +99,33 @@ curl -X POST https://your-space.hf.space/v1/forecast \
 }
 ```
 
+### 고래 수급 추적 API (Whale Tracking)
+세력의 매집 단가(VWAP)와 자금 이탈 징후(OBV Divergence)를 분석합니다.
+
+#### 요청
+```bash
+curl -X POST https://your-space.hf.space/v1/whale \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "BTC-USD", "interval": "day"}'
+```
+
+#### 응답 예시
+```json
+{
+  "title": "BTC-USD 고래 수급 분석 리포트",
+  "symbol": "BTC-USD",
+  "sentiment": "bullish",
+  "currentPrice": 92500,
+  "estimatedWhalePrice": 94000,
+  "summary": "🐋 세력 추정 평단가($94,000)보다 저렴합니다.\n🔥 [강력 매수 신호] 가격은 하락 중이나 자금(OBV)은 유입되고 있습니다.",
+  "details": {
+    "vwapDiffPercent": -1.5,
+    "mfi": 45,
+    "volumeSpike": false
+  }
+}
+```
+
 ### 데이터 정리 정책
 - **TTL**: 결과는 10분 후 자동 만료
 - **조회 후 삭제**: 완료된 결과는 조회 시 자동 삭제
