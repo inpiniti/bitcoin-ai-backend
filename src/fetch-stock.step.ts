@@ -17,9 +17,26 @@ export const handler = async (input: any, { emit, state, logger }: any) => {
         logger.info(`[Step2:Fetch] Fetching ${interval} data for ${symbol} (Job: ${jobId})`);
 
         // interval에 따른 Yahoo Finance API 설정
-        const yahooInterval = interval === "day" ? "1d" : "1h";
-        const yahooRange = interval === "day" ? "2y" : "60d"; // 일봉: 2년, 시봉: 60일
-        const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${yahooInterval}&range=${yahooRange}`;
+        let yahooInterval = "1h";
+        let yahooRange = "30d";
+        let includePrePost = false;
+
+        if (interval === "day") {
+            yahooInterval = "1d";
+            yahooRange = "2y";
+            includePrePost = false;
+        } else if (interval === "minute") {
+            yahooInterval = "1m";
+            yahooRange = "1d"; // 1분봉 최대 1일
+            includePrePost = true;
+        } else {
+            // default to hour
+            yahooInterval = "1h";
+            yahooRange = "30d";
+            includePrePost = true;
+        }
+
+        const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${yahooInterval}&range=${yahooRange}&includePrePost=${includePrePost}`;
 
         const response = await fetch(yahooUrl, {
             headers: {
