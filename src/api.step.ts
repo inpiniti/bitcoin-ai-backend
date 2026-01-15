@@ -31,10 +31,10 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
     const jobId = uuidv4();
 
     // interval 유효성 검사
-    if (!["day", "hour"].includes(interval)) {
+    if (!["day", "hour", "minute"].includes(interval)) {
       return {
         status: 400,
-        body: { error: 'interval must be "day" or "hour"' }
+        body: { error: 'interval must be "day", "hour", or "minute"' }
       };
     }
 
