@@ -18,7 +18,7 @@ export const handler = async (input: any, { emit, state, logger }: any) => {
 
         // interval에 따른 Yahoo Finance API 설정
         let yahooInterval = "1h";
-        let yahooRange = "30d";
+        let yahooRange = "60d";
         let includePrePost = false;
 
         if (interval === "day") {
@@ -27,12 +27,12 @@ export const handler = async (input: any, { emit, state, logger }: any) => {
             includePrePost = false;
         } else if (interval === "minute") {
             yahooInterval = "1m";
-            yahooRange = "1d"; // 1분봉 최대 1일
+            yahooRange = "7d"; // 1분봉 최대 7일
             includePrePost = true;
         } else {
             // default to hour
             yahooInterval = "1h";
-            yahooRange = "30d";
+            yahooRange = "60d";
             includePrePost = true;
         }
 
