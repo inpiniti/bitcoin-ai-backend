@@ -3,10 +3,11 @@ import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 
+
 export const config = {
-    name: "analyze-market-cap",
-    type: "event", // event 타입
-    subscribes: ["analyze-market-cap"],
+    name: "analyze-market-cap-ts", // 구분을 위해 이름도 살짝 변경
+    type: "event",
+    subscribes: ["run-market-cap-analysis"],
     emits: ["format-market-cap"],
     flows: ["market-cap-inference-flow"]
 };

@@ -1,10 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 
+
 export const config = {
     name: "fetch-market-data",
     type: "event",
     subscribes: ["fetch-market-data"],
-    emits: ["analyze-market-cap"],
+    emits: ["run-market-cap-analysis"],
     flows: ["market-cap-inference-flow"]
 };
 
@@ -48,7 +49,7 @@ export const handler = async (event: any, { emit, logger }: any) => {
         logger.info(`[Fetch] Optimizing payload: Sending ${optimizedData.length} items to analysis step.`);
 
         await emit({
-            topic: 'analyze-market-cap',
+            topic: 'run-market-cap-analysis',
             data: {
                 jobId,
                 ticker,
