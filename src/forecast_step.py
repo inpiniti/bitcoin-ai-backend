@@ -1,20 +1,34 @@
+
 """
 Step 3: TimesFM AI 예측
 Event Step - 'run-forecast' 이벤트 구독
 """
 import logging
-import torch
-import numpy as np
-import timesfm
+import asyncio
 
 # 전역 변수로 모델 캐싱
 tfm_model = None
+torch = None
+np = None
+timesfm = None
 
-# GPU 사용 설정
-torch.set_float32_matmul_precision("high")
+def get_dependencies():
+    global torch, np, timesfm
+    if torch is None:
+        import torch as _torch
+        import numpy as _np
+        import timesfm as _timesfm
+        torch = _torch
+        np = _np
+        timesfm = _timesfm
+        # GPU 사용 설정
+        torch.set_float32_matmul_precision("high")
+    return torch, np, timesfm
 
 def get_model():
     global tfm_model
+    torch, _, timesfm = get_dependencies()
+    
     if tfm_model is None:
         logging.info("Loading TimesFM 2.5 model...")
         try:
@@ -33,7 +47,6 @@ def get_model():
             logging.error(f"Failed to load TimesFM: {str(e)}")
             raise
     return tfm_model
-
 
 # Event Step Configuration
 config = {
@@ -56,6 +69,9 @@ async def handler(event, context):
     last_date = event.get("lastDate")
     
     try:
+        # Load dependencies lazily
+        get_dependencies()
+        
         if not prices:
             raise ValueError("No price data provided")
         
@@ -71,6 +87,7 @@ async def handler(event, context):
             horizon=horizon,
             inputs=[input_data],
         )
+
         
         forecast_values = point_forecast[0].tolist()
         
