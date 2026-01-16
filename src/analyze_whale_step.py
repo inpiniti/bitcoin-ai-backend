@@ -1,9 +1,19 @@
+
 """
 Step 3: Whale & Supply Analysis (Python)
 Event Step - 'analyze-whale' 이벤트 구독
 """
 import logging
-import numpy as np
+
+# 전역 변수
+np = None
+
+def get_numpy():
+    global np
+    if np is None:
+        import numpy as _np
+        np = _np
+    return np
 
 # Event Step Configuration
 config = {
@@ -18,6 +28,9 @@ async def handler(event, context):
     """
     거래량 기반 고래 매집 및 수급 이탈 분석
     """
+    # Load Numpy Lazily
+    np = get_numpy()
+    
     job_id = event.get("jobId")
     symbol = event.get("symbol")
     market_data = event.get("marketData", [])
@@ -130,9 +143,14 @@ async def handler(event, context):
         
     except Exception as e:
         context.logger.error(f"[Step3:Whale] Error: {str(e)}")
+        import traceback
+        context.logger.error(traceback.format_exc())
+        
         # 에러 처리
-        job = await context.state.get("whale_jobs", job_id)
-        if job:
-            job["status"] = "error"
-            job["error"] = str(e)
-            await context.state.set("whale_jobs", job_id, job)
+        if job_id:
+             job = await context.state.get("whale_jobs", job_id)
+             if job:
+                 job["status"] = "error"
+                 job["error"] = str(e)
+                 await context.state.set("whale_jobs", job_id, job)
+
