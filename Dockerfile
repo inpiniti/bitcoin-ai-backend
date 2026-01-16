@@ -28,14 +28,11 @@ RUN python -m venv $PYTHON_MODULES_PATH \
     && . $PYTHON_MODULES_PATH/bin/activate \
     && pip install --no-cache-dir -r python-deps.txt
 
-# 7. Create placeholder for Motia to recognize Python step
-RUN mkdir -p src && echo "def handler(event, context): pass" > src/placeholder.py
-
-# 8. Run Motia install (will reuse existing venv, just add core packages)
-RUN npx motia install
-
-# 9. Copy source code (only this layer changes on code edits)
+# 7. Copy source code (Moved up so Motia can detect steps)
 COPY . .
+
+# 8. Run Motia install
+RUN npx motia install
 
 # 10. Execution
 EXPOSE 7860
