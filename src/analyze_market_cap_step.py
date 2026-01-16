@@ -1,4 +1,7 @@
 
+# === DEPLOYMENT MARKER: v2026-01-16-1445 (RENAMED) ===
+print("[ANALYZE_MARKET_CAP_STEP] === FILE LOADED (RENAMED) v2026-01-16-1445 ===")
+
 import os
 import sys
 import time
