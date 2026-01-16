@@ -5,9 +5,20 @@ import os
 import logging
 from datetime import datetime, timedelta
 
+
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("run_market_cap")
+
+# [DEBUG] 환경 정보 출력
+logger.info(f"Python Executable: {sys.executable}")
+logger.info(f"Python Path: {sys.path}")
+logger.info(f"Current Working Directory: {os.getcwd()}")
+try:
+    import site
+    logger.info(f"Site Packages: {site.getsitepackages()}")
+except:
+    pass
 
 # 전역 변수 (Lazy Load)
 np = None
