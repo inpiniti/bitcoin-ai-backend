@@ -1,7 +1,8 @@
 export const config = {
     name: "format-market-cap",
     type: "event",
-    subscribes: ["format-market-cap"]
+    subscribes: ["format-market-cap"],
+    flows: ["market-cap-inference-flow"]
 };
 
 export const handler = async (event: any, { state, logger }: any) => {

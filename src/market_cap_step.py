@@ -24,15 +24,65 @@ config = {
     "flows": ["market-cap-inference-flow"]
 }
 
-# Cache Configuration
+# ============================================
+# Memory Cache (프로세스 수명 동안 유지)
+# ============================================
+_memory_cache = {
+    "model": None,
+    "scaler": None,
+    "feature_cols": None,
+    "cached_at": None
+}
+
+MEMORY_TTL_HOURS = 6  # 메모리 캐시는 6시간 유지
+
+def get_memory_cache():
+    """메모리에서 캐시된 모델을 반환. TTL 체크 포함."""
+    global _memory_cache
+    
+    if _memory_cache["model"] is None:
+        return None
+    
+    # TTL 체크
+    if _memory_cache["cached_at"]:
+        age = datetime.now() - _memory_cache["cached_at"]
+        if age > timedelta(hours=MEMORY_TTL_HOURS):
+            logger.info(f"[Cache] Memory cache expired (Age: {age})")
+            clear_memory_cache()
+            return None
+    
+    return _memory_cache
+
+def set_memory_cache(model, scaler, feature_cols):
+    """모델을 메모리에 캐싱."""
+    global _memory_cache
+    _memory_cache["model"] = model
+    _memory_cache["scaler"] = scaler
+    _memory_cache["feature_cols"] = feature_cols
+    _memory_cache["cached_at"] = datetime.now()
+    logger.info("[Cache] Model cached in memory")
+
+def clear_memory_cache():
+    """메모리 캐시 클리어."""
+    global _memory_cache
+    _memory_cache = {
+        "model": None,
+        "scaler": None,
+        "feature_cols": None,
+        "cached_at": None
+    }
+
+# ============================================
+# File Cache (영구 저장, 선택적)
+# ============================================
 MODEL_DIR = "models/market_cap"
 os.makedirs(MODEL_DIR, exist_ok=True)
 MODEL_PATH = os.path.join(MODEL_DIR, "market_cap_model.keras")
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
 FEATURES_PATH = os.path.join(MODEL_DIR, "features.json")
-MODEL_TTL_HOURS = 24
+FILE_TTL_HOURS = 24
 
-def get_model_age():
+def get_file_cache_age():
     if not os.path.exists(MODEL_PATH):
         return None
     file_time = os.path.getmtime(MODEL_PATH)
@@ -73,23 +123,40 @@ def handler(event, context):
 
         logger.info(f"Target found: {target_name}, MarketCap: {actual_market_cap}")
 
-        # --- 2. Cache Logic ---
-        age = get_model_age()
+        # --- 2. Cache Logic (메모리 우선 → 파일 → 새 학습) ---
         should_train = True
+        model = None
+        scaler = None
+        feature_cols = None
         
-        if age and age < timedelta(hours=MODEL_TTL_HOURS):
-            try:
-                logger.info(f"Loading cached model (Age: {age})...")
-                model = tf.keras.models.load_model(MODEL_PATH)
-                scaler = joblib.load(SCALER_PATH)
-                with open(FEATURES_PATH, 'r') as f:
-                    feature_cols = json.load(f)
-                should_train = False
-            except Exception as e:
-                logger.warning(f"Failed to load cache: {e}. Will retrain.")
-
+        # Step 2-1: 메모리 캐시 확인 (가장 빠름)
+        mem_cache = get_memory_cache()
+        if mem_cache:
+            logger.info("[Cache] Using memory-cached model ⚡")
+            model = mem_cache["model"]
+            scaler = mem_cache["scaler"]
+            feature_cols = mem_cache["feature_cols"]
+            should_train = False
+        
+        # Step 2-2: 파일 캐시 확인 (메모리 캐시 없을 때)
         if should_train:
-            logger.info("Training new model...")
+            file_age = get_file_cache_age()
+            if file_age and file_age < timedelta(hours=FILE_TTL_HOURS):
+                try:
+                    logger.info(f"[Cache] Loading file cache (Age: {file_age})...")
+                    model = tf.keras.models.load_model(MODEL_PATH)
+                    scaler = joblib.load(SCALER_PATH)
+                    with open(FEATURES_PATH, 'r') as f:
+                        feature_cols = json.load(f)
+                    should_train = False
+                    # 파일에서 로드한 모델을 메모리에도 캐싱
+                    set_memory_cache(model, scaler, feature_cols)
+                except Exception as e:
+                    logger.warning(f"[Cache] Failed to load file cache: {e}")
+
+        # Step 2-3: 새로 학습 (캐시 없을 때)
+        if should_train:
+            logger.info("[Train] Training new model... (첫 호출 또는 캐시 만료)")
             # Drop metadata/text columns for X
             exclude_cols = ['name', 'description', 'logoid', 'error', target_col]
             
@@ -120,18 +187,24 @@ def handler(event, context):
             ])
             model.compile(optimizer='adam', loss='mse')
             
-            logger.info(f"Training on {len(X)} samples...")
+            logger.info(f"[Train] Training on {len(X)} samples...")
             history = model.fit(X_scaled, y, epochs=20, batch_size=32, verbose=0, validation_split=0.1)
             final_loss = history.history['loss'][-1]
             
-            # Save Cache
-            model.save(MODEL_PATH)
-            joblib.dump(scaler, SCALER_PATH)
-            with open(FEATURES_PATH, 'w') as f:
-                json.dump(feature_cols, f)
-            logger.info("Model and scaler cached.")
+            # 메모리 캐시에 저장 (가장 중요!)
+            set_memory_cache(model, scaler, feature_cols)
+            
+            # 파일 캐시에도 저장 (선택적, 실패해도 OK)
+            try:
+                model.save(MODEL_PATH)
+                joblib.dump(scaler, SCALER_PATH)
+                with open(FEATURES_PATH, 'w') as f:
+                    json.dump(feature_cols, f)
+                logger.info("[Cache] Model saved to file (backup)")
+            except Exception as e:
+                logger.warning(f"[Cache] File save failed (OK): {e}")
         else:
-            final_loss = 0 # Not calculated during inference-only
+            final_loss = 0  # 캐시 사용 시 loss 계산 안함
 
         # --- 3. Inference ---
         # Prepare target row with same features as the model expects
@@ -172,7 +245,8 @@ def handler(event, context):
             "diff_value": inferred_market_cap - actual_market_cap,
             "diff_percent": ((inferred_market_cap - actual_market_cap) / actual_market_cap) * 100,
             "model_loss": float(final_loss),
-            "cached": not should_train
+            "cached": not should_train,
+            "cache_source": "memory" if (mem_cache and not should_train) else ("file" if not should_train else "trained")
         }
         
         context['emit']({

@@ -3,7 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 export const config = {
     name: "fetch-market-data",
     type: "event",
-    subscribes: ["fetch-market-data"]
+    subscribes: ["fetch-market-data"],
+    emits: ["analyze-market-cap"],
+    flows: ["market-cap-inference-flow"]
 };
 
 // US Country ID and PageSize defaults from user code
