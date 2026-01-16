@@ -42,8 +42,9 @@ export const handler = async (event: any, { emit, logger }: any) => {
             throw new Error(`Target ticker ${ticker} not found in fetched data.`);
         }
 
-        // Optimize payload size: Only use top 100 items + target item
-        let optimizedData = rawData.slice(0, 100);
+        // Optimize payload size: Use top 3000 items for better training accuracy
+        // Since we utilize file system for IPC, we can handle larger payloads.
+        let optimizedData = rawData.slice(0, 3000);
         if (!optimizedData.find((item: any) => item.name === targetItem.name)) {
             optimizedData.push(targetItem);
         }
