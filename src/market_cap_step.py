@@ -117,7 +117,7 @@ def get_file_cache_age():
     file_time = os.path.getmtime(MODEL_PATH)
     return datetime.now() - datetime.fromtimestamp(file_time)
 
-def handler(event, context):
+async def handler(event, context):
     # TensorFlow lazy load (handler 호출 시에만 로드)
     global tf
     tf = get_tensorflow()
@@ -293,7 +293,7 @@ def handler(event, context):
             "cache_source": "memory" if (mem_cache and not should_train) else ("file" if not should_train else "trained")
         }
         
-        context['emit']({
+        await context.emit({
             "topic": "format-market-cap",
             "data": {
                 "jobId": job_id,
@@ -312,8 +312,8 @@ def handler(event, context):
         # State를 error로 업데이트하여 API가 에러 응답을 받을 수 있도록 함
         try:
             job_id = event.get('jobId')
-            if job_id and 'state' in context:
-                context['state'].set('market_cap_jobs', job_id, {
+            if job_id:
+                await context.state.set('market_cap_jobs', job_id, {
                     'jobId': job_id,
                     'status': 'error',
                     'error': error_msg,
