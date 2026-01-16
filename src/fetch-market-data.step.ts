@@ -1,11 +1,14 @@
-import { v4 as uuidv4 } from 'uuid';
 
+import { v4 as uuidv4 } from 'uuid';
+import { spawn } from 'child_process';
+import fs from 'fs/promises';
+import path from 'path';
 
 export const config = {
     name: "fetch-market-data",
     type: "event",
     subscribes: ["fetch-market-data"],
-    emits: ["run-market-cap-analysis"],
+    emits: ["format-market-cap"],
     flows: ["market-cap-inference-flow"]
 };
 
@@ -18,6 +21,7 @@ const COUNTRY_CONFIG = {
 };
 
 export const handler = async (event: any, { emit, logger }: any) => {
+    let inputFile = '';
     try {
         const { jobId, ticker } = event;
         logger.info(`[Fetch] Starting market data fetch for job ${jobId}, target: ${ticker}`);
@@ -38,30 +42,99 @@ export const handler = async (event: any, { emit, logger }: any) => {
             throw new Error(`Target ticker ${ticker} not found in fetched data.`);
         }
 
-
-        // Optimize payload size: Only send top 100 items + target item
-        // This is to prevent IPC/Message Queue timeout with large payloads (4000+ items).
+        // Optimize payload size: Only use top 100 items + target item
         let optimizedData = rawData.slice(0, 100);
         if (!optimizedData.find((item: any) => item.name === targetItem.name)) {
             optimizedData.push(targetItem);
         }
 
-        logger.info(`[Fetch] Optimizing payload: Sending ${optimizedData.length} items to analysis step.`);
+        logger.info(`[Fetch] Prepared ${optimizedData.length} items for analysis.`);
 
+        // --- Execute Python Logic (Merged) ---
+        const tempDir = path.resolve('temp');
+        await fs.mkdir(tempDir, { recursive: true });
+        inputFile = path.join(tempDir, `input_${jobId}.json`);
+
+        const pythonInput = {
+            jobId,
+            ticker,
+            rawData: optimizedData
+        };
+
+        await fs.writeFile(inputFile, JSON.stringify(pythonInput));
+
+        const pythonScript = path.resolve('scripts/run_market_cap.py');
+        const pythonCmd = process.env.PYTHON_MODULES_PATH
+            ? path.join(process.env.PYTHON_MODULES_PATH, 'bin', 'python')
+            : 'python';
+
+        logger.info(`[Fetch:PY] Executing: ${pythonCmd} ${pythonScript}`);
+
+        const result = await runPythonScript(pythonCmd, [pythonScript, inputFile], logger);
+
+        logger.info(`[Fetch:PY] Success! Result: ${JSON.stringify(result)}`);
+
+        if (result.error) {
+            throw new Error(result.error);
+        }
+
+        // Emit directly to format step
         await emit({
-            topic: 'run-market-cap-analysis',
+            topic: 'format-market-cap',
             data: {
                 jobId,
-                ticker,
-                rawData: optimizedData
+                result // { symbol, actual_market_cap, inferred_market_cap, ... }
             }
         });
 
-
     } catch (error: any) {
         logger.error(`[Fetch] Error: ${error.message}`);
-        // Error handling flow? For now just log.
+        // Motia doesn't support emit error to next step easily, 
+        // usually we update state or emit a failure event if needed.
+        // Here we just log, format-market-cap won't be triggered.
+    } finally {
+        if (inputFile) {
+            try { await fs.unlink(inputFile); } catch { }
+        }
     }
+};
+
+const runPythonScript = (command: string, args: string[], logger: any): Promise<any> => {
+    return new Promise((resolve, reject) => {
+        const process = spawn(command, args);
+
+        let stdoutData = '';
+        let stderrData = '';
+
+        process.stdout.on('data', (data) => {
+            const str = data.toString();
+            stdoutData += str;
+            if (!str.trim().startsWith('{')) {
+                logger.info(`[PY] ${str.trim()}`);
+            }
+        });
+
+        process.stderr.on('data', (data) => {
+            const str = data.toString();
+            stderrData += str;
+            logger.error(`[PY-ERR] ${str.trim()}`);
+        });
+
+        process.on('close', (code) => {
+            if (code !== 0) {
+                reject(new Error(`Python script exited with code ${code}. Stderr: ${stderrData}`));
+                return;
+            }
+            try {
+                const lines = stdoutData.trim().split('\n');
+                const lastLine = lines[lines.length - 1];
+                const json = JSON.parse(lastLine);
+                resolve(json);
+            } catch (e: any) {
+                reject(new Error(`Failed to parse Python output: ${e.message}. Stdout: ${stdoutData}`));
+            }
+        });
+    });
 };
 
 const crawling = async (countryCode: string) => {
