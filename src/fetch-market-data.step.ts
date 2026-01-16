@@ -37,14 +37,25 @@ export const handler = async (event: any, { emit, logger }: any) => {
             throw new Error(`Target ticker ${ticker} not found in fetched data.`);
         }
 
+
+        // Optimize payload size: Only send top 100 items + target item
+        // This is to prevent IPC/Message Queue timeout with large payloads (4000+ items).
+        let optimizedData = rawData.slice(0, 100);
+        if (!optimizedData.find((item: any) => item.name === targetItem.name)) {
+            optimizedData.push(targetItem);
+        }
+
+        logger.info(`[Fetch] Optimizing payload: Sending ${optimizedData.length} items to analysis step.`);
+
         await emit({
             topic: 'analyze-market-cap',
             data: {
                 jobId,
                 ticker,
-                rawData
+                rawData: optimizedData
             }
         });
+
 
     } catch (error: any) {
         logger.error(`[Fetch] Error: ${error.message}`);
