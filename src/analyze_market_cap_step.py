@@ -1,8 +1,9 @@
 
-# === DEBUG MODE: MINIMAL ===
-print("[ANALYZE_MARKET_CAP_STEP] === MINIMAL DEBUG LOADED ===")
+# === DEBUG MODE: CLEAN REWRITE v3 ===
+print("[ANALYZE_MARKET_CAP_STEP] === CLEAN REWRITE LOADED ===")
 
 import logging
+import asyncio
 
 # Step Configuration
 config = {
@@ -14,29 +15,27 @@ config = {
 }
 
 async def handler(event, context):
-    # Logger setup inside handler to ensure visibility
     logger = logging.getLogger("market_cap_debug")
     logging.basicConfig(level=logging.INFO)
     
-    print(f"[DEBUG] Handler invoked for event: {event.keys()}")
-    logger.info("[DEBUG] Handler invoked via Logger")
+    # 확실한 로그 출력
+    print(f"[DEBUG] Handler invoked! Keys: {list(event.keys())}")
+    logger.info(f"[DEBUG] Handler invoked via Logger")
+
+    job_id = event.get('jobId', 'unknown')
     
-    job_id = event.get('jobId')
-    
-    # 1초 대기 (처리 흉내)
-    import asyncio
+    # 1초 대기
     await asyncio.sleep(1)
     
-    # 결과 전송 (더미 데이터)
     result = {
-        "symbol": event.get('ticker', 'UNKNOWN'),
+        "symbol": event.get('ticker', 'DEBUG'),
         "actual_market_cap": 0,
         "inferred_market_cap": 0,
         "diff_value": 0,
         "diff_percent": 0,
         "model_loss": 0,
         "cached": False,
-        "cache_source": "debug_mode"
+        "cache_source": "clean_rewrite"
     }
     
     await context.emit({
@@ -47,5 +46,4 @@ async def handler(event, context):
         }
     })
     
-    logger.info(f"[DEBUG] Event emitted for job {job_id}")
-
+    logger.info(f"[DEBUG] Emitted result for {job_id}")
