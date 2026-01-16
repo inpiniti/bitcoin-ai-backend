@@ -2,6 +2,7 @@ export const config = {
     name: "format-market-cap",
     type: "event",
     subscribes: ["format-market-cap"],
+    emits: [],  // 마지막 스텝이라 emit 없음
     flows: ["market-cap-inference-flow"]
 };
 

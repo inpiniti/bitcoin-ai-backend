@@ -1,19 +1,46 @@
 
 import os
+import sys
 import time
 import json
 import logging
-import numpy as np
-import pandas as pd
-import tensorflow as tf
-import joblib
-from sklearn.preprocessing import StandardScaler
+
+# Logger setup (가장 먼저!)
+logging.basicConfig(level=logging.INFO, format='[%(name)s] %(message)s')
+logger = logging.getLogger("market_cap_step")
+logger.info("=== Module loading started ===")
+
+# 가벼운 import
+logger.info("Loading standard libraries...")
 from datetime import datetime, timedelta
 
-# Logger setup
-logger = logging.getLogger("market_cap_step")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
+# 무거운 라이브러리는 로깅과 함께 import
+try:
+    logger.info("Loading numpy...")
+    import numpy as np
+    logger.info("Loading pandas...")
+    import pandas as pd
+    logger.info("Loading sklearn...")
+    from sklearn.preprocessing import StandardScaler
+    logger.info("Loading joblib...")
+    import joblib
+    logger.info("All imports successful!")
+except Exception as e:
+    logger.error(f"Import failed: {e}")
+    raise
+
+# TensorFlow는 lazy import (handler에서 필요할 때 로드)
+tf = None
+
+def get_tensorflow():
+    """TensorFlow를 lazy load합니다. 첫 호출 시에만 import."""
+    global tf
+    if tf is None:
+        logger.info("Loading TensorFlow (first time)...")
+        import tensorflow as _tf
+        tf = _tf
+        logger.info(f"TensorFlow {tf.__version__} loaded successfully!")
+    return tf
 
 # Step Configuration
 config = {
@@ -23,6 +50,8 @@ config = {
     "emits": ["format-market-cap"],
     "flows": ["market-cap-inference-flow"]
 }
+
+logger.info("=== Module loading completed ===")
 
 # ============================================
 # Memory Cache (프로세스 수명 동안 유지)
@@ -89,6 +118,10 @@ def get_file_cache_age():
     return datetime.now() - datetime.fromtimestamp(file_time)
 
 def handler(event, context):
+    # TensorFlow lazy load (handler 호출 시에만 로드)
+    global tf
+    tf = get_tensorflow()
+    
     try:
         # --- 0. Input Validation ---
         logger.info(f"[Step3:AI] Handler started. Event keys: {list(event.keys())}")
