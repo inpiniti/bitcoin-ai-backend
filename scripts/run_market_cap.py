@@ -52,11 +52,24 @@ SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
 FEATURES_PATH = os.path.join(MODEL_DIR, "features.json")
 FILE_TTL_HOURS = 24
 
-def to_float(x):
-    try:
-        return float(x)
-    except:
-        return 0.0
+
+def preprocess_df(df, target_col):
+    # 1. 숫자 변환
+    exclude_cols = ['name', 'description', 'logoid', 'error', target_col, 'sector']
+    numeric_candidates = [c for c in df.columns if c not in exclude_cols]
+    
+    for col in numeric_candidates:
+        if col in df.columns:
+            df[col] = df[col].apply(to_float).fillna(0)
+            
+    # 2. Sector One-Hot Encoding
+    if 'sector' in df.columns:
+        # One-Hot Encoding
+        dummies = pd.get_dummies(df['sector'], prefix='sect', dummy_na=True)
+        # 기존 df와 병합 (axis=1)
+        df = pd.concat([df, dummies], axis=1)
+        
+    return df
 
 def train_and_predict(job_id, ticker, raw_list):
     np, pd, tf, joblib, StandardScaler = get_dependencies()
@@ -66,21 +79,21 @@ def train_and_predict(job_id, ticker, raw_list):
     
     logger.info(f"Creating DataFrame from {len(raw_list)} items...")
     df = pd.DataFrame(raw_list)
-    
     target_col = 'market_cap_basic'
     
-    # 전처리: Target Column
+    # 전처리 1: Target 및 기본 정제
     df[target_col] = df[target_col].apply(to_float)
-    df = df[df[target_col] > 0].copy() # 시총 0인 것 제외
+    df = df[df[target_col] > 0].copy()
     
-    # Target 찾기
-    # 1. 완벽 일치  2. 포함 (Name)
+    # 전처리 2: 공통 전처리 (숫자 변환 및 One-Hot)
+    # 학습이든 추론이든 무조건 수행
+    df = preprocess_df(df, target_col)
+    
+    # Target Row 찾기
     target_row = df[df['name'] == ticker]
     if target_row.empty:
          target_row = df[df['name'].str.contains(rf'\b{ticker}\b', case=False, regex=True)]
-    
     if target_row.empty:
-        # 마지막 시도로 :ticker 패턴 확인
         target_row = df[df['name'].str.endswith(':' + ticker)]
 
     if target_row.empty:
@@ -114,23 +127,19 @@ def train_and_predict(job_id, ticker, raw_list):
                 should_train = True
 
     # --- Training ---
+    exclude_cols_base = ['name', 'description', 'logoid', 'error', target_col, 'sector']
+    
     if should_train:
         logger.info("Training new model...")
         
-        exclude_cols = ['name', 'description', 'logoid', 'error', target_col]
-        # 숫자 컬럼 변환
-        numeric_candidates = [c for c in df.columns if c not in exclude_cols and c != 'sector']
-        for col in numeric_candidates:
-            df[col] = df[col].apply(to_float).fillna(0)
-            
-        # Sector One-Hot Encoding
-        if 'sector' in df.columns:
-            df = pd.get_dummies(df, columns=['sector'], prefix='sect', dummy_na=True)
-            
-        feature_cols = [c for c in df.columns if c not in exclude_cols]
+        # Feature Selection
+        feature_cols = [c for c in df.columns if c not in exclude_cols_base]
+        
+        # Save features used
+        with open(FEATURES_PATH, 'w') as f:
+             json.dump(feature_cols, f)
         
         X = df[feature_cols].values
-        # Target Log 변환 (시총은 스케일이 매우 크고 편향되어 있음)
         y = np.log1p(df[target_col].values)
         
         scaler = StandardScaler()
@@ -138,26 +147,22 @@ def train_and_predict(job_id, ticker, raw_list):
         
         input_dim = X_scaled.shape[1]
         
-        # 모델 구조 (간단하게)
         model = tf.keras.Sequential([
-            tf.keras.layers.Dense(64, activation='relu', input_shape=(input_dim,)),
+            tf.keras.layers.Input(shape=(input_dim,)), # Input Layer 명시 (Warning 해결)
+            tf.keras.layers.Dense(64, activation='relu'),
             tf.keras.layers.Dropout(0.2),
             tf.keras.layers.Dense(32, activation='relu'),
-            tf.keras.layers.Dense(1) # Log market cap
+            tf.keras.layers.Dense(1)
         ])
         model.compile(optimizer='adam', loss='mse')
         
-        # 학습 (Epoch 5회로 제한하여 속도 확보)
-        logger.info(f"Fitting model on {len(X)} samples...")
+        logger.info(f"Fitting model on {len(X)} samples... (Features: {len(feature_cols)})")
         history = model.fit(X_scaled, y, epochs=10, batch_size=32, verbose=0, validation_split=0.1)
         final_loss = history.history['loss'][-1]
         
-        # 캐시 저장
         try:
             model.save(MODEL_PATH)
             joblib.dump(scaler, SCALER_PATH)
-            with open(FEATURES_PATH, 'w') as f:
-                json.dump(feature_cols, f)
             logger.info("Model cached to disk.")
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
@@ -165,48 +170,18 @@ def train_and_predict(job_id, ticker, raw_list):
         final_loss = 0.0
 
     # --- Inference ---
-    # Cached 모델을 쓸 때도 현재 데이터프레임을 feature_cols에 맞춰야 함
-    # 1. 숫자 변환 (Cached 안 했을 때 이미 변환됐을 수 있으나 안전하게 확인)
-    exclude_cols_base = ['name', 'description', 'logoid', 'error', target_col]
+    # DataFrame을 feature_cols 순서와 구성에 맞게 재정렬 (부족하면 0, 넘치면 제거)
+    # reindex가 핵심!
+    X_final = df.reindex(columns=feature_cols, fill_value=0)
     
-    for col in feature_cols:
-        if col not in df.columns:
-            # 원-핫 인코딩 등 없는 컬럼은 0으로 채움
-            df[col] = 0.0
-        elif col not in exclude_cols_base:
-             # 이미 변환되었는지 체크 어렵다면 다시 변환해도 됨 (apply to_float is idempotent-ish if numeric)
-             # 여기서는 생략 (위 Training 블록이나 아래 로직에서 처리 필요)
-             pass
+    # Target Row 추출 (reindex 된 상태에서)
+    X_target_vals = X_final.loc[[target_idx]].values
     
-    # 만약 Cached 모델을 사용한다면 df가 위 Training 블록을 안 타서 전처리가 안 되어 있을 수 있음.
-    # 따라서 전처리 로직을 공통화하거나 여기서 다시 수행해야 함.
-    if not should_train:
-         numeric_candidates = [c for c in df.columns if c not in exclude_cols_base and c != 'sector']
-         for col in numeric_candidates:
-             try:
-                 df[col] = df[col].apply(to_float).fillna(0)
-             except: pass
-             
-         if 'sector' in df.columns:
-             current_dummies = pd.get_dummies(df['sector'], prefix='sect', dummy_na=True)
-             # 합치기
-             df = pd.concat([df, current_dummies], axis=1)
-
-    # DataFrame을 feature_cols 순서와 구성에 맞게 재정렬
-    # 누락된 컬럼 0 채우기, 넘치는 컬럼 무시
-    X_target_df = pd.DataFrame(index=df.index)
-    for col in feature_cols:
-        if col in df.columns:
-            X_target_df[col] = df[col]
-        else:
-            X_target_df[col] = 0.0
-            
-    # Target Row만 추출
-    X_target_vals = X_target_df.loc[[target_idx]].values
+    # Scaler Transform
     X_target_scaled = scaler.transform(X_target_vals)
     
     pred_log = model.predict(X_target_scaled, verbose=0)[0][0]
-    inferred_market_cap = float(np.expm1(pred_log)) # exp(log) - 1
+    inferred_market_cap = float(np.expm1(pred_log))
     
     logger.info(f"Inference complete: {inferred_market_cap}")
     
