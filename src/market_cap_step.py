@@ -90,13 +90,24 @@ def get_file_cache_age():
 
 def handler(event, context):
     try:
+        # --- 0. Input Validation ---
+        logger.info(f"[Step3:AI] Handler started. Event keys: {list(event.keys())}")
+        
         job_id = event.get('jobId')
         ticker = event.get('ticker')
         raw_list = event.get('rawData')
         
-        logger.info(f"[Step3:AI] Starting analysis for {ticker}. Data points: {len(raw_list)}")
+        if not job_id:
+            raise ValueError("Missing jobId in event")
+        if not ticker:
+            raise ValueError("Missing ticker in event")
+        if not raw_list:
+            raise ValueError("Missing rawData in event")
+        
+        logger.info(f"[Step3:AI] Job {job_id}: Starting analysis for {ticker}. Data points: {len(raw_list)}")
 
         # --- 1. Data Processing ---
+        logger.info(f"[Step3:AI] Job {job_id}: Creating DataFrame...")
         df = pd.DataFrame(raw_list)
         
         def to_float(x):
@@ -258,5 +269,26 @@ def handler(event, context):
         })
 
     except Exception as e:
-        logger.error(f"Analysis failed: {str(e)}")
+        import traceback
+        error_msg = str(e)
+        error_trace = traceback.format_exc()
+        logger.error(f"[Step3:AI] Analysis failed for job {event.get('jobId', 'unknown')}")
+        logger.error(f"[Step3:AI] Error: {error_msg}")
+        logger.error(f"[Step3:AI] Traceback:\n{error_trace}")
+        
+        # State를 error로 업데이트하여 API가 에러 응답을 받을 수 있도록 함
+        try:
+            job_id = event.get('jobId')
+            if job_id and 'state' in context:
+                context['state'].set('market_cap_jobs', job_id, {
+                    'jobId': job_id,
+                    'status': 'error',
+                    'error': error_msg,
+                    'errorTrace': error_trace[:500]  # 처음 500자만
+                })
+                logger.info(f"[Step3:AI] State updated to error for job {job_id}")
+        except Exception as state_error:
+            logger.error(f"[Step3:AI] Failed to update state: {state_error}")
+        
         raise e
+
