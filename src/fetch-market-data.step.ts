@@ -69,6 +69,16 @@ export const handler = async (event: any, { emit, logger }: any) => {
             ? path.join(process.env.PYTHON_MODULES_PATH, 'bin', 'python')
             : 'python';
 
+        // [비상 조치] 런타임 의존성 복구
+        // 빌드 시점의 설치 누락을 방지하기 위해 실행 전 패키지 확인/설치를 수행합니다.
+        logger.info(`[Fetch:PY] Checking/Installing dependencies (numpy, pandas, tensorflow, etc)...`);
+        try {
+            // pip install은 설치되어 있으면 매우 빠르게 끝납니다.
+            await runPythonScript(pythonCmd, ['-m', 'pip', 'install', 'numpy', 'pandas', 'tensorflow', 'joblib', 'scikit-learn'], logger);
+        } catch (e: any) {
+            logger.warn(`[Fetch:PY] Dependency check warning: ${e.message}`);
+        }
+
         logger.info(`[Fetch:PY] Executing: ${pythonCmd} ${pythonScript}`);
 
         const result = await runPythonScript(pythonCmd, [pythonScript, inputFile], logger);
