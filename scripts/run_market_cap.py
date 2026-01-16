@@ -53,6 +53,14 @@ FEATURES_PATH = os.path.join(MODEL_DIR, "features.json")
 FILE_TTL_HOURS = 24
 
 
+
+# 헬퍼 함수: 안전한 float 변환
+def to_float(x):
+    try:
+        return float(x)
+    except:
+        return 0.0
+
 def preprocess_df(df, target_col):
     # 1. 숫자 변환
     exclude_cols = ['name', 'description', 'logoid', 'error', target_col, 'sector']
