@@ -8,6 +8,8 @@
     "start": "motia start --port 7860"
   },
   "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
+    "dayjs": "^1.11.19",
     "motia": "latest",
     "uuid": "^9.0.0"
   }
