@@ -134,6 +134,7 @@ def train_and_predict(job_id, ticker_or_list, raw_list):
     corrs = df[feature_cols].corrwith(df['log_target']).abs().fillna(0)
     keep_cols = corrs[corrs > 0.05].index.tolist()
     feature_cols = list(set(keep_cols + [c for c in valuation_metrics if c in df.columns]))
+    feature_cols.sort()  # [중요] 피처 순서 고정 (실행 시마다 결과 달라짐 방지)
     
     logger.info(f"Selected {len(feature_cols)} features for Batched Model")
 
