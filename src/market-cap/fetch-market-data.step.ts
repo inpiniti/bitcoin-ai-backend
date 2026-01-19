@@ -117,17 +117,17 @@ const runPythonScript = (command: string, args: string[], logger: any): Promise<
     return new Promise((resolve, reject) => {
         // Win: SSL 인증서 문제 회피
         const env = { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: '0' };
-        const process = spawn(command, args, { env });
+        const childProcess = spawn(command, args, { env });
 
         let stdoutData = '';
         let stderrData = '';
 
-        process.stdout.on('data', (data) => {
+        childProcess.stdout.on('data', (data) => {
             const str = data.toString();
             stdoutData += str;
         });
 
-        process.stderr.on('data', (data) => {
+        childProcess.stderr.on('data', (data) => {
             const str = data.toString();
             stderrData += str;
             // Ignore oneDNN / TF warnings
@@ -136,7 +136,7 @@ const runPythonScript = (command: string, args: string[], logger: any): Promise<
             }
         });
 
-        process.on('close', (code) => {
+        childProcess.on('close', (code) => {
             if (code !== 0) {
                 reject(new Error(`Python script exited with code ${code}. Stderr: ${stderrData}`));
                 return;
