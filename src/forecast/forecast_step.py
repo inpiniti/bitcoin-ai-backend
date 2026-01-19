@@ -1,0 +1,144 @@
+
+"""
+Step 3: TimesFM AI 예측
+Event Step - 'run-forecast' 이벤트 구독
+"""
+import logging
+import asyncio
+
+# 전역 변수로 모델 캐싱
+tfm_model = None
+torch = None
+np = None
+timesfm = None
+
+def get_dependencies():
+    global torch, np, timesfm
+    if torch is None:
+        import torch as _torch
+        import numpy as _np
+        import timesfm as _timesfm
+        torch = _torch
+        np = _np
+        timesfm = _timesfm
+        # GPU 사용 설정
+        torch.set_float32_matmul_precision("high")
+    return torch, np, timesfm
+
+def get_model():
+    global tfm_model
+    torch, _, timesfm = get_dependencies()
+    
+    if tfm_model is None:
+        logging.info("Loading TimesFM 2.5 model...")
+        try:
+            tfm_model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
+                "google/timesfm-2.5-200m-pytorch"
+            )
+            tfm_model.compile(
+                timesfm.ForecastConfig(
+                    max_context=1024,
+                    max_horizon=128,
+                    normalize_inputs=True,
+                )
+            )
+            logging.info("TimesFM 2.5 model loaded successfully.")
+        except Exception as e:
+            logging.error(f"Failed to load TimesFM: {str(e)}")
+            raise
+    return tfm_model
+
+# Event Step Configuration
+config = {
+    "name": "run-forecast",
+    "type": "event",
+    "subscribes": ["run-forecast"],
+    "emits": ["format-result"],
+    "flows": ["bitcoin-forecast-flow"]
+}
+
+
+async def handler(event, context):
+    """
+    TimesFM AI 예측 수행.
+    """
+    job_id = event.get("jobId")
+    symbol = event.get("symbol", "BTC-USD")
+    interval = event.get("interval", "hour")  # "day" 또는 "hour"
+    prices = event.get("prices", [])
+    last_date = event.get("lastDate")
+    
+    try:
+        # Load dependencies lazily
+        get_dependencies()
+        
+        if not prices:
+            raise ValueError("No price data provided")
+        
+        context.logger.info(f"[Step3:Forecast] Running {interval} AI prediction for {symbol} (Job: {job_id})")
+        
+        input_data = np.array(prices, dtype=np.float32)
+        tfm = get_model()
+        
+        # interval에 따른 예측 설정
+        horizon = 30 if interval == "day" else 24  # 일봉: 30일, 시봉: 24시간
+        
+        point_forecast, quantile_forecast = tfm.forecast(
+            horizon=horizon,
+            inputs=[input_data],
+        )
+
+        
+        forecast_values = point_forecast[0].tolist()
+        
+        # 결과 변환
+        from datetime import datetime, timedelta
+        base_date = datetime.fromisoformat(last_date.replace('Z', '+00:00')) if last_date else datetime.now()
+        
+        # interval에 따른 timedelta 단위
+        time_unit = timedelta(days=1) if interval == "day" else timedelta(hours=1)
+        
+        result_list = []
+        for i, val in enumerate(forecast_values):
+            forecast_date = base_date + time_unit * (i + 1)
+            result_list.append({
+                "ds": forecast_date.isoformat(),
+                "y": float(val),
+                "timesfm": float(val)
+            })
+
+        
+        context.logger.info(f"[Step3:Forecast] Generated {len(result_list)} predictions for job {job_id}")
+        
+        # State 업데이트
+        job = await context.state.get("forecasts", job_id)
+        if job:
+            job["status"] = "forecasted"
+            job["predictionCount"] = len(result_list)
+            await context.state.set("forecasts", job_id, job)
+        
+        # Step 4로 이벤트 발행 (Motia Python emit은 단일 dict)
+        await context.emit({
+            "topic": "format-result",
+            "data": {
+                "jobId": job_id,
+                "symbol": symbol,
+                "interval": interval,
+                "lastDate": last_date,
+                "forecast": result_list,
+                "model": "TimesFM-2.5-200m",
+                "dataPoints": len(prices)
+            }
+        })
+
+
+        
+    except Exception as e:
+        context.logger.error(f"[Step3:Forecast] Error for job {job_id}: {str(e)}")
+        
+        # 에러 상태로 업데이트
+        job = await context.state.get("forecasts", job_id)
+        if job:
+            job["status"] = "error"
+            job["error"] = str(e)
+            await context.state.set("forecasts", job_id, job)
