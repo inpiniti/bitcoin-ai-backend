@@ -130,8 +130,21 @@ const runPythonScript = (command: string, args: string[], logger: any): Promise<
         childProcess.stderr.on('data', (data) => {
             const str = data.toString();
             stderrData += str;
-            // Ignore oneDNN / TF warnings
-            if (!str.includes('oneDNN') && !str.includes('TensorFlow')) {
+
+            // 필터링: 무시할 로그 키워드 (TF, CUDA, oneDNN 등)
+            if (str.includes('oneDNN') || str.includes('TensorFlow') || str.includes('cuda') || str.includes('cudart')) {
+                return;
+            }
+
+            // 로그 레벨 분류
+            if (str.includes('[INFO]')) {
+                // Python [INFO] 로그는 일반 info로 처리
+                logger.info(`[Fetch:PY-Log] ${str.trim()}`);
+            } else if (str.includes('Warning') || str.includes('warn')) {
+                // 경고성 로그는 warn으로 처리
+                logger.warn(`[Fetch:PY-Warn] ${str.trim()}`);
+            } else {
+                // 그 외에는 실제 에러일 가능성이 높으므로 에러로 처리
                 logger.error(`[PY-ERR] ${str.trim()}`);
             }
         });
