@@ -81,13 +81,16 @@ export const handler = async (event: any, { emit, logger }: any) => {
 
         logger.info(`[Fetch:PY] Executing: ${pythonCmd} ${pythonScript}`);
 
-        const result = await runPythonScript(pythonCmd, [pythonScript, inputFile], logger);
+        const resultList = await runPythonScript(pythonCmd, [pythonScript, inputFile], logger);
 
-        logger.info(`[Fetch:PY] Success! Result: ${JSON.stringify(result)}`);
-
-        if (result.error) {
-            throw new Error(result.error);
+        if (resultList.error) {
+            throw new Error(resultList.error);
         }
+
+        // Python now returns a LIST of results even for a single ticker
+        const result = Array.isArray(resultList) ? resultList[0] : resultList;
+
+        logger.info(`[Fetch:PY] Success! Result for ${ticker}: ${JSON.stringify(result)}`);
 
         // Emit directly to format step
         await emit({
@@ -112,7 +115,9 @@ export const handler = async (event: any, { emit, logger }: any) => {
 
 const runPythonScript = (command: string, args: string[], logger: any): Promise<any> => {
     return new Promise((resolve, reject) => {
-        const process = spawn(command, args);
+        // Win: SSL 인증서 문제 회피
+        const env = { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: '0' };
+        const process = spawn(command, args, { env });
 
         let stdoutData = '';
         let stderrData = '';
@@ -120,15 +125,15 @@ const runPythonScript = (command: string, args: string[], logger: any): Promise<
         process.stdout.on('data', (data) => {
             const str = data.toString();
             stdoutData += str;
-            if (!str.trim().startsWith('{')) {
-                logger.info(`[PY] ${str.trim()}`);
-            }
         });
 
         process.stderr.on('data', (data) => {
             const str = data.toString();
             stderrData += str;
-            logger.error(`[PY-ERR] ${str.trim()}`);
+            // Ignore oneDNN / TF warnings
+            if (!str.includes('oneDNN') && !str.includes('TensorFlow')) {
+                logger.error(`[PY-ERR] ${str.trim()}`);
+            }
         });
 
         process.on('close', (code) => {
@@ -158,18 +163,24 @@ const crawling = async (countryCode: string) => {
         "return_on_assets_fq", "return_on_equity_fq", "return_on_invested_capital_fq",
         "research_and_dev_ratio_ttm", "sell_gen_admin_exp_other_ratio_ttm",
 
-        "total_revenue", // 'sooeip'? (Income/Revenue)
-        "total_revenue_yoy_growth_ttm",
+        "total_revenue", "total_revenue_yoy_growth_ttm",
         "earnings_per_share_diluted_ttm", "earnings_per_share_diluted_yoy_growth_ttm",
 
         "total_assets_fq", "total_current_assets_fq", "cash_n_short_term_invest_fq",
         "total_liabilities_fq", "total_debt_fq", "net_debt_fq", "total_equity_fq",
 
         "current_ratio_fq", "quick_ratio_fq",
-        "debt_to_equity_fq", "cash_n_short_term_invest_to_total_debt_fq", // Cash/Debt
+        "debt_to_equity_fq", "cash_n_short_term_invest_to_total_debt_fq",
 
         "cash_f_operating_activities_ttm", "cash_f_investing_activities_ttm", "cash_f_financing_activities_ttm",
-        "free_cash_flow_ttm", "capital_expenditures_ttm"
+        "free_cash_flow_ttm", "capital_expenditures_ttm",
+
+        // --- New Valuation & Quality Columns (Accuracy Booster) ---
+        "price_earnings_ttm", "price_revenue_ttm", "price_book_ratio", "price_free_cash_flow_ttm",
+        "enterprise_value_ebitda_ttm", "enterprise_value_fq",
+        "dividend_yield_recent", "dividend_payout_ratio_ttm",
+        "beta_1_year", "price_earnings_growth_ttm",
+        "debt_to_assets", "book_value_per_share_fq", "cash_per_share_fq"
     ];
 
     try {

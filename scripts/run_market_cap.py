@@ -62,148 +62,134 @@ def to_float(x):
         return 0.0
 
 def preprocess_df(df, target_col):
-    # 1. 숫자 변환
+    # 1. 숫자 변환 및 로그 변환 (금융 데이터의 편차를 줄임)
     exclude_cols = ['name', 'description', 'logoid', 'error', target_col, 'sector']
     numeric_candidates = [c for c in df.columns if c not in exclude_cols]
     
     for col in numeric_candidates:
         if col in df.columns:
-            df[col] = df[col].apply(to_float).fillna(0)
+            # 0 이하의 값은 0으로 처리 후 로그 변환 (안전한 log1p)
+            vals = df[col].apply(to_float)
+            # 음수값이 있을 수 있는 성장률 등은 log 대신 원본 유지 고려 가능하나,
+            # 일단 자산/매출 등 큰 값들은 log가 유리함
+            if "growth" not in col and "margin" not in col and "ratio" not in col:
+                df[col] = np.log1p(vals.clip(lower=0))
+            else:
+                df[col] = vals.fillna(0)
             
     # 2. Sector One-Hot Encoding
     if 'sector' in df.columns:
-        # One-Hot Encoding
         dummies = pd.get_dummies(df['sector'], prefix='sect', dummy_na=True)
-        # 기존 df와 병합 (axis=1)
         df = pd.concat([df, dummies], axis=1)
         
     return df
 
-def train_and_predict(job_id, ticker, raw_list):
+def train_and_predict(job_id, ticker_or_list, raw_list):
     np, pd, tf, joblib, StandardScaler = get_dependencies()
-    
-    # 디렉토리 생성
     os.makedirs(MODEL_DIR, exist_ok=True)
     
     logger.info(f"Creating DataFrame from {len(raw_list)} items...")
     df = pd.DataFrame(raw_list)
     target_col = 'market_cap_basic'
-    
-    # 전처리 1: Target 및 기본 정제
     df[target_col] = df[target_col].apply(to_float)
-    df = df[df[target_col] > 0].copy()
     
-    # 전처리 2: 공통 전처리 (숫자 변환 및 One-Hot)
-    # 학습이든 추론이든 무조건 수행
+    # [데이터 클렌징] 시총 100만 달러 미만 제외 및 필수 지표 결측치 보정
+    df = df[df[target_col] > 1e6].copy()
+    
+    # [섹터별 편향 보정] 섹터별 중앙값 대비 상대 가치 지표 생성
+    if 'sector' in df.columns:
+        df['revenue_clean'] = df['total_revenue'].apply(to_float).clip(lower=1e6)
+        df['psr_val'] = df[target_col] / df['revenue_clean']
+        sector_median_psr = df.groupby('sector')['psr_val'].transform('median')
+        df['sector_rel_psr'] = df['psr_val'] / sector_median_psr.replace(0, np.nan)
+        df['sector_rel_psr'] = df['sector_rel_psr'].fillna(1.0).clip(upper=50) # 극단적 이상치 방지
+    
+    # [부채 영향력 강화] 부채 비율 및 현금 대비 부채 지표 생성
+    df['assets_clean'] = df['total_assets_fq'].apply(to_float).clip(lower=1e6)
+    df['debt_ratio'] = df['total_debt_fq'].apply(to_float) / df['assets_clean']
+    df['cash_val'] = df['cash_n_short_term_invest_fq'].apply(to_float)
+    df['debt_val'] = df['total_debt_fq'].apply(to_float).clip(lower=1e6)
+    df['cash_to_debt'] = df['cash_val'] / df['debt_val']
+    
+    df['debt_ratio'] = df['debt_ratio'].fillna(0).clip(upper=10)
+    df['cash_to_debt'] = df['cash_to_debt'].fillna(10).clip(upper=100)
+
+    # 2. 공통 전처리
     df = preprocess_df(df, target_col)
     
-    # Target Row 찾기
-    target_row = df[df['name'] == ticker]
-    if target_row.empty:
-         target_row = df[df['name'].str.contains(rf'\b{ticker}\b', case=False, regex=True)]
-    if target_row.empty:
-        target_row = df[df['name'].str.endswith(':' + ticker)]
-
-    if target_row.empty:
-        raise ValueError(f"Ticker {ticker} not found in dataset")
-        
-    target_idx = target_row.index[0]
-    actual_market_cap = float(df.loc[target_idx, target_col])
-    target_name = df.loc[target_idx, 'name']
+    # --- Feature Selection ---
+    valuation_metrics = [
+        'price_earnings_ttm', 'price_revenue_ttm', 'price_book_ratio', 
+        'price_free_cash_flow_ttm', 'enterprise_value_ebitda_ttm', 'enterprise_value_fq',
+        'price_earnings_growth_ttm', 'sector_rel_psr', 'debt_ratio', 'cash_to_debt', 'debt_to_assets'
+    ]
     
-    logger.info(f"Target identified: {target_name} ({actual_market_cap})")
-
-    # --- Cache Check ---
-    should_train = True
-    model = None
-    scaler = None
-    feature_cols = None
+    # 타겟 로그 변환
+    df['log_target'] = np.log1p(df[target_col].values)
     
-    if os.path.exists(MODEL_PATH) and os.path.exists(FEATURES_PATH):
-        file_time = os.path.getmtime(MODEL_PATH)
-        age = datetime.now() - datetime.fromtimestamp(file_time)
-        if age < timedelta(hours=FILE_TTL_HOURS):
-            try:
-                logger.info(f"Loading cached model (Age: {age})...")
-                model = tf.keras.models.load_model(MODEL_PATH)
-                scaler = joblib.load(SCALER_PATH)
-                with open(FEATURES_PATH, 'r') as f:
-                    feature_cols = json.load(f)
-                should_train = False
-            except Exception as e:
-                logger.warning(f"Failed to load cache: {e}")
-                should_train = True
+    exclude_cols = ['name', 'description', 'logoid', 'error', target_col, 'sector', 'log_target', 'psr_val', 'revenue_clean', 'assets_clean', 'cash_val', 'debt_val']
+    feature_cols = [c for c in df.columns if c not in exclude_cols]
+
+    # 상관관계 및 중요 지표 필터링
+    corrs = df[feature_cols].corrwith(df['log_target']).abs().fillna(0)
+    keep_cols = corrs[corrs > 0.05].index.tolist()
+    feature_cols = list(set(keep_cols + [c for c in valuation_metrics if c in df.columns]))
+    
+    logger.info(f"Selected {len(feature_cols)} features for Batched Model")
 
     # --- Training ---
-    exclude_cols_base = ['name', 'description', 'logoid', 'error', target_col, 'sector']
+    # 모든 피처를 수치형으로 강제 변환 (NaN 처리 포함)
+    for c in feature_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        
+    X = df[feature_cols].values.astype(float)
+    y = df['log_target'].values.astype(float)
     
-    if should_train:
-        logger.info("Training new model...")
-        
-        # Feature Selection
-        feature_cols = [c for c in df.columns if c not in exclude_cols_base]
-        
-        # Save features used
-        with open(FEATURES_PATH, 'w') as f:
-             json.dump(feature_cols, f)
-        
-        X = df[feature_cols].values
-        y = np.log1p(df[target_col].values)
-        
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        input_dim = X_scaled.shape[1]
-        
-        model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(input_dim,)), # Input Layer 명시 (Warning 해결)
-            tf.keras.layers.Dense(64, activation='relu'),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(32, activation='relu'),
-            tf.keras.layers.Dense(1)
-        ])
-        model.compile(optimizer='adam', loss='mse')
-        
-        logger.info(f"Fitting model on {len(X)} samples... (Features: {len(feature_cols)})")
-        history = model.fit(X_scaled, y, epochs=10, batch_size=32, verbose=0, validation_split=0.1)
-        final_loss = history.history['loss'][-1]
-        
-        try:
-            model.save(MODEL_PATH)
-            joblib.dump(scaler, SCALER_PATH)
-            logger.info("Model cached to disk.")
-        except Exception as e:
-            logger.warning(f"Failed to save cache: {e}")
-    else:
-        final_loss = 0.0
+    # NaN 행 제거
+    mask = ~np.any(np.isnan(X), axis=1)
+    X_train, y_train = X[mask], y[mask]
+    
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_train)
+    
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    model = HistGradientBoostingRegressor(
+        max_iter=600, max_depth=8, learning_rate=0.04, 
+        l2_regularization=2.0, random_state=42, early_stopping=True
+    )
+    model.fit(X_scaled, y_train)
+    logger.info(f"Training Complete. R2: {model.score(X_scaled, y_train):.4f}")
 
-    # --- Inference ---
-    # DataFrame을 feature_cols 순서와 구성에 맞게 재정렬 (부족하면 0, 넘치면 제거)
-    # reindex가 핵심!
-    X_final = df.reindex(columns=feature_cols, fill_value=0)
+    # --- Batch Inference ---
+    target_tickers = ticker_or_list if isinstance(ticker_or_list, list) else [ticker_or_list]
+    results = []
     
-    # Target Row 추출 (reindex 된 상태에서)
-    X_target_vals = X_final.loc[[target_idx]].values
+    # 유효한 행만 미리 인덱싱
+    full_feature_df = df.reindex(columns=feature_cols, fill_value=0)
     
-    # Scaler Transform
-    X_target_scaled = scaler.transform(X_target_vals)
-    
-    pred_log = model.predict(X_target_scaled, verbose=0)[0][0]
-    inferred_market_cap = float(np.expm1(pred_log))
-    
-    logger.info(f"Inference complete: {inferred_market_cap}")
-    
-    result = {
-        "symbol": ticker,
-        "actual_market_cap": actual_market_cap,
-        "inferred_market_cap": inferred_market_cap,
-        "diff_value": inferred_market_cap - actual_market_cap,
-        "diff_percent": ((inferred_market_cap - actual_market_cap) / actual_market_cap) * 100,
-        "model_loss": float(final_loss),
-        "cached": not should_train,
-        "cache_source": "file" if not should_train else "trained"
-    }
-    return result
+    for tk in target_tickers:
+        row_mask = (df['name'] == tk) | (df['name'].str.endswith(':' + tk))
+        if not row_mask.any():
+            continue
+            
+        idx = df[row_mask].index[0]
+        actual_mc = float(df.loc[idx, target_col])
+        
+        X_target = full_feature_df.loc[[idx]].values
+        X_target_scaled = scaler.transform(X_target)
+        
+        pred_log = model.predict(X_target_scaled)[0]
+        pred_log = np.clip(pred_log, 15, 36)
+        inferred_mc = float(np.expm1(pred_log))
+        
+        results.append({
+            "symbol": tk,
+            "actual_market_cap": actual_mc,
+            "inferred_market_cap": inferred_mc,
+            "diff_percent": ((inferred_mc - actual_mc) / actual_mc) * 100
+        })
+        
+    return results
 
 def main():
     try:
