@@ -19,3 +19,4 @@ utilsforecast
 huggingface_hub
 tensorflow
 scikit-learn
+xgboost
