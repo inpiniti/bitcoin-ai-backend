@@ -33,14 +33,12 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
         await state.set('xgb-jobs', jobId, {
             jobId,
             status: 'pending',
-            features, // 대용량 데이터는 state에 보관
-            labels,
             createdAt: new Date().toISOString()
         });
 
         await emit({
             topic: 'xgb-train',
-            data: { jobId } // 데이터 본문은 보내지 않음 (E2BIG 방지)
+            data: { jobId, features, labels }
         });
 
         // Polling

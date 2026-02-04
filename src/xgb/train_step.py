@@ -19,22 +19,14 @@ config = {
 
 async def handler(event, context):
     job_id = event.get("jobId")
+    features = event.get("features")
+    labels = event.get("labels")
 
     try:
         context.logger.info(f"[XGB:Worker] Training job {job_id} started")
 
-        # Fetch data from state (to avoid E2BIG via event args)
-        job_data = await context.state.get("xgb-jobs", job_id)
-        if not job_data:
-            raise Exception(f"Job data not found for {job_id}")
-            
-        features = job_data.get("features")
-        labels = job_data.get("labels")
-        
-        if not features or not labels:
-            raise Exception("Features or Labels missing in job data")
-
         X = np.array(features)
+
         y = np.array(labels)
 
         # Train/Test Split

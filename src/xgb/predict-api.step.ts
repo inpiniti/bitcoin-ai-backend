@@ -33,14 +33,12 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
         await state.set('xgb-jobs', jobId, {
             jobId,
             status: 'pending',
-            modelJson,
-            features,
             createdAt: new Date().toISOString()
         });
 
         await emit({
             topic: 'xgb-predict',
-            data: { jobId } // E2BIG 방지
+            data: { jobId, modelJson, features }
         });
 
         // Polling
