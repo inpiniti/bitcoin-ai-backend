@@ -1,6 +1,7 @@
 /**
  * Step 1: XGBoost 학습 요청 API
  * POST /v1/xgb/train
+ * 학습 데이터가 크므로 클라이언트가 Supabase에 업로드한 datasetId를 받음
  */
 import { v4 as uuidv4 } from 'uuid';
 
@@ -14,21 +15,21 @@ export const config = {
 };
 
 const POLL_INTERVAL_MS = 500;
-const MAX_WAIT_MS = 60000; // 최대 60초 (학습은 빠름)
+const MAX_WAIT_MS = 120000; // 최대 2분 (데이터 로드 시간 고려)
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const handler = async (req: any, { emit, state, logger }: any) => {
     try {
         const body = req.body || {};
-        const { features, labels } = body;
+        const { datasetId } = body;
         const jobId = uuidv4();
 
-        if (!features || !labels || features.length === 0) {
-            return { status: 400, body: { error: 'features and labels are required' } };
+        if (!datasetId) {
+            return { status: 400, body: { error: 'datasetId is required' } };
         }
 
-        logger.info(`[XGB:Train] Job ${jobId} started with ${features.length} samples`);
+        logger.info(`[XGB:Train] Job ${jobId} started with datasetId: ${datasetId}`);
 
         await state.set('xgb-jobs', jobId, {
             jobId,
@@ -38,7 +39,7 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
 
         await emit({
             topic: 'xgb-train',
-            data: { jobId, features, labels }
+            data: { jobId, datasetId }
         });
 
         // Polling

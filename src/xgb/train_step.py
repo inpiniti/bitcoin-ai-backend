@@ -25,6 +25,43 @@ config = {
 SUPABASE_URL = os.environ.get("VITE_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("VITE_SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY")
 
+def load_dataset_from_supabase(dataset_id, logger):
+    """Supabase REST API를 통해 학습 데이터 로드"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise ValueError("Supabase configuration missing (URL or KEY)")
+
+    # URL 파싱
+    parsed_url = urllib.parse.urlparse(SUPABASE_URL)
+    host = parsed_url.netloc
+    path = f"/rest/v1/training_datasets?id=eq.{dataset_id}&select=features,labels"
+    
+    # HTTP 연결
+    conn = http.client.HTTPSConnection(host)
+    
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        conn.request("GET", path, headers=headers)
+        
+        response = conn.getresponse()
+        resp_data = response.read().decode('utf-8')
+        
+        if response.status >= 200 and response.status < 300:
+            result = json.loads(resp_data)
+            if isinstance(result, list) and len(result) > 0:
+                return result[0]['features'], result[0]['labels']
+            else:
+                raise Exception(f"Dataset ID {dataset_id} not found in Supabase")
+        else:
+            logger.error(f"Supabase Error ({response.status}): {resp_data}")
+            raise Exception(f"Supabase Dataset Load Failed: {resp_data}")
+    finally:
+        conn.close()
+
 def save_model_to_supabase(model_data, logger):
     """Supabase REST API를 통해 모델 저장"""
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -63,11 +100,15 @@ def save_model_to_supabase(model_data, logger):
 
 async def handler(event, context):
     job_id = event.get("jobId")
-    features = event.get("features")
-    labels = event.get("labels")
+    dataset_id = event.get("datasetId")
 
     try:
-        context.logger.info(f"[XGB:Worker] Training job {job_id} started")
+        context.logger.info(f"[XGB:Worker] Training job {job_id}, datasetId: {dataset_id}")
+
+        # Supabase에서 데이터셋 로드
+        features, labels = load_dataset_from_supabase(dataset_id, context.logger)
+        
+        context.logger.info(f"[XGB:Worker] Dataset loaded. Features: {len(features)}, Labels: {len(labels)}")
 
         X = np.array(features)
         y = np.array(labels)
