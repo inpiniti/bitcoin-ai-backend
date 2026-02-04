@@ -1,6 +1,7 @@
 /**
  * Step 3: XGBoost 예측 요청 API
  * POST /v1/xgb/predict
+ * modelId를 사용하여 서버에 저장된 모델로 예측 (E2BIG 에러 방지)
  */
 import { v4 as uuidv4 } from 'uuid';
 
@@ -21,14 +22,14 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 export const handler = async (req: any, { emit, state, logger }: any) => {
     try {
         const body = req.body || {};
-        const { modelJson, features } = body;
+        const { modelId, features } = body;
         const jobId = uuidv4();
 
-        if (!modelJson || !features) {
-            return { status: 400, body: { error: 'modelJson and features are required' } };
+        if (!modelId || !features) {
+            return { status: 400, body: { error: 'modelId and features are required' } };
         }
 
-        logger.info(`[XGB:Predict] Job ${jobId} started`);
+        logger.info(`[XGB:Predict] Job ${jobId} started with modelId: ${modelId}`);
 
         await state.set('xgb-jobs', jobId, {
             jobId,
@@ -38,7 +39,7 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
 
         await emit({
             topic: 'xgb-predict',
-            data: { jobId, modelJson, features }
+            data: { jobId, modelId, features }
         });
 
         // Polling
