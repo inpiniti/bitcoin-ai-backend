@@ -22,14 +22,16 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 export const handler = async (req: any, { emit, state, logger }: any) => {
     try {
         const body = req.body || {};
-        const { datasetId } = body;
+        const { datasetId, modelName } = body;
         const jobId = uuidv4();
 
         if (!datasetId) {
             return { status: 400, body: { error: 'datasetId is required' } };
         }
 
-        logger.info(`[XGB:Train] Job ${jobId} started with datasetId: ${datasetId}`);
+        const finalModelName = modelName || `XGB_Model_${jobId.slice(0, 8)}`;
+
+        logger.info(`[XGB:Train] Job ${jobId} started. Model: ${finalModelName}, Dataset: ${datasetId}`);
 
         await state.set('xgb-jobs', jobId, {
             jobId,
@@ -39,7 +41,7 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
 
         await emit({
             topic: 'xgb-train',
-            data: { jobId, datasetId }
+            data: { jobId, datasetId, modelName: finalModelName }
         });
 
         // Polling

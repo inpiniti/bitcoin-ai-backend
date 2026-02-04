@@ -101,6 +101,7 @@ def save_model_to_supabase(model_data, logger):
 async def handler(event, context):
     job_id = event.get("jobId")
     dataset_id = event.get("datasetId")
+    model_name = event.get("modelName", f"XGB_Model_{job_id[:8]}")
 
     try:
         context.logger.info(f"[XGB:Worker] Training job {job_id}, datasetId: {dataset_id}")
@@ -138,7 +139,7 @@ async def handler(event, context):
         
         # Supabase에 저장할 데이터 준비
         model_data = {
-            "name": f"XGB_Model_{job_id[:8]}",
+            "name": model_name,
             "accuracy": accuracy,
             "feature_count": X.shape[1],
             "sample_count": X.shape[0],
@@ -147,6 +148,7 @@ async def handler(event, context):
         
         # Supabase 저장 실행
         model_id = save_model_to_supabase(model_data, context.logger)
+
         
         context.logger.info(f"[XGB:Worker] Model saved to Supabase: {model_id}, Accuracy: {accuracy}")
 
