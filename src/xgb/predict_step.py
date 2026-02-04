@@ -19,11 +19,20 @@ config = {
 
 async def handler(event, context):
     job_id = event.get("jobId")
-    model_json = event.get("modelJson")
-    features = event.get("features")
 
     try:
         context.logger.info(f"[XGB:Worker] Prediction job {job_id}")
+
+        # Fetch data from state (to avoid E2BIG)
+        job_data = await context.state.get("xgb-jobs", job_id)
+        if not job_data:
+            raise Exception(f"Job data not found for {job_id}")
+            
+        model_json = job_data.get("modelJson")
+        features = job_data.get("features")
+        
+        if not model_json or not features:
+            raise Exception("modelJson or features missing in job data")
 
         # Load Model via temp file (XGBoost load_model needs file path for JSON format)
         model_json_str = json.dumps(model_json)
