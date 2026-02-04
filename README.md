@@ -9,6 +9,8 @@ pinned: false
 
 # Bitcoin AI Backend (Motia Framework)
 
+> **🚀 [핵심 기술 역량이 집약된 포트폴리오 바로가기](./PORTFOLIO.md)**
+
 이 프로젝트는 [Motia](https://motia.dev) 프레임워크를 사용하여 구축된 Bitcoin 분석 및 예측 백엔드 서버입니다. Hugging Face Spaces의 Docker SDK를 통해 배포됩니다.
 
 ## 🏗 아키텍처 요약 (Event-Driven Flow)
