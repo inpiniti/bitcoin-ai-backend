@@ -22,14 +22,15 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 export const handler = async (req: any, { emit, state, logger }: any) => {
     try {
         const body = req.body || {};
-        const { modelId, features } = body;
+        const { modelId, features, datasetId } = body;
         const jobId = uuidv4();
 
-        if (!modelId || !features) {
-            return { status: 400, body: { error: 'modelId and features are required' } };
+        // modelId는 필수, features 또는 datasetId 중 하나는 필수
+        if (!modelId || (!features && !datasetId)) {
+            return { status: 400, body: { error: 'modelId and (features or datasetId) are required' } };
         }
 
-        logger.info(`[XGB:Predict] Job ${jobId} started with modelId: ${modelId}`);
+        logger.info(`[XGB:Predict] Job ${jobId} started with modelId: ${modelId}, datasetId: ${datasetId || 'N/A'}`);
 
         await state.set('xgb-jobs', jobId, {
             jobId,
@@ -39,7 +40,7 @@ export const handler = async (req: any, { emit, state, logger }: any) => {
 
         await emit({
             topic: 'xgb-predict',
-            data: { jobId, modelId, features }
+            data: { jobId, modelId, features, datasetId }
         });
 
         // Polling
