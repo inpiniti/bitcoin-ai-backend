@@ -7,8 +7,10 @@ services:
       - "7860:7860"
     volumes:
       - .:/app
-      - /app/node_modules
-      - /app/python_modules
     environment:
       - PORT=7860
-    command: npm run dev
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+    # 개발 시: uvicorn --reload 로 코드 변경 자동 반영
+    command: uvicorn main:app --host 0.0.0.0 --port 7860 --reload
+    restart: unless-stopped

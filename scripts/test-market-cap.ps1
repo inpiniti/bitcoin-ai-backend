@@ -8,7 +8,7 @@ param(
 Write-Host "🔍 [$Ticker] 시총 유추 API 테스트 시작..." -ForegroundColor Cyan
 
 $body = @{
-    symbol = $Ticker
+    ticker = $Ticker
 } | ConvertTo-Json
 
 try {

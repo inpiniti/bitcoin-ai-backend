@@ -2,38 +2,26 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# 2. System Dependencies & Node.js
+# 2. System Dependencies (Node.js 불필요 - Motia 제거)
 RUN apt-get update && apt-get install -y \
     build-essential curl git \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && ln -s /usr/local/bin/python /usr/local/bin/python3.13 \
     && rm -rf /var/lib/apt/lists/*
-
 
 # 3. Environments
 ENV PORT=7860
-ENV PYTHON_MODULES_PATH=/app/python_modules
-ENV PATH="$PYTHON_MODULES_PATH/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
-# 4. Copy dependency files
-COPY package.json python-deps.txt ./
+# 4. Copy dependency files (캐시 레이어 분리)
+COPY requirements.txt ./
 
-# 5. Install Node.js dependencies
-RUN npm install
+# 5. Python 의존성 설치 (무거운 패키지 포함 - 캐시됨)
+# torch + timesfm 설치 시간이 오래 걸릴 수 있음
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. MANUALLY create Python venv and install heavy packages (CACHED LAYER)
-# This is the 30-minute step - cached unless python-deps.txt changes
-RUN python -m venv $PYTHON_MODULES_PATH \
-    && . $PYTHON_MODULES_PATH/bin/activate \
-    && pip install --no-cache-dir -r python-deps.txt
-
-# 7. Copy source code (Moved up so Motia can detect steps)
+# 6. Copy source code
 COPY . .
 
-# 8. Run Motia install
-RUN npx motia install
-
-# 10. Execution
+# 7. Execution
 EXPOSE 7860
-CMD ["npm", "start"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]

@@ -1,22 +1,30 @@
-# Python 의존성 (Motia가 이 파일을 사용)
-# 주의: torch는 용량이 크므로 설치 시간이 오래 걸릴 수 있음
+# Python 의존성 (FastAPI 기반)
+# 주의: torch/timesfm은 용량이 크므로 설치 시간이 오래 걸릴 수 있음
 
-# PyTorch
+# ── Web Framework ────────────────────────────────
+fastapi
+uvicorn[standard]
+httpx
+
+# ── PyTorch ──────────────────────────────────────
 torch
 
-# TimesFM 최신 버전 (GitHub에서 직접 설치)
+# ── TimesFM (GitHub 최신)
 timesfm @ git+https://github.com/google-research/timesfm.git
 
-# JAX (CPU)
+# ── JAX (CPU) ────────────────────────────────────
 jax[cpu]
 
-# Data Processing
+# ── Data Processing ──────────────────────────────
 numpy
 pandas
 
-# Utilities
+# ── ML ───────────────────────────────────────────
 utilsforecast
-huggingface_hub
-tensorflow
 scikit-learn
 xgboost
+
+# ── Misc ─────────────────────────────────────────
+huggingface_hub
+tensorflow
+joblib
