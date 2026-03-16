@@ -97,3 +97,52 @@ async def fetch_for_whale(symbol: str, interval: str) -> list[dict]:
 
     logger.info(f"[Yahoo/Whale] {symbol} {interval}: {len(market_data)} points")
     return market_data
+
+
+async def fetch_stock_history_for_trade(symbol: str, range_str: str = "1y") -> list[dict]:
+    """
+    자동매매용 일봉 OHLCV 데이터 로드.
+    날짜 오름차순 (과거 → 현재) 반환.
+    """
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        f"?interval=1d&range={range_str}"
+    )
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=HEADERS)
+
+    if resp.status_code != 200:
+        raise ValueError(f"[Yahoo] {symbol} 조회 실패: {resp.status_code}")
+
+    data = resp.json()
+    chart_result = data.get("chart", {}).get("result", [None])[0]
+    if not chart_result:
+        raise ValueError(f"[Yahoo] {symbol} 데이터 없음")
+
+    timestamps = chart_result["timestamp"]
+    q = chart_result["indicators"]["quote"][0]
+    opens = q.get("open", [])
+    highs = q.get("high", [])
+    lows = q.get("low", [])
+    closes = q.get("close", [])
+    volumes = q.get("volume", [])
+
+    from datetime import datetime, timezone
+
+    candles = []
+    for i, ts in enumerate(timestamps):
+        if closes[i] is None:
+            continue
+        candles.append({
+            "date": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"),
+            "open": float(opens[i] or 0),
+            "high": float(highs[i] or 0),
+            "low": float(lows[i] or 0),
+            "close": float(closes[i]),
+            "volume": float(volumes[i] or 0),
+        })
+
+    candles.sort(key=lambda x: x["date"])
+    logger.info(f"[Yahoo/Trade] {symbol}: {len(candles)} candles")
+    return candles

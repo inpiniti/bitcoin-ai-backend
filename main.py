@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import forecast, whale, xgb, market_cap
+from routers import forecast, whale, xgb, market_cap, auto_trade
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +50,7 @@ app.include_router(forecast.router)
 app.include_router(whale.router)
 app.include_router(xgb.router)
 app.include_router(market_cap.router)
+app.include_router(auto_trade.router)
 
 
 @app.get("/")

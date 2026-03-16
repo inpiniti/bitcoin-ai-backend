@@ -95,3 +95,90 @@ async def save_model(model_data: dict) -> str:
     if isinstance(result, list) and result:
         return result[0]["id"]
     raise Exception("모델 저장 후 id를 받지 못했습니다")
+
+
+# ─────────────────────────────────────────────
+# automation_settings (클라이언트 설정 테이블)
+# ─────────────────────────────────────────────
+
+async def load_automation_settings_active() -> dict | None:
+    """
+    클라이언트(AutomationSettingsPanel)에서 저장한 is_active=true 설정 1개를 로드합니다.
+    KIS 인증 정보(kis_appkey, kis_secret, kis_account)와
+    매매 조건(buy_condition, sell_condition, ai_model_key, ticker_group_key 등)을 포함합니다.
+    """
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/automation_settings?is_active=eq.true&select=*&limit=1"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"automation_settings 로드 실패 ({resp.status_code}): {resp.text}")
+    rows = resp.json()
+    return rows[0] if rows else None
+
+
+# ─────────────────────────────────────────────
+# 자동매매 딥러닝 관련
+# ─────────────────────────────────────────────
+
+async def load_auto_trade_settings() -> dict | None:
+    """auto_trade_dl_settings 테이블에서 설정 로드 (단일 행)"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/auto_trade_dl_settings?select=*&limit=1"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"설정 로드 실패 ({resp.status_code}): {resp.text}")
+    rows = resp.json()
+    return rows[0] if rows else None
+
+
+async def save_auto_trade_settings(data: dict) -> None:
+    """auto_trade_dl_settings upsert (id=1 고정 행)"""
+    _check_config()
+    data["id"] = 1  # 단일 설정 행
+    url = f"{SUPABASE_URL}/rest/v1/auto_trade_dl_settings"
+    headers = {**_headers(), "Prefer": "resolution=merge-duplicates"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=data, headers=headers)
+    if resp.status_code >= 400:
+        raise Exception(f"설정 저장 실패 ({resp.status_code}): {resp.text}")
+
+
+async def get_last_run_date() -> str | None:
+    """마지막 실행일 조회 (YYYY-MM-DD)"""
+    settings = await load_auto_trade_settings()
+    return settings.get("last_run_date") if settings else None
+
+
+async def update_last_run_date(date_str: str) -> None:
+    """마지막 실행일 업데이트"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/auto_trade_dl_settings?id=eq.1"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.patch(url, json={"last_run_date": date_str}, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"last_run_date 업데이트 실패 ({resp.status_code}): {resp.text}")
+
+
+async def save_auto_trade_log(data: dict) -> None:
+    """auto_trade_dl_logs 테이블에 실행 로그 저장"""
+    _check_config()
+    from datetime import datetime, timezone
+    data.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    url = f"{SUPABASE_URL}/rest/v1/auto_trade_dl_logs"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=data, headers=_headers())
+    if resp.status_code >= 400:
+        logger.warning(f"로그 저장 실패 ({resp.status_code}): {resp.text}")
+
+
+async def get_auto_trade_logs(limit: int = 30) -> list:
+    """auto_trade_dl_logs 최근 로그 조회"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/auto_trade_dl_logs?select=*&order=created_at.desc&limit={limit}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"로그 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()
