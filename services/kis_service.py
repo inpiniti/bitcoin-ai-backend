@@ -84,7 +84,16 @@ async def get_overseas_balance(appkey: str, appsecret: str, account_no: str, acc
         )
     data = resp.json()
     if data.get("rt_cd") == "0":
-        return {"success": True, "holdings": data.get("output1", []), "summary": data.get("output3", {})}
+        # output2에서 USD 행 찾아 외화사용가능금액(frcr_dncl_amt_2) 추출
+        output2 = data.get("output2", [])
+        usd_row = next((r for r in output2 if r.get("crcy_cd") == "USD"), {})
+        usd_available = float(usd_row.get("frcr_dncl_amt_2", 0) or 0)
+        return {
+            "success": True,
+            "holdings": data.get("output1", []),
+            "summary": data.get("output3", {}),
+            "usd_available": usd_available,
+        }
     return {"success": False, "error": data.get("msg1", "잔고 조회 실패")}
 
 

@@ -164,7 +164,7 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
                 return data_cache[ticker]
             try:
                 candles = await fetch_stock_history_for_trade(ticker)
-                if candles and len(candles) >= max(lookback + 5, 30):
+                if candles and len(candles) >= 31:
                     enriched = indicator_service.add_derived_data(candles)
                     data_cache[ticker] = enriched
                     return enriched
@@ -191,7 +191,7 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
                     continue
                 try:
                     buy_prob, _ = dl_model_service.predict(model, meta, get_feature_matrix(candles))
-                    logger.debug(f"  [{ticker}] buy_prob={buy_prob:.3f} (threshold={buy_threshold})")
+                    logger.info(f"  [매수스캔] {ticker} buy_prob={buy_prob:.1%}")
                     if buy_prob >= buy_threshold:
                         buy_list.append({**stock, "buy_prob": round(buy_prob, 4)})
                         log(f"  BUY 신호: {ticker} (확률={buy_prob:.1%})")
@@ -214,7 +214,7 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
                 continue
             try:
                 _, sell_prob = dl_model_service.predict(model, meta, get_feature_matrix(candles))
-                log(f"  [{ticker}] sell_prob={sell_prob:.1%} (threshold={sell_threshold:.1%})")
+                logger.info(f"  [매도스캔] {ticker} sell_prob={sell_prob:.1%}")
                 if sell_prob >= sell_threshold:
                     sell_list.append({
                         "ticker": ticker,
@@ -249,10 +249,8 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
 
         # ── 9. 매수 주문 실행 ─────────────────────────
         # 사용 가능한 달러 현금 조회 (output3.frcr_buy_amt_smtl: 외화 매수 가능금액)
-        bal_summary = balance_res.get("summary", {})
-        log(f"잔고 summary 원본: {bal_summary}")
-        available_cash = float(bal_summary.get("frcr_buy_amt_smtl", 0) or 0)
-        log(f"매수 가능 현금: ${available_cash:.2f}")
+        available_cash = balance_res.get("usd_available", 0.0)
+        log(f"매수 가능 현금 (USD): ${available_cash:.2f}")
 
         buy_count = len(buy_list)
         per_ticker_amount = (available_cash / buy_count) if buy_count > 0 else 0
