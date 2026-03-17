@@ -75,27 +75,12 @@ async def _load_target_tickers(target_group: str, holdings: list[dict]) -> list[
 # 핵심 플로우
 # ─────────────────────────────────────────────
 
-def _is_correct_execution_time() -> bool:
-    """
-    현재 UTC 시각이 미국 동부시간 기준 장 마감 1시간 전인지 확인합니다.
-    - EDT (써머타임, UTC-4): 장 마감 16:00 ET = 20:00 UTC → 실행 시각 19:00 UTC
-    - EST (겨울,    UTC-5): 장 마감 16:00 ET = 21:00 UTC → 실행 시각 20:00 UTC
-
-    Vercel Cron 이 EDT/EST 각각 19:00/20:00 UTC 에 호출하므로,
-    백엔드에서 현재 DST 여부를 확인해 맞지 않는 호출은 스킵합니다.
-    (±5분 허용 - Cron 지연 대비)
-    """
-    now_utc = datetime.now(timezone.utc)
-    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
-    is_dst = bool(now_et.dst())  # EDT이면 True, EST이면 False
-
-    # EDT: 실행 시각 19:00 UTC / EST: 실행 시각 20:00 UTC
-    expected_utc_hour = 19 if is_dst else 20
-    diff_minutes = abs((now_utc.hour * 60 + now_utc.minute) - expected_utc_hour * 60)
-
+def _log_dst_info():
+    """현재 DST 상태를 로그로 기록 (참고용)"""
+    now_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    is_dst = bool(now_et.dst())
     season = "EDT(써머타임)" if is_dst else "EST(겨울)"
-    logger.info(f"DST 체크: {season} | 기대 실행={expected_utc_hour}:00 UTC | 현재={now_utc.strftime('%H:%M')} UTC | 차이={diff_minutes}분")
-    return diff_minutes <= 5
+    logger.info(f"실행 시각: {now_et.strftime('%Y-%m-%d %H:%M')} ET ({season})")
 
 
 async def run_auto_trade_dl(is_test: bool = False) -> dict:
@@ -109,9 +94,7 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
     mode = "[TEST]" if is_test else ""
 
     try:
-        # ── DST 시각 체크 (테스트 모드는 스킵) ──────────
-        if not is_test and not _is_correct_execution_time():
-            return {"skipped": True, "reason": "DST 기준 실행 시각 불일치 (잘못된 크론 호출)"}
+        _log_dst_info()
 
         # ── 1. automation_settings 로드 ───────────────
         log("automation_settings 로드 중...")
