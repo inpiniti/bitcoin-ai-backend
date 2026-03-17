@@ -147,7 +147,7 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
         if not balance_res["success"]:
             raise RuntimeError(f"잔고 조회 실패: {balance_res['error']}")
 
-        holdings = [h for h in balance_res["holdings"] if int(h.get("ccld_qty_smtl1", 0)) > 0]
+        holdings = [h for h in balance_res["holdings"] if int(float(h.get("ccld_qty_smtl1", 0))) > 0]
         holding_tickers = {h["pdno"] for h in holdings}
         log(f"보유 종목: {len(holdings)}개")
 
@@ -217,7 +217,7 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
                     sell_list.append({
                         "ticker": ticker,
                         "name": holding.get("prdt_name", ""),
-                        "qty": int(holding.get("ccld_qty_smtl1", 0)),
+                        "qty": int(float(holding.get("ccld_qty_smtl1", 0))),
                         "sell_prob": round(sell_prob, 4),
                     })
                     log(f"  SELL: {ticker} (확률={sell_prob:.3f})")
