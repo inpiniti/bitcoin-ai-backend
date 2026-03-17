@@ -133,12 +133,13 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
 
         target_group = cfg.get("ticker_group_key", "myholdings")
         buy_threshold = float(cfg.get("buy_condition", 60)) / 100   # 60 → 0.6
-        sell_threshold = float(cfg.get("sell_condition", 20)) / 100  # 20 → 0.2
+        sell_threshold = float(cfg.get("sell_condition", 20)) / 100      # 확률 조건: buy_prob 이하면 매도
+        sell_profit_threshold = float(cfg.get("sell_profit_condition", 20))  # 수익률 조건: X% 이상이면 익절
         trade_enabled = bool(cfg.get("trade_enabled", False))
         if not trade_enabled:
             log("[모의매매] trade_enabled=false → 실제 주문 없이 로그만 기록합니다.")
 
-        log(f"설정 로드 완료 | 그룹={target_group} | 모델={model_id} | buy>={buy_threshold} | sell>={sell_threshold}")
+        log(f"설정 로드 완료 | 그룹={target_group} | 모델={model_id} | buy>={buy_threshold} | sell확률<={sell_threshold} | sell수익>={sell_profit_threshold}%")
 
         # ── 중복 실행 방지 (실제매매만 적용) ────────────
         if trade_enabled:
@@ -161,6 +162,11 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
 
         holdings = [h for h in balance_res["holdings"] if int(float(h.get("ccld_qty_smtl1", 0))) > 0]
         holding_tickers = {h["pdno"] for h in holdings}
+        # 보유 종목별 수익률 맵 (evlu_pfls_rt1: 평가손익율 %)
+        profit_rate_map = {
+            h["pdno"]: float(h.get("evlu_pfls_rt1", 0) or 0)
+            for h in holdings
+        }
         log(f"보유 종목: {len(holdings)}개")
 
         # ── 4. 매수 분석 대상 로드 ────────────────────
@@ -225,16 +231,28 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
             if not candles:
                 continue
             try:
-                _, sell_prob = dl_model_service.predict(model, meta, get_feature_matrix(candles))
-                logger.info(f"  [매도스캔] {ticker} sell_prob={sell_prob:.1%}")
-                if sell_prob >= sell_threshold:
+                buy_prob, _ = dl_model_service.predict(model, meta, get_feature_matrix(candles))
+                profit_rate = profit_rate_map.get(ticker, 0.0)
+                logger.info(f"  [매도스캔] {ticker} buy_prob={buy_prob:.1%} profit={profit_rate:.2f}%")
+
+                prob_signal = buy_prob <= sell_threshold
+                profit_signal = profit_rate >= sell_profit_threshold
+
+                if prob_signal or profit_signal:
+                    reason = []
+                    if prob_signal:
+                        reason.append(f"확률={buy_prob:.1%}≤{sell_threshold:.1%}")
+                    if profit_signal:
+                        reason.append(f"수익률={profit_rate:.2f}%≥{sell_profit_threshold}%")
                     sell_list.append({
                         "ticker": ticker,
                         "name": holding.get("prdt_name", ""),
                         "qty": int(float(holding.get("ccld_qty_smtl1", 0))),
-                        "sell_prob": round(sell_prob, 4),
+                        "sell_prob": round(1.0 - buy_prob, 4),
+                        "profit_rate": profit_rate,
+                        "sell_reason": " | ".join(reason),
                     })
-                    log(f"  SELL 신호: {ticker} (확률={sell_prob:.1%})")
+                    log(f"  SELL 신호: {ticker} ({' | '.join(reason)})")
             except Exception as e:
                 logger.warning(f"[{ticker}] 예측 실패: {e}")
 
