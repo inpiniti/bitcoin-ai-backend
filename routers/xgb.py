@@ -23,7 +23,34 @@ class PredictRequest(BaseModel):
     datasetId: str | None = None
 
 
-@router.post("/v1/xgb/train")
+@router.post(
+    "/v1/xgb/train",
+    summary="XGBoost 모델 학습",
+    description="""
+Supabase `stock_dataset`에 저장된 과거 주가 데이터를 불러와 **XGBoost 분류 모델**을 학습합니다.
+
+### 요청 파라미터
+- `datasetId`: Supabase `stock_dataset` 테이블의 ID (필수)
+- `modelName`: 저장할 모델 이름 (선택, 미입력 시 자동 생성)
+
+### 처리 흐름
+1. Supabase에서 캔들 데이터 로드
+2. 기술적 지표(SMA, RSI, 볼린저밴드 등) 계산
+3. 매수/매도 라벨 자동 생성 후 XGBoost 학습
+4. 학습된 모델을 Supabase Storage(`xgb-models` 버킷)에 저장
+
+### 응답 예시
+```json
+{
+  "success": true,
+  "model_id": "xgb_AAPL_20240601",
+  "accuracy": 0.72,
+  "features": ["sma_20", "rsi_14", "bb_upper"]
+}
+```
+""",
+    tags=["XGBoost"],
+)
 async def train(body: TrainRequest):
     if not body.datasetId:
         raise HTTPException(status_code=400, detail="datasetId is required")
@@ -38,7 +65,31 @@ async def train(body: TrainRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/v1/xgb/predict")
+@router.post(
+    "/v1/xgb/predict",
+    summary="XGBoost 매수/매도 예측",
+    description="""
+학습된 XGBoost 모델로 **현재 시점의 매수·매도 확률**을 예측합니다.
+
+### 요청 파라미터
+- `modelId`: 사용할 모델 ID (필수)
+- `features`: 직접 전달할 피처 벡터 (선택)
+- `datasetId`: 피처를 자동 계산할 데이터셋 ID (선택, `features` 미입력 시 필수)
+
+> `features`와 `datasetId` 중 하나는 반드시 입력해야 합니다.
+
+### 응답 예시
+```json
+{
+  "model_id": "xgb_AAPL_20240601",
+  "buy_probability": 0.68,
+  "sell_probability": 0.21,
+  "signal": "BUY"
+}
+```
+""",
+    tags=["XGBoost"],
+)
 async def predict(body: PredictRequest):
     if not body.modelId or (not body.features and not body.datasetId):
         raise HTTPException(

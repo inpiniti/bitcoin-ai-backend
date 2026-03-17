@@ -70,9 +70,32 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="bitcoin-ai-backend",
+    title="Bitcoin AI Backend",
     version="2.0.0",
-    description="FastAPI 기반 AI 예측 백엔드 (Motia 제거)",
+    description="""
+## Bitcoin AI Backend API
+
+**HuggingFace Spaces**에서 운영되는 AI 기반 주식·코인 분석 및 자동매매 백엔드입니다.
+
+### 주요 기능
+
+| 엔드포인트 | 설명 |
+|---|---|
+| `POST /v1/forecast` | Google TimesFM 딥러닝 모델로 가격 예측 |
+| `POST /v1/whale` | 고래(대규모 자금) 수급 신호 분석 |
+| `POST /v1/xgb/train` | XGBoost 매수/매도 분류 모델 학습 |
+| `POST /v1/xgb/predict` | 학습된 XGBoost 모델로 매수/매도 확률 예측 |
+| `POST /v1/market-cap` | AI 기반 적정 시가총액 추정 |
+| `POST /auto-trade/run` | 자동매매 실행 (APScheduler 평일 15:00 ET 자동 호출) |
+| `POST /auto-trade/run-test` | 자동매매 테스트 실행 (실제 주문 없음) |
+| `GET /auto-trade/settings` | 현재 활성 자동매매 설정 확인 |
+| `GET /auto-trade/logs` | 자동매매 실행 로그 조회 |
+
+### 자동매매 스케줄
+- **실행 시각**: 평일(월~금) **15:00 ET** (EDT/EST DST 자동 처리)
+- **설정 저장소**: Supabase `automation_settings` 테이블
+- **로그 저장소**: Supabase `auto_trade_dl_logs` 테이블
+""",
     lifespan=lifespan,
 )
 
@@ -90,6 +113,11 @@ app.include_router(market_cap.router)
 app.include_router(auto_trade.router)
 
 
-@app.get("/")
+@app.get(
+    "/",
+    summary="서버 상태 확인 (Health Check)",
+    description="서버가 정상적으로 실행 중인지 확인합니다. HuggingFace Space 슬립 상태 감지 및 웨이크업 용도로도 사용됩니다.",
+    tags=["health"],
+)
 async def health():
     return {"status": "ok", "version": "2.0.0"}
