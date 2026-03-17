@@ -29,7 +29,7 @@ logger = logging.getLogger("dl_model_service")
 
 SUPABASE_URL = os.environ.get("VITE_SUPABASE_URL") or os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("VITE_SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY", "")
-STORAGE_BUCKET = "dl-models"
+STORAGE_BUCKET = "ml-models"
 
 # 메모리 모델 캐시 (model_id → model 객체)
 _model_cache: dict = {}
@@ -44,8 +44,8 @@ def _headers() -> dict:
 
 
 async def load_model_meta(model_id: str) -> dict:
-    """dl_models 테이블에서 모델 메타데이터 로드"""
-    url = f"{SUPABASE_URL}/rest/v1/dl_models?id=eq.{model_id}&select=*"
+    """ml_models 테이블에서 모델 메타데이터 로드"""
+    url = f"{SUPABASE_URL}/rest/v1/ml_models?id=eq.{model_id}&select=*"
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, headers=_headers())
 
