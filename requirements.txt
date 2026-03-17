@@ -25,6 +25,7 @@ scikit-learn
 xgboost
 
 # ── Misc ─────────────────────────────────────────
+beautifulsoup4
 huggingface_hub
 tensorflow
 joblib

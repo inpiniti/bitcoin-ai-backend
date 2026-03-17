@@ -41,7 +41,9 @@ async def fetch_for_forecast(symbol: str, interval: str) -> tuple[list[float], s
     if not chart_result:
         raise ValueError(f"No data found for {symbol}")
 
-    timestamps = chart_result["timestamp"]
+    timestamps = chart_result.get("timestamp")
+    if not timestamps:
+        raise ValueError(f"[Yahoo] {symbol} timestamp 데이터 없음")
     closes = chart_result["indicators"]["quote"][0]["close"]
 
     valid_prices = [p for p in closes if p is not None]
@@ -77,7 +79,9 @@ async def fetch_for_whale(symbol: str, interval: str) -> list[dict]:
     if not chart_result:
         raise ValueError(f"No data found for {symbol}")
 
-    timestamps = chart_result["timestamp"]
+    timestamps = chart_result.get("timestamp")
+    if not timestamps:
+        raise ValueError(f"[Yahoo] {symbol} timestamp 데이터 없음")
     q = chart_result["indicators"]["quote"][0]
     closes, highs, lows, volumes = q["close"], q["high"], q["low"], q["volume"]
 

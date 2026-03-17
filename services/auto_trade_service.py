@@ -54,9 +54,21 @@ async def _load_target_tickers(target_group: str, holdings: list[dict]) -> list[
         )
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        import re
-        tickers = list(dict.fromkeys(re.findall(r'<td>([A-Z]{1,5})</td>', resp.text)))[:505]
-        return [{"ticker": t, "name": t} for t in tickers if t]
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "html.parser")
+        table = soup.find("table", {"id": "constituents"})
+        if not table:
+            return []
+        stocks = []
+        for row in table.select("tbody tr"):
+            tds = row.find_all("td")
+            if not tds:
+                continue
+            ticker = tds[0].get_text(strip=True).replace(".", "-")
+            name = tds[1].get_text(strip=True) if len(tds) > 1 else ticker
+            if ticker:
+                stocks.append({"ticker": ticker, "name": name})
+        return stocks
 
     if target_group == "superinvestor":
         async with httpx.AsyncClient(timeout=20) as client:
