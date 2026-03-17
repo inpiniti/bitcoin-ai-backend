@@ -138,12 +138,8 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
         # ── 2. 딥러닝 모델 로드 ───────────────────────
         log(f"모델 로드 중: {model_id}")
         meta, model = await dl_model_service.get_model(model_id)
-        features: list[str] = meta.get("features", [])
-        lookback: int = int(meta.get("lookback_period", 1))
-        # automation_settings 의 조건값을 우선 사용, 모델 메타데이터는 fallback
-        buy_threshold = buy_threshold or float(meta.get("buy_threshold", 0.6))
-        sell_threshold = sell_threshold or float(meta.get("sell_threshold", 0.6))
-        log(f"모델 로드 완료 | features={len(features)} | lookback={lookback}")
+        feature_count: int = int(meta.get("feature_count", 0))
+        log(f"모델 로드 완료 | feature_count={feature_count} | accuracy={meta.get('accuracy', 'N/A')}")
 
         # ── 3. 보유 종목 조회 ─────────────────────────
         log("보유 종목 조회 중...")
@@ -177,7 +173,7 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
             return None
 
         def get_feature_matrix(candles: list[dict]) -> list[list[float]]:
-            return indicator_service.extract_features_for_model(candles, features)
+            return indicator_service.extract_features_for_model(candles)
 
         # ── 5 & 6. 매수 신호 스캔 ─────────────────────
         log("매수 신호 스캔 중...")

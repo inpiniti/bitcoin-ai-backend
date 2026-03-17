@@ -165,13 +165,55 @@ def add_derived_data(candles: list[dict]) -> list[dict]:
     return result
 
 
-def extract_features_for_model(candles: list[dict], feature_columns: list[str]) -> list[list[float]]:
+def extract_features_for_model(candles: list[dict]) -> list[list[float]]:
     """
-    모델 메타데이터의 피처 목록 기준으로 데이터를 추출합니다.
-    None 값은 0으로 대체합니다.
+    클라이언트(mlProcessor.js)와 동일한 4개 피처를 계산합니다.
+    - consecutiveDays : 연속 상승(양수) / 하락(음수) 일수
+    - change1d        : 1일 변화율 (%)
+    - change7d        : 7일 변화율 (%)
+    - change30d       : 30일 변화율 (%)
+
+    최소 31개 캔들 필요. 반환값은 마지막 행만 사용하면 됩니다.
     """
+    if len(candles) <= 30:
+        return []
+
+    def get_close(c) -> float:
+        return float(c.get("close") or 0)
+
+    def change_pct(i: int, days: int) -> float:
+        past = candles[i - days]
+        past_close = get_close(past)
+        if past_close == 0:
+            return 0.0
+        pct = (get_close(candles[i]) - past_close) / past_close * 100
+        return round(pct, 2) if pct == pct else 0.0  # nan guard
+
     rows = []
-    for candle in candles:
-        row = [float(candle.get(col) or 0) for col in feature_columns]
-        rows.append(row)
+    for i in range(30, len(candles)):
+        today_close = get_close(candles[i])
+        prev_close = get_close(candles[i - 1])
+
+        # 연속 상승/하락 일수
+        consecutive = 0
+        if today_close > prev_close:
+            consecutive = 1
+            t = 1
+            while i - t > 0 and get_close(candles[i - t]) > get_close(candles[i - t - 1]):
+                consecutive += 1
+                t += 1
+        elif today_close < prev_close:
+            consecutive = -1
+            t = 1
+            while i - t > 0 and get_close(candles[i - t]) < get_close(candles[i - t - 1]):
+                consecutive -= 1
+                t += 1
+
+        rows.append([
+            float(consecutive),
+            change_pct(i, 1),
+            change_pct(i, 7),
+            change_pct(i, 30),
+        ])
+
     return rows
