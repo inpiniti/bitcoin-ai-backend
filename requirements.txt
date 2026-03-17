@@ -28,3 +28,6 @@ xgboost
 huggingface_hub
 tensorflow
 joblib
+
+# ── Scheduler ────────────────────────────────────
+apscheduler
