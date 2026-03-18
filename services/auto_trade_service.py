@@ -135,11 +135,12 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
         buy_threshold = float(cfg.get("buy_condition", 60)) / 100   # 60 → 0.6
         sell_threshold = float(cfg.get("sell_condition", 20)) / 100      # 확률 조건: buy_prob 이하면 매도
         sell_profit_threshold = float(cfg.get("sell_profit_condition", 20))  # 수익률 조건: X% 이상이면 익절
+        prevent_loss_sell = bool(cfg.get("prevent_loss_sell", False))        # 손실 중엔 매도 금지
         trade_enabled = bool(cfg.get("trade_enabled", False))
         if not trade_enabled:
             log("[모의매매] trade_enabled=false → 실제 주문 없이 로그만 기록합니다.")
 
-        log(f"설정 로드 완료 | 그룹={target_group} | 모델={model_id} | buy>={buy_threshold} | sell확률<={sell_threshold} | sell수익>={sell_profit_threshold}%")
+        log(f"설정 로드 완료 | 그룹={target_group} | 모델={model_id} | buy>={buy_threshold} | sell확률<={sell_threshold} | sell수익>={sell_profit_threshold}% | 손실매도방지={prevent_loss_sell}")
 
         # ── 중복 실행 방지 (실제매매만 적용) ────────────
         if trade_enabled:
@@ -162,9 +163,17 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
 
         holdings = [h for h in balance_res["holdings"] if int(float(h.get("ccld_qty_smtl1", 0))) > 0]
         holding_tickers = {h["pdno"] for h in holdings}
-        # 보유 종목별 수익률 맵 (evlu_pfls_rt1: 평가손익율 %)
+        # 보유 종목별 수익률 및 단가 맵
         profit_rate_map = {
             h["pdno"]: float(h.get("evlu_pfls_rt1", 0) or 0)
+            for h in holdings
+        }
+        # 평균단가 vs 현재가 (손실 여부 판단용)
+        price_map = {
+            h["pdno"]: {
+                "avg": float(h.get("avg_unpr3", 0) or 0),
+                "current": float(h.get("ovrs_now_pric1", 0) or 0),
+            }
             for h in holdings
         }
         log(f"보유 종목: {len(holdings)}개")
@@ -237,6 +246,15 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
 
                 prob_signal = buy_prob <= sell_threshold
                 profit_signal = profit_rate >= sell_profit_threshold
+
+                # 손실 중 매도 방지
+                if prevent_loss_sell:
+                    prices = price_map.get(ticker, {})
+                    avg_price = prices.get("avg", 0)
+                    cur_price = prices.get("current", 0)
+                    if cur_price > 0 and avg_price > 0 and cur_price < avg_price:
+                        logger.info(f"  [{ticker}] 손실매도방지 (현재가={cur_price} < 평균단가={avg_price}) → 스킵")
+                        continue
 
                 if prob_signal or profit_signal:
                     reason = []
