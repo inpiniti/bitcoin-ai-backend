@@ -22,6 +22,23 @@ logger = logging.getLogger("main")
 
 scheduler = AsyncIOScheduler()
 
+# ── 미장 기준 상대 시간 매핑 (ET 기준, DST 자동 처리) ──
+# 미국 정규장: 09:30 ~ 16:00 ET
+MARKET_TIME_MAP: dict[str, tuple[int, int]] = {
+    "market_open":      (9,  30),  # 장 시작
+    "market_open_30m":  (10,  0),  # 장 시작 30분 후
+    "market_open_1h":   (10, 30),  # 장 시작 1시간 후
+    "market_close_2h":  (14,  0),  # 장 마감 2시간 전
+    "market_close_1h":  (15,  0),  # 장 마감 1시간 전 (기본값)
+    "market_close_30m": (15, 30),  # 장 마감 30분 전
+    "market_close":     (16,  0),  # 장 마감
+}
+
+
+def _parse_market_time(time_key: str) -> tuple[int, int]:
+    """미장 기준 상대 시간 키 → (hour, minute) ET 변환. 알 수 없는 키는 기본값 15:00 반환."""
+    return MARKET_TIME_MAP.get(time_key, (15, 0))
+
 
 async def _scheduled_auto_trade():
     """스케줄러가 호출하는 자동매매 진입점"""
@@ -32,6 +49,38 @@ async def _scheduled_auto_trade():
         logger.info(f"[Scheduler] 자동매매 완료: {result}")
     except Exception as e:
         logger.exception(f"[Scheduler] 자동매매 실패: {e}")
+
+
+async def reschedule_from_settings() -> dict:
+    """
+    Supabase automation_settings의 활성 설정에서 execution_time을 읽어
+    APScheduler 잡을 재등록합니다. 라우터에서도 호출 가능합니다.
+    """
+    from services.supabase_service import load_automation_settings_active
+
+    time_key = "market_close_1h"
+    try:
+        cfg = await load_automation_settings_active()
+        if cfg and cfg.get("execution_time"):
+            time_key = cfg["execution_time"]
+    except Exception as e:
+        logger.warning(f"[Scheduler] 설정 로드 실패, 기본값 사용: {e}")
+
+    hour, minute = _parse_market_time(time_key)
+    scheduler.add_job(
+        _scheduled_auto_trade,
+        CronTrigger(
+            hour=hour,
+            minute=minute,
+            day_of_week="mon-fri",
+            timezone="America/New_York",  # DST 자동 처리
+        ),
+        id="auto_trade_dl",
+        replace_existing=True,
+    )
+    msg = f"평일 {hour:02d}:{minute:02d} ET ({time_key})"
+    logger.info(f"[Scheduler] 스케줄 등록 완료: {msg}")
+    return {"time_key": time_key, "hour": hour, "minute": minute, "schedule": msg}
 
 
 @asynccontextmanager
@@ -46,21 +95,11 @@ async def lifespan(app: FastAPI):
         logger.warning(f"TimesFM 사전 로드 실패 (첫 요청 시 로드): {e}")
 
     # ── 자동매매 스케줄러 시작 ──────────────────────
-    # America/New_York 타임존 지정 → DST(EDT/EST) 자동 처리
-    # 평일(월~금) 15:00 ET = 장 마감 1시간 전
-    scheduler.add_job(
-        _scheduled_auto_trade,
-        CronTrigger(
-            hour=15,
-            minute=0,
-            day_of_week="mon-fri",
-            timezone="America/New_York",
-        ),
-        id="auto_trade_dl",
-        replace_existing=True,
-    )
+    # Supabase 설정에서 실행 시간 읽기 → 동적 스케줄 등록
+    # America/New_York 타임존으로 DST(EDT/EST) 자동 처리
     scheduler.start()
-    logger.info("[Scheduler] 자동매매 스케줄러 시작 (평일 15:00 ET)")
+    result = await reschedule_from_settings()
+    logger.info(f"[Scheduler] 자동매매 스케줄러 시작: {result['schedule']}")
 
     yield
 
@@ -92,7 +131,8 @@ app = FastAPI(
 | `GET /auto-trade/logs` | 자동매매 실행 로그 조회 |
 
 ### 자동매매 스케줄
-- **실행 시각**: 평일(월~금) **15:00 ET** (EDT/EST DST 자동 처리)
+- **실행 시각**: Supabase `automation_settings.execution_time` 기반 동적 설정 (기본: 평일 15:00 ET)
+- **DST 처리**: `America/New_York` 타임존으로 썸머타임 자동 처리
 - **설정 저장소**: Supabase `automation_settings` 테이블
 - **로그 저장소**: Supabase `auto_trade_dl_logs` 테이블
 """,
