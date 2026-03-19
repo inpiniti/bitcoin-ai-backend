@@ -337,6 +337,17 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
         }
         await save_auto_trade_log(summary)
         log(f"{mode} 자동매매 완료")
+
+        # ── 11. 카카오 리포트 전송 ────────────────────
+        try:
+            from services.kakao_service import send_trade_report, build_trade_report
+            report_text = build_trade_report(summary, mode)
+            sent = await send_trade_report(cfg, report_text)
+            if sent:
+                log("[Kakao] 매매 리포트 전송 완료")
+        except Exception as e:
+            logger.warning(f"[Kakao] 리포트 전송 실패 (매매 결과에는 영향 없음): {e}")
+
         return summary
 
     except Exception as e:
