@@ -167,8 +167,16 @@ async def fetch_stock_history_yf(ticker: str, days: int) -> list[dict]:
 
         def _download():
             tkr = yf.Ticker(ticker)
-            hist = tkr.history(period=period)
-            return hist
+            # max 미지원 종목(워런트 등)은 5y → 2y → 1y 순으로 폴백
+            fallback_periods = [period] if period != "max" else ["max", "5y", "2y", "1y"]
+            for p in fallback_periods:
+                try:
+                    hist = tkr.history(period=p)
+                    if hist is not None and not hist.empty:
+                        return hist
+                except Exception:
+                    continue
+            return None
 
         hist = await loop.run_in_executor(None, _download)
 
@@ -212,19 +220,21 @@ def process_stock_data_for_ml(candles: list[dict]) -> tuple[list, list]:
 
         if not today.get("close") or not tomorrow.get("close"):
             continue
+        if not candles[i - 1].get("close"):
+            continue
 
         # 1. 연속 상승/하락 일수
         consecutive_days = 0
         if today["close"] > candles[i - 1]["close"]:
             temp = 1
-            while i - temp > 0 and candles[i - temp]["close"] > candles[i - temp - 1]["close"]:
+            while i - temp > 0 and candles[i - temp].get("close") and candles[i - temp - 1].get("close") and candles[i - temp]["close"] > candles[i - temp - 1]["close"]:
                 consecutive_days += 1
                 temp += 1
             if consecutive_days == 0:
                 consecutive_days = 1
         elif today["close"] < candles[i - 1]["close"]:
             temp = 1
-            while i - temp > 0 and candles[i - temp]["close"] < candles[i - temp - 1]["close"]:
+            while i - temp > 0 and candles[i - temp].get("close") and candles[i - temp - 1].get("close") and candles[i - temp]["close"] < candles[i - temp - 1]["close"]:
                 consecutive_days -= 1
                 temp += 1
             if consecutive_days == 0:
