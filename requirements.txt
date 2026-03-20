@@ -29,6 +29,8 @@ beautifulsoup4
 huggingface_hub
 tensorflow
 joblib
+yfinance
+lxml
 
 # ── Scheduler ────────────────────────────────────
 apscheduler
