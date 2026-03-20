@@ -28,8 +28,7 @@ from services import kis_service, indicator_service, dl_model_service
 from services.supabase_service import (
     load_automation_settings_active,
     save_auto_trade_log,
-    update_last_run_date,
-    get_last_run_date,
+
 )
 from services.yahoo_service import fetch_stock_history_for_trade
 
@@ -141,13 +140,6 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
             log("[모의매매] trade_enabled=false → 실제 주문 없이 로그만 기록합니다.")
 
         log(f"설정 로드 완료 | 그룹={target_group} | 모델={model_id} | buy>={buy_threshold} | sell확률<={sell_threshold} | sell수익>={sell_profit_threshold}% | 손실매도방지={prevent_loss_sell}")
-
-        # ── 중복 실행 방지 (실제매매만 적용) ────────────
-        if trade_enabled:
-            last_run = await get_last_run_date()
-            if last_run == today_str:
-                return {"skipped": True, "reason": f"금일({today_str}) 이미 실행됨"}
-            await update_last_run_date(today_str)
 
         # ── 2. 딥러닝 모델 로드 ───────────────────────
         log(f"모델 로드 중: {model_id}")
