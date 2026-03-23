@@ -66,7 +66,7 @@ def run_forecast(symbol: str, interval: str, prices: list[float], last_date: str
     # 날짜 계산
     try:
         base_date = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
-    except Exception:
+    except ValueError:
         base_date = datetime.now(tz=timezone.utc)
 
     time_unit = timedelta(days=1) if interval == "day" else timedelta(hours=1)
