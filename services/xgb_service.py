@@ -37,7 +37,7 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
     data_collector.py에서 서버 사이드 수집 완료 후 직접 호출하는 경로입니다.
     """
     from services import supabase_service
-    from sklearn.metrics import accuracy_score
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 
     xgb, np = _get_deps()
 
@@ -62,7 +62,17 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
     model.fit(X_train, y_train)
 
     preds    = model.predict(X_test)
-    accuracy = float(accuracy_score(y_test, preds))
+    probs    = model.predict_proba(X_test)[:, 1]
+    accuracy  = float(accuracy_score(y_test, preds))
+    f1        = float(f1_score(y_test, preds, zero_division=0))
+    precision = float(precision_score(y_test, preds, zero_division=0))
+    recall    = float(recall_score(y_test, preds, zero_division=0))
+    try:
+        auc_val = roc_auc_score(y_test, probs)
+        import math
+        auc = 0.0 if math.isnan(auc_val) else float(auc_val)
+    except ValueError:
+        auc = 0.0  # 단일 클래스만 존재하는 경우
 
     model_json_str = model.get_booster().save_raw("json").decode("utf-8")
     model_json     = json.loads(model_json_str)
@@ -70,18 +80,26 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
     model_data = {
         "name":          model_name,
         "accuracy":      accuracy,
+        "f1":            f1,
+        "precision":     precision,
+        "recall":        recall,
+        "auc":           auc,
         "feature_count": int(X.shape[1]),
         "sample_count":  int(X.shape[0]),
         "model_json":    model_json,
     }
 
-    logger.info(f"[XGB:Train] Supabase 저장 중... accuracy={accuracy:.4f}")
+    logger.info(f"[XGB:Train] Supabase 저장 중... accuracy={accuracy:.4f} f1={f1:.4f} auc={auc:.4f}")
     model_id = await supabase_service.save_model(model_data)
     logger.info(f"[XGB:Train] 저장 완료 modelId={model_id}")
 
     return {
         "modelId":      model_id,
         "accuracy":     accuracy,
+        "f1":           f1,
+        "precision":    precision,
+        "recall":       recall,
+        "auc":          auc,
         "featureCount": int(X.shape[1]),
         "sampleCount":  int(X.shape[0]),
     }
