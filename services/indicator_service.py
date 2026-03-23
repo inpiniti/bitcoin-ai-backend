@@ -73,6 +73,43 @@ def _volume_ma(volumes: list[float], period: int = 20) -> list[float | None]:
     return _sma(volumes, period)
 
 
+def _macd(
+    closes: list[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """MACD = EMA(fast) - EMA(slow), signal = EMA(MACD, signal), histogram = MACD - signal"""
+    ema_fast = _ema(closes, fast)
+    ema_slow = _ema(closes, slow)
+
+    macd_line = [
+        (f - s) if f is not None and s is not None else None
+        for f, s in zip(ema_fast, ema_slow)
+    ]
+
+    # signal line: EMA of macd_line (only non-None values)
+    signal_line = [None] * len(closes)
+    valid_start = next((i for i, v in enumerate(macd_line) if v is not None), None)
+    if valid_start is not None:
+        k = 2 / (signal + 1)
+        first_signal = valid_start + signal - 1
+        if first_signal < len(closes):
+            window = [v for v in macd_line[valid_start:valid_start + signal] if v is not None]
+            if len(window) == signal:
+                signal_line[first_signal] = sum(window) / signal
+                for i in range(first_signal + 1, len(closes)):
+                    if macd_line[i] is not None and signal_line[i - 1] is not None:
+                        signal_line[i] = macd_line[i] * k + signal_line[i - 1] * (1 - k)
+
+    histogram = [
+        (m - s) if m is not None and s is not None else None
+        for m, s in zip(macd_line, signal_line)
+    ]
+
+    return macd_line, signal_line, histogram
+
+
 def add_derived_data(candles: list[dict]) -> list[dict]:
     """
     OHLCV 데이터에 기술적 지표를 추가합니다.
@@ -104,6 +141,9 @@ def add_derived_data(candles: list[dict]) -> list[dict]:
 
     # 거래량 이동평균
     vol_ma20 = _volume_ma(volumes, 20)
+
+    # MACD (12/26/9)
+    macd_line, macd_signal, macd_hist = _macd(closes, 12, 26, 9)
 
     result = []
     for i, candle in enumerate(candles):
@@ -159,6 +199,11 @@ def add_derived_data(candles: list[dict]) -> list[dict]:
         c["trend_20_60"] = (
             1 if sma20[i] and sma60[i] and sma20[i] > sma60[i] else (0 if sma20[i] and sma60[i] else None)
         )
+
+        # MACD
+        c["macd"] = macd_line[i]
+        c["macd_signal"] = macd_signal[i]
+        c["macd_hist"] = macd_hist[i]
 
         result.append(c)
 
