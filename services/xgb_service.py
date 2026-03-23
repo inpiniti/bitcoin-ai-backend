@@ -4,8 +4,6 @@ XGBoost 학습 / 예측 서비스
 """
 import json
 import logging
-import os
-import tempfile
 
 logger = logging.getLogger("xgb_service")
 
@@ -98,17 +96,10 @@ async def predict(model_id: str, features: list | None, dataset_id: str | None) 
     logger.info(f"[XGB:Predict] 모델 로드: {model_id}")
     model_json = await supabase_service.load_model(model_id)
 
-    # 임시 파일로 모델 로드 (xgb.Booster는 파일 경로 필요)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(model_json, f)
-        temp_path = f.name
-
-    try:
-        booster = xgb.Booster()
-        booster.load_model(temp_path)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    # bytearray로 직접 로드 (임시 파일 불필요)
+    model_bytes = json.dumps(model_json).encode("utf-8")
+    booster = xgb.Booster()
+    booster.load_model(bytearray(model_bytes))
 
     # features 확보
     if dataset_id and not features:
