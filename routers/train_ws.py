@@ -62,7 +62,7 @@ async def websocket_train(websocket: WebSocket):
             _set_job(collect_progress=progress)
             try:
                 await websocket.send_json({"type": "collection", "progress": progress})
-            except Exception:
+            except (WebSocketDisconnect, RuntimeError):
                 pass  # 브라우저가 닫혀도 서버는 계속 수집
 
         await websocket.send_json({"type": "collection", "progress": 0})
@@ -78,7 +78,7 @@ async def websocket_train(websocket: WebSocket):
             _set_job(status="error", error="데이터 수집 결과가 없습니다.")
             try:
                 await websocket.send_json({"type": "error", "message": _job["error"]})
-            except Exception:
+            except (WebSocketDisconnect, RuntimeError):
                 pass
             return
 
@@ -89,7 +89,7 @@ async def websocket_train(websocket: WebSocket):
             await websocket.send_json({"type": "collection", "progress": 100})
             await websocket.send_json({"type": "training", "progress": 0})
             await websocket.send_json({"type": "training", "progress": 10})
-        except Exception:
+        except (WebSocketDisconnect, RuntimeError):
             pass
 
         # 3. 학습 (브라우저 닫혀도 여기까지 실행됨)
@@ -101,7 +101,7 @@ async def websocket_train(websocket: WebSocket):
         try:
             await websocket.send_json({"type": "training", "progress": 100})
             await websocket.send_json({"type": "complete", "result": result})
-        except Exception:
+        except (WebSocketDisconnect, RuntimeError):
             pass
 
     except WebSocketDisconnect:
@@ -111,5 +111,5 @@ async def websocket_train(websocket: WebSocket):
         _set_job(status="error", error=str(e))
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
-        except Exception:
+        except (WebSocketDisconnect, RuntimeError):
             pass
