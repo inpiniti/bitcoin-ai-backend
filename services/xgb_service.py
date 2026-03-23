@@ -37,7 +37,6 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
     data_collector.py에서 서버 사이드 수집 완료 후 직접 호출하는 경로입니다.
     """
     from services import supabase_service
-    from sklearn.model_selection import train_test_split
     from sklearn.metrics import accuracy_score
 
     xgb, np = _get_deps()
@@ -47,7 +46,10 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
 
     logger.info(f"[XGB:Train] 학습 시작: {X.shape[0]}개 샘플, {X.shape[1]}개 피처")
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # 시계열 순서 유지 — 랜덤 셔플 시 미래 데이터가 훈련셋에 유입됨(data leakage)
+    split = int(len(X) * 0.8)
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
 
     model = xgb.XGBClassifier(
         n_estimators=100,
