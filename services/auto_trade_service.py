@@ -294,7 +294,10 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
 
         buy_count = len(buy_list)
         per_ticker_amount = (available_cash / buy_count) if buy_count > 0 else 0
-        log(f"티커당 배분: ${per_ticker_amount:.2f} ({buy_count}개 균등 분배)")
+        # 리스크 관리: 종목당 최대 10% 캡 적용 (단일 종목 집중 방지)
+        max_per_ticker = available_cash * 0.10
+        per_ticker_amount = min(per_ticker_amount, max_per_ticker)
+        log(f"티커당 배분: ${per_ticker_amount:.2f} ({buy_count}개 균등 분배, 최대 10% 캡 적용)")
 
         buy_results = []
         for item in buy_list:
@@ -306,6 +309,9 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
             price = price_res["price"]
             exchange = price_res.get("exchange", "NAS")
             qty = int(per_ticker_amount / price) if price > 0 else 0
+            if qty == 0:
+                log(f"  [스킵] {ticker}: 수량 부족 (배분 ${per_ticker_amount:.2f} < 주가 ${price}/주)")
+                continue
             if trade_enabled:
                 result = await kis_service.buy_overseas_stock(appkey, appsecret, account_no, account_code, ticker, qty, price, exchange)
                 buy_results.append({"ticker": ticker, "qty": qty, "price": price, "result": result})
@@ -323,8 +329,8 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
             "holdings_count": len(holdings),
             "buy_signals": len(buy_list),
             "sell_signals": len(sell_list),
-            "buy_orders": len(buy_results),
-            "sell_orders": len(sell_results),
+            "buy_orders": len([r for r in buy_results if r.get("simulated") or r.get("result", {}).get("success")]),
+            "sell_orders": len([r for r in sell_results if r.get("simulated") or r.get("result", {}).get("success")]),
             "logs": logs,
         }
         await save_auto_trade_log(summary)
