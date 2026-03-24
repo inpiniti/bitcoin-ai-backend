@@ -129,16 +129,23 @@ SARAMIN_SEARCH_LINK = (
     "?searchword=프론트엔드&company_type=ST020&recruitSort=reg_dt"
 )
 
+SITE_LABEL: dict[str, str] = {
+    "saramin": "사람인",
+    "wanted": "원티드",
+    "jobkorea": "잡코리아",
+    "jumpit": "점핏",
+}
+
 
 def build_job_report(
     jobs: list[dict],
     keyword: str = "프론트엔드",
-) -> tuple[str, str] | tuple[str, str]:
+) -> tuple[str, str]:
     """
-    #49 #50 채용공고 일일 리포트 (압축 포맷).
+    #49 #50 #56 채용공고 일일 리포트.
 
-    카카오 미리보기 안에 최대한 많은 공고가 보이도록
-    항목당 1줄로 압축. URL은 개별 표시 없이 web_url로 제어.
+    각 공고에 플랫폼 태그([사람인] 등)와 링크를 표시.
+    2000자 제한 내에서 URL을 최대한 포함하고, 초과 시 URL 생략.
 
     Returns:
         (text, web_url) 튜플.
@@ -153,22 +160,44 @@ def build_job_report(
     date_str = now_kst.strftime("%Y.%m.%d")
     total = len(jobs)
 
-    lines = [
-        f"📋 {keyword} 채용 ({date_str}) | 대기업 {total}건",
-        f"━━━━━━━━━━━━━━━━",
-    ]
+    header = f"📋 {keyword} 채용 ({date_str}) | {total}건\n━━━━━━━━━━━━━━━━"
+    footer = "━━━━━━━━━━━━━━━━\n🤖 자동발송 | 자세히보기 ↓"
+    LIMIT = 2000
+
+    body_lines: list[str] = []
+    # 헤더 + 푸터 + 구분 개행 기본 길이
+    used = len(header) + 1 + len(footer) + 1
 
     for i, job in enumerate(jobs, 1):
-        deadline = (job.get("deadline") or "상시")
-        # 날짜 형식 2026-04-30 → 04.30 으로 단축
+        deadline = job.get("deadline") or "상시"
         if len(deadline) == 10 and "-" in deadline:
             deadline = deadline[5:].replace("-", ".")
-        lines.append(f"{i}. {job['company']} - {job['title']} (~{deadline})")
 
-    lines.append(f"━━━━━━━━━━━━━━━━")
-    lines.append(f"🤖 자동발송 | 자세히보기 ↓")
+        site = job.get("site", "")
+        label = SITE_LABEL.get(site, site) if site else ""
+        platform = f"[{label}] " if label else ""
+        url = (job.get("url") or "").strip()
 
-    text = "\n".join(lines)
+        base_line = f"{i}. {platform}{job['company']} - {job['title']} (~{deadline})"
+        url_line = f"   🔗 {url}" if url else ""
+
+        # URL 포함 시도
+        entry_with_url = base_line + ("\n" + url_line if url_line else "")
+        cost_with = len(entry_with_url) + 1  # +1 개행
+
+        if used + cost_with <= LIMIT:
+            body_lines.append(entry_with_url)
+            used += cost_with
+        else:
+            # URL 없이 시도
+            cost_without = len(base_line) + 1
+            if used + cost_without <= LIMIT:
+                body_lines.append(base_line)
+                used += cost_without
+            else:
+                break  # 더 이상 추가 불가
+
+    text = header + "\n" + "\n".join(body_lines) + "\n" + footer
     return (text, SARAMIN_SEARCH_LINK)
 
 

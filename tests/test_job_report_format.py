@@ -2,6 +2,7 @@
 #49 카카오 메시지 포맷 압축 TDD
 #50 자세히보기 링크 URL 제어
 #51 비개발 직군 공고 필터링
+#56 채용 알림 메시지에 플랫폼 및 링크 누락 문제 수정
 
 RED → GREEN 순으로 진행
 """
@@ -28,7 +29,7 @@ def make_jobs(n: int, site: str = "saramin") -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# #49 메시지 압축: 항목당 1줄, 20개도 카카오 미리보기에 들어오도록
+# #49 메시지 압축: 2000자 제한 내, 카카오 미리보기에 최대한 표시
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestJobReportCompact:
@@ -37,21 +38,11 @@ class TestJobReportCompact:
         text, _ = build_job_report(jobs, **kw)
         return text
 
-    def test_single_job_occupies_one_line(self):
-        """#49: 공고 1개는 목록에서 정확히 1줄만 차지해야 함"""
+    def test_single_job_under_limit(self):
+        """#49: 공고 1개 메시지가 2000자 이내"""
         jobs = make_jobs(1)
         text = self._text(jobs)
-        lines = text.splitlines()
-        # 헤더 2줄(제목+구분선) + 공고 1줄 + 푸터 2줄(구분선+서명) = 5줄
-        assert len(lines) == 5, f"예상 5줄, 실제 {len(lines)}줄:\n{text}"
-
-    def test_no_url_per_item(self):
-        """#49: 개별 항목 줄에 URL이 없어야 함"""
-        jobs = make_jobs(3)
-        text = self._text(jobs)
-        job_lines = [l for l in text.splitlines() if l and l[0].isdigit()]
-        for line in job_lines:
-            assert "https://" not in line, f"URL이 공고 줄에 포함됨: {line}"
+        assert len(text) <= 2000
 
     def test_20_jobs_under_kakao_limit(self):
         """#49: 20개 공고 메시지가 카카오 API 한도(2000자) 이내"""
@@ -59,19 +50,12 @@ class TestJobReportCompact:
         text = self._text(jobs)
         assert len(text) <= 2000, f"메시지 {len(text)}자 (2000자 초과)"
 
-    def test_20_jobs_much_shorter_than_old_format(self):
-        """#49: 20개 공고가 구 포맷(4줄×20=80줄)보다 훨씬 짧아야 함 → 20줄 이내"""
+    def test_20_jobs_shorter_than_old_format(self):
+        """#49: 20개 공고가 구 포맷(4줄×20=80줄)보다 짧아야 함 → 50줄 이내"""
         jobs = make_jobs(20)
         text = self._text(jobs)
         lines = text.splitlines()
-        assert len(lines) <= 25, f"예상 25줄 이내, 실제 {len(lines)}줄"
-
-    def test_5_jobs_line_count(self):
-        """#49: 5개 공고는 10줄 이내 (구 포맷은 5×4=20줄)"""
-        jobs = make_jobs(5)
-        text = self._text(jobs)
-        lines = text.splitlines()
-        assert len(lines) <= 10, f"예상 10줄 이내, 실제 {len(lines)}줄"
+        assert len(lines) <= 50, f"예상 50줄 이내, 실제 {len(lines)}줄"
 
     def test_format_contains_company_and_title(self):
         """#49: 압축 후에도 회사명과 직무명은 포함되어야 함"""
@@ -91,6 +75,62 @@ class TestJobReportCompact:
         jobs = make_jobs(20)
         text = self._text(jobs)
         assert "20" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #56 플랫폼 태그 및 개별 링크 표시
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestJobReportPlatformAndLink:
+
+    def _text(self, jobs, **kw) -> str:
+        text, _ = build_job_report(jobs, **kw)
+        return text
+
+    def test_platform_tag_shown(self):
+        """#56: 각 공고에 플랫폼 태그가 표시되어야 함"""
+        jobs = make_jobs(1, site="saramin")
+        text = self._text(jobs)
+        assert "[사람인]" in text, f"플랫폼 태그 없음:\n{text}"
+
+    def test_platform_tag_wanted(self):
+        """#56: 원티드 플랫폼 태그 표시"""
+        jobs = make_jobs(1, site="wanted")
+        text = self._text(jobs)
+        assert "[원티드]" in text
+
+    def test_platform_tag_jobkorea(self):
+        """#56: 잡코리아 플랫폼 태그 표시"""
+        jobs = make_jobs(1, site="jobkorea")
+        text = self._text(jobs)
+        assert "[잡코리아]" in text
+
+    def test_platform_tag_jumpit(self):
+        """#56: 점핏 플랫폼 태그 표시"""
+        jobs = make_jobs(1, site="jumpit")
+        text = self._text(jobs)
+        assert "[점핏]" in text
+
+    def test_url_shown_per_item(self):
+        """#56: 각 공고에 🔗 링크 줄이 있어야 함"""
+        jobs = make_jobs(1)
+        text = self._text(jobs)
+        assert "🔗" in text, f"링크 없음:\n{text}"
+        assert "https://" in text
+
+    def test_url_on_separate_line(self):
+        """#56: URL은 공고 제목 줄과 별도 줄에 표시"""
+        jobs = make_jobs(1)
+        text = self._text(jobs)
+        digit_lines = [l for l in text.splitlines() if l and l[0].isdigit()]
+        for line in digit_lines:
+            assert "https://" not in line, f"URL이 번호 줄에 포함됨: {line}"
+
+    def test_url_not_shown_when_missing(self):
+        """#56: url 필드 없으면 🔗 줄 생략"""
+        jobs = [{"site": "saramin", "company": "A", "title": "개발자", "url": "", "deadline": None}]
+        text = self._text(jobs)
+        assert "🔗" not in text
 
 
 # ══════════════════════════════════════════════════════════════════════════════
