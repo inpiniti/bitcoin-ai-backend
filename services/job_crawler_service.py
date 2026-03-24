@@ -296,6 +296,43 @@ async def crawl_wanted(
     return jobs
 
 
+# ── #51 IT 직군 필터 ──────────────────────────────────────────────────────────
+
+# 통과 조건: 제목에 아래 키워드 중 하나 이상 포함
+IT_ALLOW_KEYWORDS = [
+    "프론트엔드", "frontend", "front-end",
+    "react", "vue", "angular", "next.js", "nuxt",
+    "javascript", "typescript", "웹 개발", "웹개발",
+    "ui개발", "ui 개발",
+]
+
+# 차단 조건: IT 키워드가 있더라도 아래 키워드가 포함되면 제외
+IT_BLOCK_KEYWORDS = [
+    "호텔", "카지노", "프런트데스크", "프런트 데스크",
+    "안내", "리셉션", "접수", "프론트 직원", "프론트직원",
+]
+
+
+def filter_it_jobs(jobs: list[JobListing]) -> list[JobListing]:
+    """
+    #51 IT 개발 직군 공고만 필터링.
+
+    - IT_ALLOW_KEYWORDS 중 하나라도 제목에 포함 → 통과
+    - IT_BLOCK_KEYWORDS 중 하나라도 제목에 포함 → 차단 (allow보다 우선)
+    """
+    result = []
+    for job in jobs:
+        title_lower = job.title.lower()
+        if any(kw in title_lower for kw in IT_BLOCK_KEYWORDS):
+            logger.debug(f"[Filter] 차단: {job.title}")
+            continue
+        if any(kw in title_lower for kw in IT_ALLOW_KEYWORDS):
+            result.append(job)
+        else:
+            logger.debug(f"[Filter] IT 키워드 없음, 스킵: {job.title}")
+    return result
+
+
 # ── 통합 크롤러 ───────────────────────────────────────────────────────────────
 
 async def crawl_all_jobs(
@@ -315,6 +352,9 @@ async def crawl_all_jobs(
     saramin_jobs, wanted_jobs = await asyncio.gather(saramin_task, wanted_task)
     all_jobs = saramin_jobs + wanted_jobs
 
+    # #51 IT 직군 필터
+    all_jobs = filter_it_jobs(all_jobs)
+
     # URL 기준 중복 제거
     seen: set[str] = set()
     unique: list[JobListing] = []
@@ -323,5 +363,5 @@ async def crawl_all_jobs(
             seen.add(job.url)
             unique.append(job)
 
-    logger.info(f"[CrawlAll] 사람인 {len(saramin_jobs)} + 원티드 {len(wanted_jobs)} → 중복 제거 후 {len(unique)}건")
+    logger.info(f"[CrawlAll] 사람인 {len(saramin_jobs)} + 원티드 {len(wanted_jobs)} → IT 필터 + 중복 제거 후 {len(unique)}건")
     return unique

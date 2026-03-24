@@ -51,7 +51,11 @@ async def _update_tokens_in_supabase(config_id, tokens: dict):
         await client.patch(url, json=tokens, headers=_headers())
 
 
-async def _send_message(access_token: str, text: str) -> bool:
+async def _send_message(
+    access_token: str,
+    text: str,
+    web_url: str = "https://kakao.com",
+) -> bool:
     """나에게 보내기 API 호출."""
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
@@ -60,7 +64,7 @@ async def _send_message(access_token: str, text: str) -> bool:
             data={"template_object": json.dumps({
                 "object_type": "text",
                 "text": text[:2000],  # 카카오 최대 2000자
-                "link": {"web_url": "https://kakao.com"},
+                "link": {"web_url": web_url},
             })},
         )
     if resp.status_code != 200:
@@ -80,7 +84,11 @@ async def load_kakao_config() -> dict | None:
         return None
 
 
-async def send_trade_report(cfg: dict, report_text: str) -> bool:
+async def send_trade_report(
+    cfg: dict,
+    report_text: str,
+    web_url: str = "https://kakao.com",
+) -> bool:
     """
     자동매매 리포트를 카카오톡으로 전송.
     토큰 만료 임박 시 자동 갱신 후 Supabase 업데이트.
@@ -88,6 +96,7 @@ async def send_trade_report(cfg: dict, report_text: str) -> bool:
     Args:
         cfg: automation_settings 행 (kakao_access_token, kakao_refresh_token, kakao_token_expires_at 포함)
         report_text: 전송할 메시지 내용
+        web_url: '자세히 보기' 버튼 링크 URL (#50)
     """
     access_token = (cfg.get("kakao_access_token") or "").strip()
     refresh_token = (cfg.get("kakao_refresh_token") or "").strip()
@@ -112,57 +121,55 @@ async def send_trade_report(cfg: dict, report_text: str) -> bool:
         except Exception as e:
             logger.warning(f"[Kakao] 만료 확인 오류: {e}")
 
-    return await _send_message(access_token, report_text)
+    return await _send_message(access_token, report_text, web_url=web_url)
 
 
-def build_job_report(jobs: list[dict], keyword: str = "프론트엔드") -> str:
+SARAMIN_SEARCH_LINK = (
+    "https://www.saramin.co.kr/zf_user/search/recruit"
+    "?searchword=프론트엔드&company_type=ST020&recruitSort=reg_dt"
+)
+
+
+def build_job_report(
+    jobs: list[dict],
+    keyword: str = "프론트엔드",
+) -> tuple[str, str] | tuple[str, str]:
     """
-    #45 채용공고 일일 리포트를 카카오 메시지 포맷으로 변환.
-    카카오 최대 2000자 제한 고려하여 상위 10개 표시.
+    #49 #50 채용공고 일일 리포트 (압축 포맷).
 
-    Args:
-        jobs: job_listings 행 목록 (unnotified)
-        keyword: 검색 키워드 (메시지 헤더용)
+    카카오 미리보기 안에 최대한 많은 공고가 보이도록
+    항목당 1줄로 압축. URL은 개별 표시 없이 web_url로 제어.
 
     Returns:
-        카카오톡 전송용 문자열. 신규 공고 없으면 빈 문자열 반환.
+        (text, web_url) 튜플.
+        신규 공고 없으면 ("", "") 반환.
     """
     if not jobs:
-        return ""
+        return ("", "")
 
     now_kst = datetime.now(timezone.utc).astimezone(
         __import__("zoneinfo").ZoneInfo("Asia/Seoul")
     )
     date_str = now_kst.strftime("%Y.%m.%d")
-
-    display_jobs = jobs[:10]
     total = len(jobs)
-    more = total - len(display_jobs)
 
     lines = [
-        f"📋 {keyword} 채용 신규 공고 ({date_str})",
+        f"📋 {keyword} 채용 ({date_str}) | 대기업 {total}건",
         f"━━━━━━━━━━━━━━━━",
-        f"🏢 신규 {total}건 (대기업)",
-        "",
     ]
 
-    for i, job in enumerate(display_jobs, 1):
-        deadline = job.get("deadline") or "상시"
-        career = job.get("career") or ""
-        site_label = {"saramin": "사람인", "wanted": "원티드"}.get(job.get("site", ""), job.get("site", ""))
-        career_info = f" | {career}" if career else ""
-        lines.append(f"{i}. {job['company']} | {job['title']}")
-        lines.append(f"   📅 ~{deadline}{career_info} [{site_label}]")
-        lines.append(f"   🔗 {job['url']}")
-        lines.append("")
+    for i, job in enumerate(jobs, 1):
+        deadline = (job.get("deadline") or "상시")
+        # 날짜 형식 2026-04-30 → 04.30 으로 단축
+        if len(deadline) == 10 and "-" in deadline:
+            deadline = deadline[5:].replace("-", ".")
+        lines.append(f"{i}. {job['company']} - {job['title']} (~{deadline})")
 
-    if more > 0:
-        lines.append(f"... 외 {more}건")
+    lines.append(f"━━━━━━━━━━━━━━━━")
+    lines.append(f"🤖 자동발송 | 자세히보기 ↓")
 
-    lines.append("━━━━━━━━━━━━━━━━")
-    lines.append("🤖 bitcoin-ai-backend 자동발송")
-
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    return (text, SARAMIN_SEARCH_LINK)
 
 
 def build_trade_report(summary: dict, mode: str = "") -> str:

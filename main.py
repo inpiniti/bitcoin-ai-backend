@@ -79,11 +79,11 @@ async def _scheduled_job_crawl():
             logger.warning("[JobCrawl] 카카오 설정 없음, 발송 스킵")
             return
 
-        report = build_job_report(unnotified)
+        report, web_url = build_job_report(unnotified)
         if not report:
             return
 
-        sent = await send_trade_report(cfg, report)
+        sent = await send_trade_report(cfg, report, web_url=web_url)
         if sent:
             job_ids = [j["id"] for j in unnotified]
             await mark_jobs_notified(job_ids)

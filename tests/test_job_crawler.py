@@ -192,52 +192,41 @@ class TestBuildJobReport:
             "career": "경력 3년+",
         }
 
-    def test_empty_jobs_returns_empty(self):
-        """공고 없으면 빈 문자열"""
-        assert build_job_report([]) == ""
+    def _report(self, jobs, **kwargs):
+        """튜플 반환에서 텍스트만 추출하는 헬퍼"""
+        text, _ = build_job_report(jobs, **kwargs)
+        return text
+
+    def _url(self, jobs, **kwargs):
+        """튜플 반환에서 web_url만 추출하는 헬퍼"""
+        _, url = build_job_report(jobs, **kwargs)
+        return url
+
+    def test_empty_jobs_returns_empty_tuple(self):
+        """공고 없으면 ('', '') 반환"""
+        assert build_job_report([]) == ("", "")
 
     def test_contains_company_name(self):
         jobs = [self._make_job("삼성전자", "프론트엔드 개발자")]
-        report = build_job_report(jobs)
-        assert "삼성전자" in report
+        assert "삼성전자" in self._report(jobs)
 
     def test_contains_title(self):
         jobs = [self._make_job("LG CNS", "React 개발자")]
-        report = build_job_report(jobs)
-        assert "React 개발자" in report
-
-    def test_max_10_displayed(self):
-        """11개 공고 → 상위 10개 표시, '외 1건' 표시"""
-        jobs = [self._make_job(f"회사{i}", f"직무{i}", idx=i) for i in range(11)]
-        report = build_job_report(jobs)
-        assert "외 1건" in report
-
-    def test_under_10_no_more(self):
-        """5개 공고 → '외 N건' 없음"""
-        jobs = [self._make_job(f"회사{i}", f"직무{i}", idx=i) for i in range(5)]
-        report = build_job_report(jobs)
-        assert "외" not in report
+        assert "React 개발자" in self._report(jobs)
 
     def test_within_kakao_limit(self):
         """카카오 2000자 제한 이내"""
-        jobs = [self._make_job(f"회사{i}", f"직무{i}", idx=i) for i in range(10)]
-        report = build_job_report(jobs)
-        assert len(report) <= 2000
+        jobs = [self._make_job(f"회사{i}", f"직무{i}", idx=i) for i in range(20)]
+        assert len(self._report(jobs)) <= 2000
 
-    def test_site_label_saramin(self):
-        jobs = [self._make_job("삼성", "FE개발자", site="saramin")]
-        report = build_job_report(jobs)
-        assert "사람인" in report
-
-    def test_site_label_wanted(self):
-        jobs = [self._make_job("카카오", "React", site="wanted")]
-        report = build_job_report(jobs)
-        assert "원티드" in report
+    def test_web_url_is_saramin(self):
+        """web_url이 사람인 검색 URL"""
+        jobs = [self._make_job("A", "B")]
+        assert "saramin.co.kr" in self._url(jobs)
 
     def test_header_contains_keyword(self):
         jobs = [self._make_job("A", "B")]
-        report = build_job_report(jobs, keyword="프론트엔드")
-        assert "프론트엔드" in report
+        assert "프론트엔드" in self._report(jobs, keyword="프론트엔드")
 
 
 # ── Supabase job_listings mock 테스트 ────────────────────────────────────────
