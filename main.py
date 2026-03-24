@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +49,50 @@ async def _scheduled_auto_trade():
         logger.info(f"[Scheduler] 자동매매 완료: {result}")
     except Exception as e:
         logger.exception(f"[Scheduler] 자동매매 실패: {e}")
+
+
+async def _scheduled_job_crawl():
+    """#46 스케줄러가 호출하는 채용공고 크롤링 진입점 (매일 09:00 KST)"""
+    from services.job_crawler_service import crawl_all_jobs
+    from services.supabase_service import upsert_job_listings, get_unnotified_jobs, mark_jobs_notified
+    from services.kakao_service import send_trade_report, build_job_report, load_kakao_config
+    try:
+        logger.info("[JobCrawl] 채용공고 크롤링 시작")
+        jobs = await crawl_all_jobs()
+
+        if not jobs:
+            logger.info("[JobCrawl] 수집된 공고 없음")
+            return
+
+        # Supabase 저장 (중복 무시)
+        inserted = await upsert_job_listings([j.to_dict() for j in jobs])
+        logger.info(f"[JobCrawl] {len(jobs)}건 수집 → 신규 {inserted}건 저장")
+
+        # 미발송 공고 조회 → 카카오 발송
+        unnotified = await get_unnotified_jobs()
+        if not unnotified:
+            logger.info("[JobCrawl] 발송할 신규 공고 없음")
+            return
+
+        cfg = await load_kakao_config()
+        if not cfg:
+            logger.warning("[JobCrawl] 카카오 설정 없음, 발송 스킵")
+            return
+
+        report = build_job_report(unnotified)
+        if not report:
+            return
+
+        sent = await send_trade_report(cfg, report)
+        if sent:
+            job_ids = [j["id"] for j in unnotified]
+            await mark_jobs_notified(job_ids)
+            logger.info(f"[JobCrawl] {len(unnotified)}건 카카오 발송 완료")
+        else:
+            logger.warning("[JobCrawl] 카카오 발송 실패")
+
+    except Exception as e:
+        logger.exception(f"[JobCrawl] 크롤링 실패: {e}")
 
 
 async def reschedule_from_settings() -> dict:
@@ -101,6 +145,15 @@ async def lifespan(app: FastAPI):
     result = await reschedule_from_settings()
     logger.info(f"[Scheduler] 자동매매 스케줄러 시작: {result['schedule']}")
 
+    # ── 채용공고 크롤러 스케줄 등록 (매일 09:00 KST) ──
+    scheduler.add_job(
+        _scheduled_job_crawl,
+        CronTrigger(hour=9, minute=0, timezone="Asia/Seoul"),
+        id="job_crawl",
+        replace_existing=True,
+    )
+    logger.info("[Scheduler] 채용공고 크롤러 등록: 매일 09:00 KST")
+
     yield
 
     # ── 종료 ────────────────────────────────────────
@@ -152,6 +205,7 @@ app.include_router(xgb.router)
 app.include_router(market_cap.router)
 app.include_router(auto_trade.router)
 app.include_router(train_ws.router)
+app.include_router(job_crawl.router)
 
 
 @app.get(

@@ -182,3 +182,77 @@ async def get_auto_trade_logs(limit: int = 30) -> list:
     if resp.status_code >= 400:
         raise Exception(f"로그 조회 실패 ({resp.status_code}): {resp.text}")
     return resp.json()
+
+
+# ─────────────────────────────────────────────
+# #44 job_listings (채용공고 저장/중복방지)
+# ─────────────────────────────────────────────
+
+async def upsert_job_listings(jobs: list[dict]) -> int:
+    """
+    job_listings 테이블에 공고 upsert.
+    url unique 제약으로 중복 공고는 무시됨.
+
+    Returns:
+        신규 삽입된 건수
+    """
+    if not jobs:
+        return 0
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/job_listings"
+    headers = {
+        **_headers(),
+        "Prefer": "resolution=ignore-duplicates,return=representation",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=jobs, headers=headers)
+    if resp.status_code >= 400:
+        raise Exception(f"job_listings upsert 실패 ({resp.status_code}): {resp.text}")
+    inserted = resp.json()
+    return len(inserted) if isinstance(inserted, list) else 0
+
+
+async def get_unnotified_jobs() -> list[dict]:
+    """notified_at이 null인 미발송 공고 조회"""
+    _check_config()
+    url = (
+        f"{SUPABASE_URL}/rest/v1/job_listings"
+        "?notified_at=is.null"
+        "&order=created_at.asc"
+        "&select=*"
+    )
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"미발송 공고 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+async def mark_jobs_notified(job_ids: list[str]) -> None:
+    """발송 완료된 공고의 notified_at 업데이트"""
+    if not job_ids:
+        return
+    from datetime import datetime, timezone
+    _check_config()
+    now = datetime.now(timezone.utc).isoformat()
+    # Supabase REST: in 필터
+    ids_csv = ",".join(job_ids)
+    url = f"{SUPABASE_URL}/rest/v1/job_listings?id=in.({ids_csv})"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.patch(url, json={"notified_at": now}, headers=_headers())
+    if resp.status_code >= 400:
+        logger.warning(f"notified_at 업데이트 실패 ({resp.status_code}): {resp.text}")
+
+
+async def get_job_listings(limit: int = 50) -> list[dict]:
+    """최근 채용공고 조회 (라우터 엔드포인트용)"""
+    _check_config()
+    url = (
+        f"{SUPABASE_URL}/rest/v1/job_listings"
+        f"?select=*&order=created_at.desc&limit={limit}"
+    )
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"공고 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()

@@ -70,6 +70,16 @@ async def _send_message(access_token: str, text: str) -> bool:
     return True
 
 
+async def load_kakao_config() -> dict | None:
+    """Supabase automation_settings에서 카카오 토큰 설정 로드"""
+    from services.supabase_service import load_automation_settings_active
+    try:
+        return await load_automation_settings_active()
+    except Exception as e:
+        logger.warning(f"[Kakao] 설정 로드 실패: {e}")
+        return None
+
+
 async def send_trade_report(cfg: dict, report_text: str) -> bool:
     """
     자동매매 리포트를 카카오톡으로 전송.
@@ -103,6 +113,56 @@ async def send_trade_report(cfg: dict, report_text: str) -> bool:
             logger.warning(f"[Kakao] 만료 확인 오류: {e}")
 
     return await _send_message(access_token, report_text)
+
+
+def build_job_report(jobs: list[dict], keyword: str = "프론트엔드") -> str:
+    """
+    #45 채용공고 일일 리포트를 카카오 메시지 포맷으로 변환.
+    카카오 최대 2000자 제한 고려하여 상위 10개 표시.
+
+    Args:
+        jobs: job_listings 행 목록 (unnotified)
+        keyword: 검색 키워드 (메시지 헤더용)
+
+    Returns:
+        카카오톡 전송용 문자열. 신규 공고 없으면 빈 문자열 반환.
+    """
+    if not jobs:
+        return ""
+
+    now_kst = datetime.now(timezone.utc).astimezone(
+        __import__("zoneinfo").ZoneInfo("Asia/Seoul")
+    )
+    date_str = now_kst.strftime("%Y.%m.%d")
+
+    display_jobs = jobs[:10]
+    total = len(jobs)
+    more = total - len(display_jobs)
+
+    lines = [
+        f"📋 {keyword} 채용 신규 공고 ({date_str})",
+        f"━━━━━━━━━━━━━━━━",
+        f"🏢 신규 {total}건 (대기업)",
+        "",
+    ]
+
+    for i, job in enumerate(display_jobs, 1):
+        deadline = job.get("deadline") or "상시"
+        career = job.get("career") or ""
+        site_label = {"saramin": "사람인", "wanted": "원티드"}.get(job.get("site", ""), job.get("site", ""))
+        career_info = f" | {career}" if career else ""
+        lines.append(f"{i}. {job['company']} | {job['title']}")
+        lines.append(f"   📅 ~{deadline}{career_info} [{site_label}]")
+        lines.append(f"   🔗 {job['url']}")
+        lines.append("")
+
+    if more > 0:
+        lines.append(f"... 외 {more}건")
+
+    lines.append("━━━━━━━━━━━━━━━━")
+    lines.append("🤖 bitcoin-ai-backend 자동발송")
+
+    return "\n".join(lines)
 
 
 def build_trade_report(summary: dict, mode: str = "") -> str:
