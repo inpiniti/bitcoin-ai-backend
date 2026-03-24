@@ -188,15 +188,15 @@ async def crawl_saramin(
 
 # ── 원티드 크롤러 (#47) ───────────────────────────────────────────────────────
 
-# 원티드 공개 API
-# tag_type_slugs[]=518: 프론트엔드 개발자
+# #52 원티드 공개 API (v4 → job_category_ids 파라미터)
+# job_category_ids[]=518: 프론트엔드 개발자
 # years=-1: 전체 경력
 # job_sort: job.latest_order = 최신순
 WANTED_API_URL = (
     "https://www.wanted.co.kr/api/v4/jobs"
     "?job_sort=job.latest_order"
     "&years=-1"
-    "&tag_type_slugs[]=518"
+    "&job_category_ids[]=518"
     "&limit={limit}"
     "&offset={offset}"
 )
@@ -313,12 +313,17 @@ IT_BLOCK_KEYWORDS = [
 ]
 
 
-def filter_it_jobs(jobs: list[JobListing]) -> list[JobListing]:
+def filter_it_jobs(jobs: list[JobListing], block_only: bool = False) -> list[JobListing]:
     """
-    #51 IT 개발 직군 공고만 필터링.
+    #51 #53 IT 개발 직군 공고 필터링.
 
-    - IT_ALLOW_KEYWORDS 중 하나라도 제목에 포함 → 통과
-    - IT_BLOCK_KEYWORDS 중 하나라도 제목에 포함 → 차단 (allow보다 우선)
+    Args:
+        jobs: 필터링할 공고 목록
+        block_only: True이면 BLOCK 키워드만 적용 (사람인·잡코리아 등 키워드 검색 기반 크롤러용).
+                    False(기본)이면 ALLOW 키워드도 검사 (전체 공고 API 기반 크롤러용).
+
+    - IT_BLOCK_KEYWORDS 포함 → 무조건 차단
+    - block_only=False일 때 IT_ALLOW_KEYWORDS 미포함 → 차단
     """
     result = []
     for job in jobs:
@@ -326,11 +331,194 @@ def filter_it_jobs(jobs: list[JobListing]) -> list[JobListing]:
         if any(kw in title_lower for kw in IT_BLOCK_KEYWORDS):
             logger.debug(f"[Filter] 차단: {job.title}")
             continue
-        if any(kw in title_lower for kw in IT_ALLOW_KEYWORDS):
+        if block_only or any(kw in title_lower for kw in IT_ALLOW_KEYWORDS):
             result.append(job)
         else:
             logger.debug(f"[Filter] IT 키워드 없음, 스킵: {job.title}")
     return result
+
+
+def _filter_saramin(jobs: list[JobListing]) -> list[JobListing]:
+    """#53 사람인 전용 필터: 이미 키워드 검색이므로 block_only=True"""
+    return filter_it_jobs(jobs, block_only=True)
+
+
+# ── #54 잡코리아 크롤러 ───────────────────────────────────────────────────────
+
+JOBKOREA_BASE = "https://www.jobkorea.co.kr"
+
+# Pfd_cd=12000: 대기업 필터 (추정값, 실 적용 시 확인 필요)
+JOBKOREA_SEARCH_URL = (
+    JOBKOREA_BASE
+    + "/Search/"
+    "?stext={keyword}"
+    "&Pfd_cd=12000"
+    "&ord=RegDt"
+    "&page={page}"
+)
+
+
+def _parse_jobkorea_page(html: str) -> list[JobListing]:
+    """잡코리아 검색 결과 HTML 파싱"""
+    soup = BeautifulSoup(html, "lxml")
+    jobs: list[JobListing] = []
+
+    for card in soup.select(".post-list-card"):
+        try:
+            corp_tag = card.select_one(".post-list-corp-name")
+            company = corp_tag.get_text(strip=True) if corp_tag else ""
+
+            title_tag = card.select_one(".post-list-info-title")
+            if not title_tag:
+                continue
+            title = title_tag.get_text(strip=True)
+            href = title_tag.get("href", "")
+            url = JOBKOREA_BASE + href if href.startswith("/") else href
+
+            date_tag = card.select_one(".post-list-info-recruit-meta .date")
+            deadline = None
+            if date_tag:
+                try:
+                    from datetime import datetime as _dt
+                    deadline = _dt.strptime(date_tag.get_text(strip=True), "%Y.%m.%d").date()
+                except ValueError:
+                    pass
+
+            if company and title and url:
+                jobs.append(JobListing(
+                    site="jobkorea",
+                    company=company,
+                    title=title,
+                    url=url,
+                    deadline=deadline,
+                ))
+        except Exception as e:
+            logger.debug(f"[Jobkorea] 파싱 오류 스킵: {e}")
+
+    return jobs
+
+
+async def crawl_jobkorea(
+    keyword: str = "프론트엔드",
+    max_pages: int = 3,
+) -> list[JobListing]:
+    """잡코리아 대기업 채용공고 크롤링."""
+    jobs: list[JobListing] = []
+
+    async with httpx.AsyncClient(headers=HEADERS, timeout=15, follow_redirects=True) as client:
+        for page in range(1, max_pages + 1):
+            url = JOBKOREA_SEARCH_URL.format(keyword=keyword, page=page)
+            try:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    logger.warning(f"[Jobkorea] HTTP {resp.status_code} (page {page})")
+                    break
+
+                page_jobs = _parse_jobkorea_page(resp.text)
+                logger.info(f"[Jobkorea] page {page}: {len(page_jobs)}건")
+                if not page_jobs:
+                    break
+
+                jobs.extend(page_jobs)
+
+                if page < max_pages:
+                    await asyncio.sleep(REQUEST_DELAY)
+
+            except httpx.RequestError as e:
+                logger.error(f"[Jobkorea] 요청 오류 (page {page}): {e}")
+                break
+
+    logger.info(f"[Jobkorea] 총 {len(jobs)}건 수집")
+    return jobs
+
+
+# ── #55 점핏(Jumpit) 크롤러 ───────────────────────────────────────────────────
+
+JUMPIT_BASE = "https://jumpit.saramin.co.kr"
+
+# occupationCode=5: 프론트엔드 개발자 (점핏 직군 코드)
+JUMPIT_API_URL = (
+    JUMPIT_BASE
+    + "/api/v2/position"
+    "?sort=rsp_rate"
+    "&occupationCode=5"
+    "&page={page}"
+)
+
+JUMPIT_HEADERS = {
+    **HEADERS,
+    "Referer": "https://www.jumpit.co.kr/",
+}
+
+
+def _parse_jumpit_response(data: dict) -> list[JobListing]:
+    """점핏 API JSON 응답 파싱"""
+    jobs: list[JobListing] = []
+    for item in data.get("result", []):
+        try:
+            job_id = item.get("id")
+            title = item.get("title", "")
+            company_name = item.get("company", {}).get("name", "")
+            closed_at = item.get("closedAt")
+            locations = item.get("locations", [])
+            location = locations[0].get("name", "") if locations else ""
+
+            if not (job_id and title and company_name):
+                continue
+
+            deadline = None
+            if closed_at:
+                try:
+                    from datetime import datetime as _dt
+                    deadline = _dt.fromisoformat(closed_at.rstrip("Z")).date()
+                except (ValueError, AttributeError):
+                    pass
+
+            jobs.append(JobListing(
+                site="jumpit",
+                company=company_name,
+                title=title,
+                url=f"{JUMPIT_BASE}/position/{job_id}",
+                deadline=deadline,
+                location=location,
+            ))
+        except Exception as e:
+            logger.debug(f"[Jumpit] 파싱 오류 스킵: {e}")
+
+    return jobs
+
+
+async def crawl_jumpit(max_pages: int = 3) -> list[JobListing]:
+    """점핏 IT 특화 채용공고 크롤링 (프론트엔드 직군)."""
+    jobs: list[JobListing] = []
+
+    async with httpx.AsyncClient(headers=JUMPIT_HEADERS, timeout=15) as client:
+        for page in range(1, max_pages + 1):
+            url = JUMPIT_API_URL.format(page=page)
+            try:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    logger.warning(f"[Jumpit] HTTP {resp.status_code} (page {page})")
+                    break
+
+                data = resp.json()
+                page_jobs = _parse_jumpit_response(data)
+                logger.info(f"[Jumpit] page {page}: {len(page_jobs)}건")
+
+                if not page_jobs:
+                    break
+
+                jobs.extend(page_jobs)
+
+                if page < max_pages:
+                    await asyncio.sleep(REQUEST_DELAY)
+
+            except httpx.RequestError as e:
+                logger.error(f"[Jumpit] 요청 오류 (page {page}): {e}")
+                break
+
+    logger.info(f"[Jumpit] 총 {len(jobs)}건 수집")
+    return jobs
 
 
 # ── 통합 크롤러 ───────────────────────────────────────────────────────────────
@@ -339,21 +527,31 @@ async def crawl_all_jobs(
     keyword: str = "프론트엔드",
     saramin_pages: int = 3,
     wanted_pages: int = 3,
+    jobkorea_pages: int = 3,
+    jumpit_pages: int = 3,
 ) -> list[JobListing]:
     """
-    사람인 + 원티드 동시 크롤링 후 URL 기준 중복 제거.
+    사람인 + 원티드 + 잡코리아 + 점핏 동시 크롤링 후 URL 기준 중복 제거.
+
+    - 키워드 검색 기반(사람인·잡코리아): block_only 필터
+    - 전체 공고 API 기반(원티드·점핏): allow+block 필터
 
     Returns:
         중복 제거된 JobListing 목록
     """
     saramin_task = crawl_saramin(keyword=keyword, max_pages=saramin_pages)
     wanted_task = crawl_wanted(max_pages=wanted_pages)
+    jobkorea_task = crawl_jobkorea(keyword=keyword, max_pages=jobkorea_pages)
+    jumpit_task = crawl_jumpit(max_pages=jumpit_pages)
 
-    saramin_jobs, wanted_jobs = await asyncio.gather(saramin_task, wanted_task)
-    all_jobs = saramin_jobs + wanted_jobs
+    saramin_jobs, wanted_jobs, jobkorea_jobs, jumpit_jobs = await asyncio.gather(
+        saramin_task, wanted_task, jobkorea_task, jumpit_task
+    )
 
-    # #51 IT 직군 필터
-    all_jobs = filter_it_jobs(all_jobs)
+    # #53 사이트별 필터 전략 분리
+    keyword_based = _filter_saramin(saramin_jobs) + filter_it_jobs(jobkorea_jobs, block_only=True)
+    api_based = filter_it_jobs(wanted_jobs) + filter_it_jobs(jumpit_jobs)
+    all_jobs = keyword_based + api_based
 
     # URL 기준 중복 제거
     seen: set[str] = set()
@@ -363,5 +561,9 @@ async def crawl_all_jobs(
             seen.add(job.url)
             unique.append(job)
 
-    logger.info(f"[CrawlAll] 사람인 {len(saramin_jobs)} + 원티드 {len(wanted_jobs)} → IT 필터 + 중복 제거 후 {len(unique)}건")
+    logger.info(
+        f"[CrawlAll] 사람인 {len(saramin_jobs)} + 원티드 {len(wanted_jobs)}"
+        f" + 잡코리아 {len(jobkorea_jobs)} + 점핏 {len(jumpit_jobs)}"
+        f" → IT 필터 + 중복 제거 후 {len(unique)}건"
+    )
     return unique
