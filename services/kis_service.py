@@ -109,7 +109,10 @@ async def get_current_price(appkey: str, appsecret: str, exchange: str, symbol: 
         )
     data = resp.json()
     if data.get("rt_cd") == "0" and data.get("output"):
-        return {"success": True, "price": float(data["output"].get("last", 0)), "exchange": exchange}
+        last = data["output"].get("last", "") or ""
+        if not last.strip():
+            return {"success": False, "error": f"{symbol}: 시세 없음 (last 빈값)"}
+        return {"success": True, "price": float(last), "exchange": exchange}
     return {"success": False, "error": data.get("msg1", "현재가 조회 실패")}
 
 
