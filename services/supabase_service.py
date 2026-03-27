@@ -101,19 +101,26 @@ async def save_model(model_data: dict) -> str:
 # automation_settings (클라이언트 설정 테이블)
 # ─────────────────────────────────────────────
 
-async def load_automation_settings_active() -> dict | None:
+async def load_all_automation_settings_active() -> list[dict]:
     """
-    클라이언트(AutomationSettingsPanel)에서 저장한 is_active=true 설정 1개를 로드합니다.
-    KIS 인증 정보(kis_appkey, kis_secret, kis_account)와
-    매매 조건(buy_condition, sell_condition, ai_model_key, ticker_group_key 등)을 포함합니다.
+    is_active=true 인 automation_settings 전체 목록을 반환합니다.
+    설정이 여러 개일 때 각각 독립 실행할 수 있도록 모두 반환합니다.
     """
     _check_config()
-    url = f"{SUPABASE_URL}/rest/v1/automation_settings?is_active=eq.true&select=*&limit=1"
+    url = f"{SUPABASE_URL}/rest/v1/automation_settings?is_active=eq.true&select=*"
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, headers=_headers())
     if resp.status_code >= 400:
         raise Exception(f"automation_settings 로드 실패 ({resp.status_code}): {resp.text}")
-    rows = resp.json()
+    return resp.json()
+
+
+async def load_automation_settings_active() -> dict | None:
+    """
+    하위 호환용: is_active=true 설정 중 첫 번째 1개를 반환합니다.
+    새 코드에서는 load_all_automation_settings_active() 를 사용하세요.
+    """
+    rows = await load_all_automation_settings_active()
     return rows[0] if rows else None
 
 

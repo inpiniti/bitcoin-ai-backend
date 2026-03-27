@@ -26,9 +26,9 @@ import httpx
 
 from services import kis_service, indicator_service, dl_model_service
 from services.supabase_service import (
+    load_all_automation_settings_active,
     load_automation_settings_active,
     save_auto_trade_log,
-
 )
 from services.yahoo_service import fetch_stock_history_for_trade
 
@@ -94,7 +94,36 @@ def _log_dst_info():
     logger.info(f"실행 시각: {now_et.strftime('%Y-%m-%d %H:%M')} ET ({season})")
 
 
-async def run_auto_trade_dl(is_test: bool = False) -> dict:
+async def run_auto_trade_dl(is_test: bool = False) -> list[dict]:
+    """
+    is_active=true 인 automation_settings 전체를 순차 실행하고
+    각 실행 결과 summary 목록을 반환한다.
+    """
+    _log_dst_info()
+
+    cfgs = await load_all_automation_settings_active()
+    if not cfgs:
+        raise RuntimeError(
+            "is_active=true 인 automation_settings 가 없습니다. "
+            "클라이언트 자동매매 설정 패널에서 설정을 활성화해주세요."
+        )
+
+    results = []
+    for cfg in cfgs:
+        cfg_name = cfg.get("name", cfg.get("id", "unknown"))
+        logger.info(f"[AutoTrade] 설정 실행: {cfg_name}")
+        try:
+            summary = await _run_single_cfg(cfg, is_test=is_test)
+            results.append(summary)
+        except Exception as e:
+            logger.exception(f"[AutoTrade] 설정 '{cfg_name}' 실행 오류: {e}")
+            results.append({"cfg_name": cfg_name, "error": str(e)})
+
+    return results
+
+
+async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
+    """단일 automation_settings 행에 대해 자동매매 플로우를 실행한다."""
     logs: list[str] = []
 
     def log(msg: str):
@@ -105,17 +134,6 @@ async def run_auto_trade_dl(is_test: bool = False) -> dict:
     mode = "[TEST]" if is_test else ""
 
     try:
-        _log_dst_info()
-
-        # ── 1. automation_settings 로드 ───────────────
-        log("automation_settings 로드 중...")
-        cfg = await load_automation_settings_active()
-        if not cfg:
-            raise RuntimeError(
-                "is_active=true 인 automation_settings 가 없습니다. "
-                "클라이언트 자동매매 설정 패널에서 설정을 활성화해주세요."
-            )
-
         # KIS 인증 정보 추출
         appkey = cfg.get("kis_appkey", "").strip()
         appsecret = cfg.get("kis_secret", "").strip()
