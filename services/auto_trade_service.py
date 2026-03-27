@@ -79,18 +79,40 @@ async def _load_target_tickers(target_group: str, holdings: list[dict]) -> list[
         )
 
     if target_group == "usall":
-        # S&P 500 + NASDAQ-100 병합 (중복 제거)
-        sp500, nasdaq100 = await asyncio.gather(
-            _fetch_wikipedia_index("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"),
-            _fetch_wikipedia_index("https://en.wikipedia.org/wiki/Nasdaq-100"),
-        )
-        seen: set[str] = set()
-        merged = []
-        for s in sp500 + nasdaq100:
-            if s["ticker"] not in seen:
-                seen.add(s["ticker"])
-                merged.append(s)
-        return merged
+        # nasdaqtrader.com 공개 FTP 파일로 NASDAQ + NYSE/AMEX 전체 조회 (~6,000+)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with httpx.AsyncClient(timeout=30) as client:
+            nasdaq_res, other_res = await asyncio.gather(
+                client.get("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt", headers=headers),
+                client.get("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt", headers=headers),
+            )
+
+        stocks: list[dict] = []
+
+        # NASDAQ: Symbol|Security Name|...|Test Issue(3)|...|ETF(6)|...
+        if nasdaq_res.status_code == 200:
+            for line in nasdaq_res.text.split("\n")[1:]:
+                cols = line.split("|")
+                if len(cols) < 7:
+                    continue
+                ticker = cols[0].strip()
+                name = cols[1].strip()
+                if ticker and cols[3].strip() != "Y" and cols[6].strip() != "Y" and "File Creation" not in ticker and len(ticker) <= 5:
+                    stocks.append({"ticker": ticker, "name": name})
+
+        # NYSE/AMEX: ACT Symbol|Security Name|Exchange|...|ETF(4)|...|Test Issue(6)|...
+        if other_res.status_code == 200:
+            for line in other_res.text.split("\n")[1:]:
+                cols = line.split("|")
+                if len(cols) < 7:
+                    continue
+                ticker = cols[0].strip()
+                name = cols[1].strip()
+                if ticker and cols[6].strip() != "Y" and cols[4].strip() != "Y" and "File Creation" not in ticker and len(ticker) <= 5:
+                    stocks.append({"ticker": ticker, "name": name})
+
+        logger.info(f"[usall] 전체 {len(stocks)}종목 로드")
+        return stocks
 
     if target_group == "superinvestor":
         import re
