@@ -41,44 +41,68 @@ CHUNK_SIZE = 5
 # 티커 그룹 로더
 # ─────────────────────────────────────────────
 
+async def _fetch_wikipedia_index(url: str) -> list[dict]:
+    """Wikipedia 지수 구성종목 테이블 파싱 (id='constituents')"""
+    from bs4 import BeautifulSoup
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(resp.text, "html.parser")
+    table = soup.find("table", {"id": "constituents"})
+    if not table:
+        return []
+    stocks = []
+    seen: set[str] = set()
+    for row in table.select("tbody tr"):
+        tds = row.find_all("td")
+        if not tds:
+            continue
+        ticker = tds[0].get_text(strip=True).replace(".", "-")
+        name = tds[1].get_text(strip=True) if len(tds) > 1 else ticker
+        if ticker and ticker not in seen:
+            seen.add(ticker)
+            stocks.append({"ticker": ticker, "name": name})
+    return stocks
+
+
 async def _load_target_tickers(target_group: str, holdings: list[dict]) -> list[dict]:
     if target_group == "myholdings":
         return [{"ticker": h["pdno"], "name": h.get("prdt_name", "")} for h in holdings]
 
-    if target_group in ("sp500", "qqq"):
-        url = (
+    if target_group == "sp500":
+        return await _fetch_wikipedia_index(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-            if target_group == "sp500"
-            else "https://en.wikipedia.org/wiki/Nasdaq-100"
         )
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(resp.text, "html.parser")
-        table = soup.find("table", {"id": "constituents"})
-        if not table:
-            return []
-        stocks = []
-        for row in table.select("tbody tr"):
-            tds = row.find_all("td")
-            if not tds:
-                continue
-            ticker = tds[0].get_text(strip=True).replace(".", "-")
-            name = tds[1].get_text(strip=True) if len(tds) > 1 else ticker
-            if ticker:
-                stocks.append({"ticker": ticker, "name": name})
-        return stocks
+
+    if target_group in ("qqq", "nasdaq100"):
+        return await _fetch_wikipedia_index(
+            "https://en.wikipedia.org/wiki/Nasdaq-100"
+        )
+
+    if target_group == "usall":
+        # S&P 500 + NASDAQ-100 병합 (중복 제거)
+        sp500, nasdaq100 = await asyncio.gather(
+            _fetch_wikipedia_index("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"),
+            _fetch_wikipedia_index("https://en.wikipedia.org/wiki/Nasdaq-100"),
+        )
+        seen: set[str] = set()
+        merged = []
+        for s in sp500 + nasdaq100:
+            if s["ticker"] not in seen:
+                seen.add(s["ticker"])
+                merged.append(s)
+        return merged
 
     if target_group == "superinvestor":
+        import re
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(
                 "https://www.dataroma.com/m/holdings.php?m=ALL",
                 headers={"User-Agent": "Mozilla/5.0"},
             )
-        import re
         tickers = list(dict.fromkeys(re.findall(r'symbol=([A-Z]{1,5})"', resp.text)))[:100]
         return [{"ticker": t, "name": t} for t in tickers if t]
 
+    logger.warning(f"[_load_target_tickers] 미구현 그룹: {target_group!r}, 빈 목록 반환")
     return []
 
 
