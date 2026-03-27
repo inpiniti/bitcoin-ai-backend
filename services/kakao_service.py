@@ -306,13 +306,14 @@ def build_trade_report_parts(summary: dict, mode: str = "") -> list[str]:
 
     if buy_details:
         top10 = buy_details[:10]
+        above = sum(1 for d in top10 if d["buy_prob"] >= buy_threshold)
         header3 = (
-            f"📈 매수 후보 TOP{len(top10)}\n"
+            f"📈 매수 후보 TOP{len(top10)} (기준: {buy_threshold:.0%})\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"기준: 확률≥{buy_threshold:.0%} ({len(buy_details)}종목 중)\n"
+            f"✅ 기준 초과: {above}종목 / 전체 {len(buy_details)}종목 스캔\n"
         )
         rows3 = [
-            f"{i+1:2}. {d['ticker']:<6} {d['buy_prob']:.1%}"
+            f"{'✅' if d['buy_prob'] >= buy_threshold else '  '} {i+1:2}. {d['ticker']:<6} {d['buy_prob']:.1%}"
             for i, d in enumerate(top10)
         ]
         part3 = header3 + "\n".join(rows3)
@@ -320,11 +321,11 @@ def build_trade_report_parts(summary: dict, mode: str = "") -> list[str]:
             parts.append(part3)
         else:
             parts.append(part3[:LIMIT])
-    elif buy_signals == 0:
+    else:
         parts.append(
             f"📈 매수 후보 없음\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"기준 확률({buy_threshold:.0%}) 초과 종목이 없습니다."
+            f"스캔된 종목이 없습니다."
         )
 
     return parts

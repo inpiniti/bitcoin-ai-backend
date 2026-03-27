@@ -215,6 +215,7 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         # ── 5 & 6. 매수 신호 스캔 ─────────────────────
         log("매수 신호 스캔 중...")
         buy_list: list[dict] = []
+        all_buy_candidates: list[dict] = []  # 확률 미달 포함 전체 후보 (리포트용)
 
         for i in range(0, len(target_stocks), CHUNK_SIZE):
             chunk = target_stocks[i : i + CHUNK_SIZE]
@@ -229,8 +230,10 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                 try:
                     buy_prob, _ = dl_model_service.predict(model, meta, get_feature_matrix(candles))
                     logger.info(f"  [매수스캔] {ticker} buy_prob={buy_prob:.1%}")
+                    candidate = {**stock, "buy_prob": round(buy_prob, 4)}
+                    all_buy_candidates.append(candidate)
                     if buy_prob >= buy_threshold:
-                        buy_list.append({**stock, "buy_prob": round(buy_prob, 4)})
+                        buy_list.append(candidate)
                         log(f"  BUY 신호: {ticker} (확률={buy_prob:.1%})")
                 except Exception as e:
                     logger.warning(f"[{ticker}] 예측 실패: {e}")
@@ -379,7 +382,7 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         summary = {
             **supabase_log,
             "sell_details": sell_details,
-            "buy_details": sorted(buy_list, key=lambda x: x.get("buy_prob", 0), reverse=True),
+            "buy_details": sorted(all_buy_candidates, key=lambda x: x.get("buy_prob", 0), reverse=True),
             "sell_threshold": sell_threshold,
             "sell_profit_threshold": sell_profit_threshold,
             "buy_threshold": buy_threshold,
