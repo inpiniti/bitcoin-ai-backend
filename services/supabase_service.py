@@ -192,6 +192,108 @@ async def get_auto_trade_logs(limit: int = 30) -> list:
 
 
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# #61 news / news_stock_impact (뉴스 저장/조회/분석)
+# ─────────────────────────────────────────────
+
+async def upsert_news(items: list[dict]) -> int:
+    """
+    news 테이블에 뉴스 upsert.
+    url unique 제약으로 중복 뉴스는 무시됨.
+
+    Returns:
+        신규 삽입된 건수
+    """
+    if not items:
+        return 0
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/news"
+    headers = {
+        **_headers(),
+        "Prefer": "resolution=ignore-duplicates,return=representation",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=items, headers=headers)
+    if resp.status_code >= 400:
+        raise Exception(f"news upsert 실패 ({resp.status_code}): {resp.text}")
+    inserted = resp.json()
+    return len(inserted) if isinstance(inserted, list) else 0
+
+
+async def get_news_by_date(news_date: str, limit: int = 50) -> list[dict]:
+    """날짜(YYYY-MM-DD)별 뉴스 목록 조회 (영향 종목 포함)"""
+    _check_config()
+    url = (
+        f"{SUPABASE_URL}/rest/v1/news"
+        f"?news_date=eq.{news_date}"
+        f"&order=published_at.desc"
+        f"&limit={limit}"
+        f"&select=*,news_stock_impact(*)"
+    )
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"뉴스 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+async def get_news_count_by_date(news_date: str) -> int:
+    """당일 등록된 뉴스 수 조회 (스케줄러 중복 방지용)"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/news?news_date=eq.{news_date}&select=id"
+    headers = {**_headers(), "Prefer": "count=exact"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code >= 400:
+        raise Exception(f"뉴스 수 조회 실패 ({resp.status_code}): {resp.text}")
+    # Supabase Content-Range: 0-N/총건수
+    content_range = resp.headers.get("content-range", "0/0")
+    try:
+        return int(content_range.split("/")[-1])
+    except (ValueError, IndexError):
+        return len(resp.json())
+
+
+async def get_unanalyzed_news(limit: int = 50) -> list[dict]:
+    """analyzed_at이 null인 미분석 뉴스 조회"""
+    _check_config()
+    url = (
+        f"{SUPABASE_URL}/rest/v1/news"
+        f"?analyzed_at=is.null"
+        f"&order=created_at.asc"
+        f"&limit={limit}"
+        f"&select=id,title,summary"
+    )
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"미분석 뉴스 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+async def update_news_analysis(news_id: str, data: dict) -> None:
+    """news 테이블 분석 결과 업데이트 (market_impact, impact_level, analyzed_at)"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/news?id=eq.{news_id}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.patch(url, json=data, headers=_headers())
+    if resp.status_code >= 400:
+        logger.warning(f"뉴스 분석 업데이트 실패 ({resp.status_code}): {resp.text}")
+
+
+async def insert_news_stock_impacts(impacts: list[dict]) -> None:
+    """news_stock_impact 테이블에 종목 영향 데이터 INSERT"""
+    if not impacts:
+        return
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/news_stock_impact"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=impacts, headers=_headers())
+    if resp.status_code >= 400:
+        logger.warning(f"news_stock_impact 저장 실패 ({resp.status_code}): {resp.text}")
+
+
+# ─────────────────────────────────────────────
 # #44 job_listings (채용공고 저장/중복방지)
 # ─────────────────────────────────────────────
 

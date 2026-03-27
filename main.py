@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl, gemini
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl, gemini, news
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +49,37 @@ async def _scheduled_auto_trade():
         logger.info(f"[Scheduler] 자동매매 완료: {result}")
     except Exception as e:
         logger.exception(f"[Scheduler] 자동매매 실패: {e}")
+
+
+async def _scheduled_news_crawl():
+    """#63 1시간마다 실행되는 뉴스 크롤링 + AI 분석 진입점"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from services.news_crawler_service import crawl_all_news
+    from services.supabase_service import upsert_news, get_news_count_by_date
+    from services.news_analysis_service import analyze_unanalyzed_news
+    from services.gemini_key_manager import get_key_manager
+
+    today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+    try:
+        logger.info(f"[NewsCrawl] 크롤링 시작 (date={today})")
+        existing = await get_news_count_by_date(today)
+        logger.info(f"[NewsCrawl] 당일 기존 뉴스 {existing}건")
+
+        items = await crawl_all_news()
+        if not items:
+            logger.info("[NewsCrawl] 수집된 뉴스 없음")
+            return
+
+        inserted = await upsert_news([i.to_dict() for i in items])
+        logger.info(f"[NewsCrawl] {len(items)}건 수집 → 신규 {inserted}건 저장")
+
+        key_mgr = get_key_manager()
+        analyzed = await analyze_unanalyzed_news(key_mgr)
+        logger.info(f"[NewsCrawl] AI 분석 완료: {analyzed}건")
+
+    except Exception as e:
+        logger.exception(f"[NewsCrawl] 실패: {e}")
 
 
 async def _scheduled_job_crawl():
@@ -154,6 +185,15 @@ async def lifespan(app: FastAPI):
     )
     logger.info("[Scheduler] 채용공고 크롤러 등록: 매일 09:00 KST")
 
+    # ── 뉴스 크롤러 스케줄 등록 (#63: 매시 정각) ──
+    scheduler.add_job(
+        _scheduled_news_crawl,
+        CronTrigger(minute=0, timezone="Asia/Seoul"),
+        id="news_crawl",
+        replace_existing=True,
+    )
+    logger.info("[Scheduler] 뉴스 크롤러 등록: 매시 정각 KST")
+
     yield
 
     # ── 종료 ────────────────────────────────────────
@@ -207,6 +247,7 @@ app.include_router(auto_trade.router)
 app.include_router(train_ws.router)
 app.include_router(job_crawl.router)
 app.include_router(gemini.router)
+app.include_router(news.router)
 
 
 @app.get(
