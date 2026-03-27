@@ -68,21 +68,35 @@ class TestNewsItemToDict:
 NAVER_FINANCE_HTML = """
 <html><body>
 <ul class="newsList">
-  <li class="newsList_item">
-    <a class="articleSubject" href="/mnews/article/001/0001234">
-      S&amp;P500 사상 최고치…연준 금리 동결 호재
-    </a>
-    <span class="press">연합뉴스</span>
-    <span class="when">2026.03.27 09:30</span>
-    <p class="articleSummary">연준이 금리를 동결하면서 S&amp;P500이 사상 최고치를 경신했다.</p>
+  <li class="block1">
+    <dl>
+      <dd class="articleSubject">
+        <a href="/news/news_read.naver?article_id=0001234&amp;office_id=001">
+          S&amp;P500 사상 최고치…연준 금리 동결 호재
+        </a>
+      </dd>
+      <dd class="articleSummary">
+        연준이 금리를 동결하면서 S&amp;P500이 사상 최고치를 경신했다.
+        <span class="press">연합뉴스</span>
+        <span class="bar">|</span>
+        <span class="wdate">2026-03-27 09:30:00</span>
+      </dd>
+    </dl>
   </li>
-  <li class="newsList_item">
-    <a class="articleSubject" href="/mnews/article/002/0005678">
-      엔비디아, 블랙웰 GPU 수요 급증…목표주가 상향
-    </a>
-    <span class="press">한국경제</span>
-    <span class="when">2026.03.27 10:00</span>
-    <p class="articleSummary">월가 애널리스트들이 엔비디아 목표주가를 일제히 상향 조정했다.</p>
+  <li class="block1">
+    <dl>
+      <dd class="articleSubject">
+        <a href="/news/news_read.naver?article_id=0005678&amp;office_id=002">
+          엔비디아, 블랙웰 GPU 수요 급증…목표주가 상향
+        </a>
+      </dd>
+      <dd class="articleSummary">
+        월가 애널리스트들이 엔비디아 목표주가를 일제히 상향 조정했다.
+        <span class="press">한국경제</span>
+        <span class="bar">|</span>
+        <span class="wdate">2026-03-27 10:00:00</span>
+      </dd>
+    </dl>
   </li>
 </ul>
 </body></html>
@@ -93,8 +107,12 @@ NAVER_FINANCE_HTML_EMPTY = "<html><body><ul class='newsList'></ul></body></html>
 NAVER_FINANCE_HTML_NO_HREF = """
 <html><body>
 <ul class="newsList">
-  <li class="newsList_item">
-    <a class="articleSubject">제목만 있고 href 없음</a>
+  <li class="block1">
+    <dl>
+      <dd class="articleSubject">
+        <a>제목만 있고 href 없음</a>
+      </dd>
+    </dl>
   </li>
 </ul>
 </body></html>

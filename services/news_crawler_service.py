@@ -3,7 +3,7 @@
 
 주요 관심 시장: 미국 주식 (S&P500, 나스닥, 빅테크) + 국내 증시
 크롤링 소스:
-  - 네이버금융 해외증시 뉴스 (naver_finance)
+  - 네이버금융 주요뉴스 (naver_finance)
   - 한국경제 글로벌마켓 (hankyung_global)
 """
 import asyncio
@@ -108,12 +108,19 @@ def deduplicate_news(items: list[NewsItem]) -> list[NewsItem]:
 
 def _parse_korean_date(text: str) -> tuple[Optional[datetime], date]:
     """
-    '2026.03.27 09:30' 형식 → (datetime(KST), date)
+    다양한 날짜 형식 → (datetime(KST), date)
+    - 네이버금융: '2026-03-27 13:18:15' or '2026-03-27 13:18'
+    - 한국경제: '2026.03.27 08:47'
     파싱 실패 시 (None, 오늘 날짜)
     """
     today = datetime.now(KST).date()
     text = text.strip()
-    for fmt in ("%Y.%m.%d %H:%M", "%Y.%m.%d"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y.%m.%d %H:%M",
+        "%Y.%m.%d",
+    ):
         try:
             dt = datetime.strptime(text, fmt).replace(tzinfo=KST)
             return dt, dt.date()
@@ -122,29 +129,24 @@ def _parse_korean_date(text: str) -> tuple[Optional[datetime], date]:
     return None, today
 
 
-# ── 네이버금융 해외증시 뉴스 크롤러 ─────────────────────────────────────────
+# ── 네이버금융 주요뉴스 크롤러 ───────────────────────────────────────────────
 
 NAVER_FINANCE_BASE = "https://finance.naver.com"
-
-# 해외증시 뉴스 (미국 포함 글로벌 뉴스)
-NAVER_WORLD_NEWS_URL = NAVER_FINANCE_BASE + "/news/worldmarketnews.naver"
-
-# 메인 종합뉴스 (국내+해외)
 NAVER_MAIN_NEWS_URL = NAVER_FINANCE_BASE + "/news/mainnews.naver"
 
 
 def parse_naver_finance_page(html: str) -> list[NewsItem]:
     """
-    네이버금융 뉴스 페이지 HTML 파싱.
-    .newsList > .newsList_item 구조 처리.
+    네이버금융 주요뉴스 HTML 파싱.
+    실제 DOM 구조: ul.newsList > li.block1 > dl > dd.articleSubject > a
     """
     soup = BeautifulSoup(html, "lxml")
     items: list[NewsItem] = []
     today = datetime.now(KST).date()
 
-    for li in soup.select(".newsList_item, .realtimeNewsList_item, li.block"):
+    for li in soup.select("ul.newsList li"):
         try:
-            a_tag = li.select_one("a.articleSubject, a.tit, a[href*='/mnews/article']")
+            a_tag = li.select_one("dd.articleSubject a")
             if not a_tag:
                 continue
             href = a_tag.get("href", "").strip()
@@ -156,9 +158,17 @@ def parse_naver_finance_page(html: str) -> list[NewsItem]:
                 continue
 
             url = href if href.startswith("http") else NAVER_FINANCE_BASE + href
-            summary_tag = li.select_one("p.articleSummary, .articleSummary, .summary")
-            summary = summary_tag.get_text(strip=True) if summary_tag else None
-            when_tag = li.select_one(".when, .date, span.time")
+
+            summary_tag = li.select_one("dd.articleSummary")
+            # 언론사/날짜 span을 요약에서 제외
+            if summary_tag:
+                for span in summary_tag.select("span"):
+                    span.decompose()
+                summary = summary_tag.get_text(strip=True) or None
+            else:
+                summary = None
+
+            when_tag = li.select_one("span.wdate")
             published_at, news_date = (
                 _parse_korean_date(when_tag.get_text()) if when_tag else (None, today)
             )
@@ -179,15 +189,14 @@ def parse_naver_finance_page(html: str) -> list[NewsItem]:
 
 async def crawl_naver_finance(max_pages: int = 3) -> list[NewsItem]:
     """
-    네이버금융 해외증시 + 메인뉴스 크롤링.
+    네이버금융 주요뉴스 크롤링 (페이지 1~max_pages).
 
     Returns:
         NewsItem 목록 (필터링 전)
     """
     urls = [
-        NAVER_WORLD_NEWS_URL,                                               # 해외증시 page 1
-        NAVER_MAIN_NEWS_URL,                                                # 메인 종합뉴스
-        *[f"{NAVER_WORLD_NEWS_URL}?page={p}" for p in range(2, max_pages + 1)],  # 해외증시 page 2+
+        NAVER_MAIN_NEWS_URL,
+        *[f"{NAVER_MAIN_NEWS_URL}?page={p}" for p in range(2, max_pages + 1)],
     ]
 
     items: list[NewsItem] = []
@@ -217,33 +226,34 @@ HANKYUNG_GLOBAL_URL = "https://www.hankyung.com/globalmarket"
 
 
 def _parse_hankyung_page(html: str) -> list[NewsItem]:
-    """한국경제 글로벌마켓 뉴스 파싱"""
+    """
+    한국경제 글로벌마켓 뉴스 파싱.
+    실제 DOM: article.news-item 또는 div.news-item > h2.news-tit > a
+    """
     soup = BeautifulSoup(html, "lxml")
     items: list[NewsItem] = []
     today = datetime.now(KST).date()
 
-    for article in soup.select("li.item, article.news-item, div.article-item"):
+    for article in soup.select("article.news-item, div.news-item"):
         try:
-            a_tag = article.select_one("a")
-            if not a_tag:
+            title_a = article.select_one("h2.news-tit a")
+            if not title_a:
                 continue
-            href = a_tag.get("href", "").strip()
+            href = title_a.get("href", "").strip()
             if not href:
                 continue
             url = href if href.startswith("http") else "https://www.hankyung.com" + href
 
-            title_tag = article.select_one("h2, h3, .headline, .title")
-            title = (title_tag or a_tag).get_text(strip=True)
+            title = title_a.get_text(strip=True)
             if not title:
                 continue
 
-            summary_tag = article.select_one("p, .summary, .lead")
+            summary_tag = article.select_one("p.lead")
             summary = summary_tag.get_text(strip=True) if summary_tag else None
 
-            date_tag = article.select_one("time, .date, .datetime")
+            date_tag = article.select_one("p.txt-date")
             published_at, news_date = (
-                _parse_korean_date(date_tag.get("datetime", date_tag.get_text()))
-                if date_tag else (None, today)
+                _parse_korean_date(date_tag.get_text()) if date_tag else (None, today)
             )
 
             items.append(NewsItem(
@@ -264,7 +274,9 @@ async def crawl_hankyung_global(max_pages: int = 2) -> list[NewsItem]:
     """한국경제 글로벌마켓 뉴스 크롤링"""
     items: list[NewsItem] = []
 
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        headers=HEADERS, timeout=15, follow_redirects=True, verify=False
+    ) as client:
         for page in range(1, max_pages + 1):
             url = f"{HANKYUNG_GLOBAL_URL}?page={page}"
             try:
