@@ -86,17 +86,13 @@ async def load_kakao_config() -> dict | None:
 
 async def send_trade_report(
     cfg: dict,
-    report_text: str,
+    report_parts: "str | list[str]",
     web_url: str = "https://kakao.com",
 ) -> bool:
     """
     자동매매 리포트를 카카오톡으로 전송.
+    report_parts 가 list 이면 파트별로 순차 전송.
     토큰 만료 임박 시 자동 갱신 후 Supabase 업데이트.
-
-    Args:
-        cfg: automation_settings 행 (kakao_access_token, kakao_refresh_token, kakao_token_expires_at 포함)
-        report_text: 전송할 메시지 내용
-        web_url: '자세히 보기' 버튼 링크 URL (#50)
     """
     access_token = (cfg.get("kakao_access_token") or "").strip()
     refresh_token = (cfg.get("kakao_refresh_token") or "").strip()
@@ -121,7 +117,14 @@ async def send_trade_report(
         except Exception as e:
             logger.warning(f"[Kakao] 만료 확인 오류: {e}")
 
-    return await _send_message(access_token, report_text, web_url=web_url)
+    parts = report_parts if isinstance(report_parts, list) else [report_parts]
+    any_sent = False
+    for part in parts:
+        if part.strip():
+            ok = await _send_message(access_token, part, web_url=web_url)
+            if ok:
+                any_sent = True
+    return any_sent
 
 
 SARAMIN_SEARCH_LINK = (
@@ -202,12 +205,29 @@ def build_job_report(
 
 
 def build_trade_report(summary: dict, mode: str = "") -> str:
-    """자동매매 결과를 카카오 메시지 포맷으로 변환."""
+    """하위 호환용: build_trade_report_parts()[0] 반환."""
+    return build_trade_report_parts(summary, mode)[0]
+
+
+def build_trade_report_parts(summary: dict, mode: str = "") -> list[str]:
+    """
+    자동매매 결과를 카카오 메시지 파트 목록으로 변환.
+    카카오 2000자 제한 대응: 주요 요약(1부) + 매도 분석(2부) + 매수 후보(3부)로 분리.
+    """
+    LIMIT = 1950  # 안전 마진 50자
     now_kst = datetime.now(timezone.utc).astimezone(
         __import__("zoneinfo").ZoneInfo("Asia/Seoul")
     )
     date_str = now_kst.strftime("%Y.%m.%d %H:%M KST")
     label = "🔵 모의매매" if summary.get("is_test") else "🟠 실매매"
+    error = summary.get("error")
+
+    if error:
+        return [
+            f"❌ 자동매매 오류 ({date_str})\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"오류: {error}"
+        ]
 
     buy_signals = summary.get("buy_signals", 0)
     sell_signals = summary.get("sell_signals", 0)
@@ -216,17 +236,10 @@ def build_trade_report(summary: dict, mode: str = "") -> str:
     holdings = summary.get("holdings_count", 0)
     group = summary.get("target_group", "-")
     model = summary.get("model_id", "-")
-    error = summary.get("error")
 
-    if error:
-        return (
-            f"❌ 자동매매 오류 ({date_str})\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"오류: {error}"
-        )
-
-    lines = [
-        f"📊 자동매매 리포트 {mode}",
+    # ── 1부: 주요 요약 ────────────────────────────────
+    part1 = "\n".join([
+        f"📊 자동매매 리포트 {mode}".rstrip(),
         f"🕐 {date_str}",
         f"━━━━━━━━━━━━━━━━",
         f"{label} | 그룹: {group}",
@@ -236,5 +249,82 @@ def build_trade_report(summary: dict, mode: str = "") -> str:
         f"💼 보유종목: {holdings}개",
         f"",
         f"🤖 모델: {model}",
-    ]
-    return "\n".join(lines)
+    ])
+
+    parts = [part1]
+
+    # ── 2부: 보유종목 매도 분석 ────────────────────────
+    sell_details: list[dict] = summary.get("sell_details", [])
+    sell_threshold = summary.get("sell_threshold", 0.2)
+    sell_profit_threshold = summary.get("sell_profit_threshold", 20)
+
+    if sell_details:
+        header = (
+            f"📉 보유종목 매도 분석 ({len(sell_details)}종목)\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"조건: 확률≤{sell_threshold:.0%} 또는 수익≥{sell_profit_threshold:.0f}%\n"
+        )
+        rows: list[str] = []
+        for d in sell_details:
+            ticker = d["ticker"]
+            profit = d.get("profit_rate", 0.0)
+            prob = d.get("buy_prob")
+            skip = d.get("skip_reason")
+            triggered = d.get("triggered", False)
+
+            prob_str = f"{prob:.1%}" if prob is not None else "  ─  "
+            profit_sign = "+" if profit >= 0 else ""
+            profit_str = f"{profit_sign}{profit:.1f}%"
+
+            if triggered:
+                flag = " ⚠매도신호"
+            elif skip == "손실매도방지":
+                flag = " 🛡손실방지"
+            elif skip == "매수신호":
+                flag = " 📈매수중"
+            elif skip:
+                flag = f" ({skip})"
+            else:
+                flag = ""
+
+            rows.append(f"{ticker:<6} {prob_str} | 손익 {profit_str}{flag}")
+
+        # 2000자 넘으면 잘라서 여러 파트로
+        current = header
+        for row in rows:
+            line = row + "\n"
+            if len(current) + len(line) > LIMIT:
+                parts.append(current.rstrip())
+                current = f"📉 보유종목 (계속)\n━━━━━━━━━━━━━━━━\n" + line
+            else:
+                current += line
+        parts.append(current.rstrip())
+
+    # ── 3부: 매수 후보 TOP10 ───────────────────────────
+    buy_details: list[dict] = summary.get("buy_details", [])
+    buy_threshold = summary.get("buy_threshold", 0.6)
+
+    if buy_details:
+        top10 = buy_details[:10]
+        header3 = (
+            f"📈 매수 후보 TOP{len(top10)}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"기준: 확률≥{buy_threshold:.0%} ({len(buy_details)}종목 중)\n"
+        )
+        rows3 = [
+            f"{i+1:2}. {d['ticker']:<6} {d['buy_prob']:.1%}"
+            for i, d in enumerate(top10)
+        ]
+        part3 = header3 + "\n".join(rows3)
+        if len(part3) <= LIMIT:
+            parts.append(part3)
+        else:
+            parts.append(part3[:LIMIT])
+    elif buy_signals == 0:
+        parts.append(
+            f"📈 매수 후보 없음\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"기준 확률({buy_threshold:.0%}) 초과 종목이 없습니다."
+        )
+
+    return parts

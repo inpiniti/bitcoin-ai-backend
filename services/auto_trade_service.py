@@ -241,17 +241,28 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         # ── 7. 매도 신호 스캔 ─────────────────────────
         log("매도 신호 스캔 중 (보유 종목)...")
         sell_list: list[dict] = []
+        # 리포트용: 전체 보유종목의 확률/손익 기록
+        sell_details: list[dict] = []
 
         for holding in holdings:
             ticker = holding["pdno"]
+            profit_rate = profit_rate_map.get(ticker, 0.0)
+            detail = {"ticker": ticker, "profit_rate": profit_rate, "buy_prob": None, "triggered": False, "skip_reason": None}
+
             if ticker in buy_tickers:
+                detail["skip_reason"] = "매수신호"
+                sell_details.append(detail)
                 continue
+
             candles = await load_ticker_data(ticker)
             if not candles:
+                detail["skip_reason"] = "데이터없음"
+                sell_details.append(detail)
                 continue
+
             try:
                 buy_prob, _ = dl_model_service.predict(model, meta, get_feature_matrix(candles))
-                profit_rate = profit_rate_map.get(ticker, 0.0)
+                detail["buy_prob"] = round(buy_prob, 4)
                 logger.info(f"  [매도스캔] {ticker} buy_prob={buy_prob:.1%} profit={profit_rate:.2f}%")
 
                 prob_signal = buy_prob <= sell_threshold
@@ -264,6 +275,8 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                     cur_price = prices.get("current", 0)
                     if cur_price > 0 and avg_price > 0 and cur_price < avg_price:
                         logger.info(f"  [{ticker}] 손실매도방지 (현재가={cur_price} < 평균단가={avg_price}) → 스킵")
+                        detail["skip_reason"] = "손실매도방지"
+                        sell_details.append(detail)
                         continue
 
                 if prob_signal or profit_signal:
@@ -280,9 +293,13 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                         "profit_rate": profit_rate,
                         "sell_reason": " | ".join(reason),
                     })
+                    detail["triggered"] = True
                     log(f"  SELL 신호: {ticker} ({' | '.join(reason)})")
             except Exception as e:
                 logger.warning(f"[{ticker}] 예측 실패: {e}")
+                detail["skip_reason"] = "예측실패"
+
+            sell_details.append(detail)
 
         log(f"매도 후보: {len(sell_list)}개")
 
@@ -339,7 +356,11 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                 log(f"  [모의매매] 매수 예정: {ticker} {qty}주 @ ${price} (배분=${per_ticker_amount:.2f}, 주문 미실행)")
 
         # ── 10. 로그 저장 ─────────────────────────────
-        summary = {
+        buy_order_count = len([r for r in buy_results if r.get("simulated") or r.get("result", {}).get("success")])
+        sell_order_count = len([r for r in sell_results if r.get("simulated") or r.get("result", {}).get("success")])
+
+        # Supabase 저장용 (테이블 컬럼에 있는 필드만)
+        supabase_log = {
             "date": today_str,
             "is_test": is_test,
             "model_id": model_id,
@@ -347,18 +368,28 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
             "holdings_count": len(holdings),
             "buy_signals": len(buy_list),
             "sell_signals": len(sell_list),
-            "buy_orders": len([r for r in buy_results if r.get("simulated") or r.get("result", {}).get("success")]),
-            "sell_orders": len([r for r in sell_results if r.get("simulated") or r.get("result", {}).get("success")]),
+            "buy_orders": buy_order_count,
+            "sell_orders": sell_order_count,
             "logs": logs,
         }
-        await save_auto_trade_log(summary)
+        await save_auto_trade_log(supabase_log)
         log(f"{mode} 자동매매 완료")
+
+        # 카카오 리포트용 (상세 데이터 포함)
+        summary = {
+            **supabase_log,
+            "sell_details": sell_details,
+            "buy_details": sorted(buy_list, key=lambda x: x.get("buy_prob", 0), reverse=True),
+            "sell_threshold": sell_threshold,
+            "sell_profit_threshold": sell_profit_threshold,
+            "buy_threshold": buy_threshold,
+        }
 
         # ── 11. 카카오 리포트 전송 ────────────────────
         try:
-            from services.kakao_service import send_trade_report, build_trade_report
-            report_text = build_trade_report(summary, mode)
-            sent = await send_trade_report(cfg, report_text)
+            from services.kakao_service import send_trade_report, build_trade_report_parts
+            report_parts = build_trade_report_parts(summary, mode)
+            sent = await send_trade_report(cfg, report_parts)
             if sent:
                 log("[Kakao] 매매 리포트 전송 완료")
         except Exception as e:
