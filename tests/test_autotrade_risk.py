@@ -88,3 +88,61 @@ def test_all_failed_returns_zero():
     """전부 실패하면 0을 반환한다"""
     results = [{"result": {"success": False}} for _ in range(5)]
     assert count_orders(results) == 0
+
+
+# ── Issue: 손실 종목 10% 부분 매도(매수자금 확보) ─────────────
+def calc_rebalance_qty(total_qty, ratio=0.10):
+    if total_qty <= 0:
+        return 0
+    return max(1, int(total_qty * ratio))
+
+
+def test_rebalance_qty_50_shares_is_5():
+    """50주 보유 시 약 10%인 5주를 매도한다"""
+    assert calc_rebalance_qty(50) == 5
+
+
+def test_rebalance_qty_small_position_keeps_min_one():
+    """소수 보유 종목도 0주가 되지 않도록 최소 1주 매도한다"""
+    assert calc_rebalance_qty(3) == 1
+
+
+def should_rebalance_loss_position(
+    prevent_loss_sell,
+    allow_loss_sell_for_buy,
+    has_new_buy_signals,
+    is_in_loss,
+):
+    """신규 요구사항의 핵심 조건을 단순화한 판별 함수"""
+    if not prevent_loss_sell:
+        return False
+    if not allow_loss_sell_for_buy:
+        return False
+    if not has_new_buy_signals:
+        return False
+    return is_in_loss
+
+
+def test_no_new_buy_signal_means_no_forced_loss_sell():
+    """매수 신호(보유 외 종목)가 없으면 손실 종목 강제매도는 하지 않는다"""
+    assert should_rebalance_loss_position(True, True, False, True) is False
+
+
+def test_new_buy_signal_allows_forced_loss_sell():
+    """매수 대상이 있을 때만 손실 종목 10% 매도 조건이 활성화된다"""
+    assert should_rebalance_loss_position(True, True, True, True) is True
+
+
+# ── 기존 요구 재확인: 보유 종목은 매수 후보에서 제외 ─────────────
+def filter_new_buy_candidates(candidates, holding_tickers):
+    return [c for c in candidates if c["ticker"] not in holding_tickers]
+
+
+def test_existing_holdings_are_ignored_in_buy_candidates():
+    """매수 신호가 떠도 이미 보유 중이면 신규 매수 대상에서 제외"""
+    candidates = [
+        {"ticker": "NVDA", "buy_prob": 0.91},
+        {"ticker": "AAPL", "buy_prob": 0.82},
+    ]
+    filtered = filter_new_buy_candidates(candidates, {"NVDA"})
+    assert [x["ticker"] for x in filtered] == ["AAPL"]

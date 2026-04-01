@@ -37,6 +37,13 @@ logger = logging.getLogger("auto_trade_service")
 CHUNK_SIZE = 5
 
 
+def _calc_rebalance_qty(total_qty: int, ratio: float = 0.10) -> int:
+    """Rebalance sell quantity (at least 1 share when position exists)."""
+    if total_qty <= 0:
+        return 0
+    return max(1, int(total_qty * ratio))
+
+
 # ─────────────────────────────────────────────
 # 티커 그룹 로더
 # ─────────────────────────────────────────────
@@ -199,11 +206,20 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         sell_threshold = float(cfg.get("sell_condition", 20)) / 100      # 확률 조건: buy_prob 이하면 매도
         sell_profit_threshold = float(cfg.get("sell_profit_condition", 20))  # 수익률 조건: X% 이상이면 익절
         prevent_loss_sell = bool(cfg.get("prevent_loss_sell", False))        # 손실 중엔 매도 금지
+        allow_loss_sell_for_buy_raw = cfg.get("allow_loss_sell_for_buy", None)
+        if allow_loss_sell_for_buy_raw is None:
+            allow_loss_sell_for_buy = not prevent_loss_sell
+        else:
+            allow_loss_sell_for_buy = bool(allow_loss_sell_for_buy_raw)
         trade_enabled = bool(cfg.get("trade_enabled", False))
         if not trade_enabled:
             log("[모의매매] trade_enabled=false → 실제 주문 없이 로그만 기록합니다.")
 
-        log(f"설정 로드 완료 | 그룹={target_group} | 모델={model_id} | buy>={buy_threshold} | sell확률<={sell_threshold} | sell수익>={sell_profit_threshold}% | 손실매도방지={prevent_loss_sell}")
+        log(
+            f"설정 로드 완료 | 그룹={target_group} | 모델={model_id} | "
+            f"buy>={buy_threshold} | sell확률<={sell_threshold} | sell수익>={sell_profit_threshold}% | "
+            f"손실매도방지={prevent_loss_sell} | 손실10%매도(매수자금)={allow_loss_sell_for_buy}"
+        )
 
         # ── 2. 딥러닝 모델 로드 ───────────────────────
         log(f"모델 로드 중: {model_id}")
@@ -323,6 +339,27 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                     avg_price = prices.get("avg", 0)
                     cur_price = prices.get("current", 0)
                     if cur_price > 0 and avg_price > 0 and cur_price < avg_price:
+                        # 매수 후보가 있을 때만 손실 종목의 10%를 부분 매도해 매수 자금을 마련한다.
+                        if allow_loss_sell_for_buy and buy_list:
+                            total_qty = int(float(holding.get("ccld_qty_smtl1", 0)))
+                            rebalance_qty = _calc_rebalance_qty(total_qty)
+                            if rebalance_qty > 0:
+                                sell_list.append({
+                                    "ticker": ticker,
+                                    "name": holding.get("prdt_name", ""),
+                                    "qty": rebalance_qty,
+                                    "sell_prob": round(1.0 - buy_prob, 4),
+                                    "profit_rate": profit_rate,
+                                    "sell_reason": "매수자금확보(손실종목10%매도)",
+                                })
+                                detail["triggered"] = True
+                                log(
+                                    f"  SELL 신호: {ticker} (매수자금확보: 손실구간 10% 부분매도, "
+                                    f"현재가={cur_price} < 평균단가={avg_price})"
+                                )
+                                sell_details.append(detail)
+                                continue
+
                         logger.info(f"  [{ticker}] 손실매도방지 (현재가={cur_price} < 평균단가={avg_price}) → 스킵")
                         detail["skip_reason"] = "손실매도방지"
                         sell_details.append(detail)
@@ -372,8 +409,28 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                 log(f"  [모의매매] 매도 예정: {ticker} {qty}주 @ ${price} (주문 미실행)")
 
         # ── 9. 매수 주문 실행 ─────────────────────────
-        # 사용 가능한 달러 현금 조회 (output3.frcr_buy_amt_smtl: 외화 매수 가능금액)
-        available_cash = balance_res.get("usd_available", 0.0)
+        # 사용 가능한 달러 현금 조회 (매도 선행 결과를 반영)
+        available_cash_before = float(balance_res.get("usd_available", 0.0) or 0.0)
+        realized_sell_proceeds = sum(
+            float(r.get("qty", 0) or 0) * float(r.get("price", 0) or 0)
+            for r in sell_results
+            if r.get("simulated") or r.get("result", {}).get("success")
+        )
+
+        available_cash = available_cash_before
+        if sell_results:
+            if trade_enabled:
+                refreshed_balance = await kis_service.get_overseas_balance(appkey, appsecret, account_no, account_code)
+                if refreshed_balance.get("success"):
+                    available_cash = float(refreshed_balance.get("usd_available", 0.0) or 0.0)
+                    log(f"매도 체결 반영 후 매수 가능 현금 재조회: ${available_cash:.2f}")
+                else:
+                    available_cash = available_cash_before + realized_sell_proceeds
+                    log("매수 가능 현금 재조회 실패 → 직전 현금 + 매도대금 추정치로 계산")
+            else:
+                available_cash = available_cash_before + realized_sell_proceeds
+                log(f"모의매매 기준 매도대금 반영: +${realized_sell_proceeds:.2f}")
+
         log(f"매수 가능 현금 (USD): ${available_cash:.2f}")
 
         buy_count = len(buy_list)
