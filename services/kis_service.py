@@ -16,6 +16,11 @@ KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 _token_cache: dict[str, dict] = {}
 
 
+def _normalize_order_price(price: float) -> float:
+    """KIS 해외주식 주문 단가 형식에 맞게 소수점 2자리로 보정."""
+    return round(float(price), 2)
+
+
 def parse_account(kis_account: str) -> tuple[str, str]:
     """
     automation_settings.kis_account 를 account_no(8자리) + account_code(2자리) 로 분리.
@@ -131,6 +136,7 @@ async def _order_overseas_stock(
 ) -> dict:
     """매수/매도 공통 주문"""
     token = await get_access_token(appkey, appsecret)
+    normalized_price = _normalize_order_price(price)
     exchange_map = {"NAS": "NASD", "NYS": "NYSE", "AMS": "AMEX"}
     tr_id = "TTTT1002U" if order_type == "buy" else "TTTT1006U"
     body = {
@@ -139,7 +145,7 @@ async def _order_overseas_stock(
         "OVRS_EXCG_CD": exchange_map.get(exchange, "NASD"),
         "PDNO": symbol,
         "ORD_QTY": str(qty),
-        "OVRS_ORD_UNPR": str(price),
+        "OVRS_ORD_UNPR": f"{normalized_price:.2f}",
         "ORD_SVR_DVSN_CD": "0",
         "ORD_DVSN": "00",
     }
@@ -161,7 +167,8 @@ async def buy_overseas_stock(
     appkey: str, appsecret: str, account_no: str, account_code: str,
     ticker: str, qty: int, price: float, exchange: str = "NAS",
 ) -> dict:
-    logger.info(f"[KIS] 매수: {ticker} {qty}주 @ ${price} ({exchange})")
+    normalized_price = _normalize_order_price(price)
+    logger.info(f"[KIS] 매수: {ticker} {qty}주 @ ${normalized_price:.2f} ({exchange})")
     return await _order_overseas_stock(appkey, appsecret, account_no, account_code, "buy", exchange, ticker, price, qty)
 
 
@@ -169,5 +176,6 @@ async def sell_overseas_stock(
     appkey: str, appsecret: str, account_no: str, account_code: str,
     ticker: str, qty: int, price: float, exchange: str = "NAS",
 ) -> dict:
-    logger.info(f"[KIS] 매도: {ticker} {qty}주 @ ${price} ({exchange})")
+    normalized_price = _normalize_order_price(price)
+    logger.info(f"[KIS] 매도: {ticker} {qty}주 @ ${normalized_price:.2f} ({exchange})")
     return await _order_overseas_stock(appkey, appsecret, account_no, account_code, "sell", exchange, ticker, price, qty)

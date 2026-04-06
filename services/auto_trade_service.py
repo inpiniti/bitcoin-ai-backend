@@ -397,16 +397,16 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
             if not price_res["success"]:
                 log(f"  {ticker} 현재가 조회 실패, 건너뜀")
                 continue
-            price = price_res["price"]
+            price = round(float(price_res["price"]), 2)
             exchange = price_res.get("exchange", "NAS")
             qty = item["qty"]
             if trade_enabled:
                 result = await kis_service.sell_overseas_stock(appkey, appsecret, account_no, account_code, ticker, qty, price, exchange)
                 sell_results.append({"ticker": ticker, "qty": qty, "price": price, "result": result})
-                log(f"  [실제매매] 매도: {ticker} {qty}주 @ ${price} → {'성공' if result['success'] else '실패'}: {result.get('order_no') or result.get('error')}")
+                log(f"  [실제매매] 매도: {ticker} {qty}주 @ ${price:.2f} → {'성공' if result['success'] else '실패'}: {result.get('order_no') or result.get('error')}")
             else:
                 sell_results.append({"ticker": ticker, "qty": qty, "price": price, "simulated": True})
-                log(f"  [모의매매] 매도 예정: {ticker} {qty}주 @ ${price} (주문 미실행)")
+                log(f"  [모의매매] 매도 예정: {ticker} {qty}주 @ ${price:.2f} (주문 미실행)")
 
         # ── 9. 매수 주문 실행 ─────────────────────────
         # 사용 가능한 달러 현금 조회 (매도 선행 결과를 반영)
@@ -447,19 +447,19 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
             if not price_res["success"]:
                 log(f"  {ticker} 현재가 조회 실패, 건너뜀")
                 continue
-            price = price_res["price"]
+            price = round(float(price_res["price"]), 2)
             exchange = price_res.get("exchange", "NAS")
             qty = int(per_ticker_amount / price) if price > 0 else 0
             if qty == 0:
-                log(f"  [스킵] {ticker}: 수량 부족 (배분 ${per_ticker_amount:.2f} < 주가 ${price}/주)")
+                log(f"  [스킵] {ticker}: 수량 부족 (배분 ${per_ticker_amount:.2f} < 주가 ${price:.2f}/주)")
                 continue
             if trade_enabled:
                 result = await kis_service.buy_overseas_stock(appkey, appsecret, account_no, account_code, ticker, qty, price, exchange)
                 buy_results.append({"ticker": ticker, "qty": qty, "price": price, "result": result})
-                log(f"  [실제매매] 매수: {ticker} {qty}주 @ ${price} (배분=${per_ticker_amount:.2f}) → {'성공' if result['success'] else '실패'}: {result.get('order_no') or result.get('error')}")
+                log(f"  [실제매매] 매수: {ticker} {qty}주 @ ${price:.2f} (배분=${per_ticker_amount:.2f}) → {'성공' if result['success'] else '실패'}: {result.get('order_no') or result.get('error')}")
             else:
                 buy_results.append({"ticker": ticker, "qty": qty, "price": price, "simulated": True})
-                log(f"  [모의매매] 매수 예정: {ticker} {qty}주 @ ${price} (배분=${per_ticker_amount:.2f}, 주문 미실행)")
+                log(f"  [모의매매] 매수 예정: {ticker} {qty}주 @ ${price:.2f} (배분=${per_ticker_amount:.2f}, 주문 미실행)")
 
         # ── 10. 로그 저장 ─────────────────────────────
         buy_order_count = len([r for r in buy_results if r.get("simulated") or r.get("result", {}).get("success")])
