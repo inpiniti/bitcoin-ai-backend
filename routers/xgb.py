@@ -21,6 +21,8 @@ class PredictRequest(BaseModel):
     modelId: str
     features: list | None = None
     datasetId: str | None = None
+    ticker: str | None = None
+    days: int = 2000
 
 
 @router.post(
@@ -91,14 +93,14 @@ async def train(body: TrainRequest):
     tags=["XGBoost"],
 )
 async def predict(body: PredictRequest):
-    if not body.modelId or (not body.features and not body.datasetId):
+    if not body.modelId or (not body.features and not body.datasetId and not body.ticker):
         raise HTTPException(
             status_code=400,
-            detail="modelId and (features or datasetId) are required",
+            detail="modelId and one of (ticker, features, datasetId) are required",
         )
 
     try:
-        result = await xgb_service.predict(body.modelId, body.features, body.datasetId)
+        result = await xgb_service.predict(body.modelId, body.features, body.datasetId, body.ticker, body.days)
         return result
     except Exception as e:
         logger.exception(f"[/v1/xgb/predict] 오류: {e}")

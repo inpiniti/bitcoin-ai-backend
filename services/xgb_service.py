@@ -107,9 +107,17 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
 
 # ── 예측 ─────────────────────────────────────────────────
 
-async def predict(model_id: str, features: list | None, dataset_id: str | None) -> dict:
-    """Supabase에서 모델을 로드해 예측합니다."""
-    from services import supabase_service
+async def predict(
+    model_id: str,
+    features: list | None,
+    dataset_id: str | None,
+    ticker: str | None = None,
+    days: int = 2000,
+) -> dict:
+    """Supabase에서 모델을 로드해 예측합니다.
+    ticker가 주어지면 서버에서 직접 데이터 수집 → 피처 추출 → 예측까지 처리합니다.
+    """
+    from services import supabase_service, data_collector
 
     xgb, np = _get_deps()
 
@@ -121,13 +129,23 @@ async def predict(model_id: str, features: list | None, dataset_id: str | None) 
     booster = xgb.Booster()
     booster.load_model(bytearray(model_bytes))
 
-    # features 확보
-    if dataset_id and not features:
+    # features 확보 — ticker 우선, 그 다음 datasetId, 마지막으로 inline features
+    dates: list = []
+    raw_features: list = []
+
+    if ticker and not features:
+        logger.info(f"[XGB:Predict] ticker={ticker} 데이터 수집 시작 (days={days})")
+        candles = await data_collector.fetch_stock_history_yf(ticker, days)
+        if not candles:
+            raise ValueError(f"ticker '{ticker}' 의 데이터를 가져올 수 없습니다")
+        features, dates, raw_features = data_collector.process_stock_data_for_prediction(candles)
+        logger.info(f"[XGB:Predict] 피처 추출 완료: {len(features)}개")
+    elif dataset_id and not features:
         logger.info(f"[XGB:Predict] 데이터셋 로드: {dataset_id}")
         features = await supabase_service.load_features(dataset_id)
 
     if not features:
-        raise ValueError("features 또는 datasetId 가 필요합니다")
+        raise ValueError("ticker, features, datasetId 중 하나는 필요합니다")
 
     input_data = np.array(features, dtype=np.float32)
     if len(input_data.shape) == 1:
@@ -137,11 +155,16 @@ async def predict(model_id: str, features: list | None, dataset_id: str | None) 
     probs   = booster.predict(dmatrix)
 
     result_list = []
-    for p in (probs if hasattr(probs, "__iter__") else [probs]):
-        result_list.append({
+    for idx, p in enumerate(probs if hasattr(probs, "__iter__") else [probs]):
+        entry = {
             "probability": float(p),
             "prediction":  1 if float(p) > 0.5 else 0,
-        })
+        }
+        if idx < len(dates):
+            entry["date"] = dates[idx]
+        if idx < len(raw_features):
+            entry.update(raw_features[idx])
+        result_list.append(entry)
 
     logger.info(f"[XGB:Predict] {len(result_list)}건 예측 완료")
     return {"predictions": result_list}

@@ -262,6 +262,71 @@ def process_stock_data_for_ml(candles: list[dict]) -> tuple[list, list]:
     return features, labels
 
 
+# ── 예측용 피처 추출 (레이블 없음, 마지막 날까지 포함) ──────────────
+
+def process_stock_data_for_prediction(candles: list[dict]) -> tuple[list, list, list]:
+    """
+    processStockDataForPrediction(allHistory=true) JS 로직과 동일.
+    레이블 없이 피처와 날짜, rawFeatures를 반환합니다.
+    Returns: (features, dates, raw_features)
+    """
+    features = []
+    dates = []
+    raw_features = []
+
+    if not candles or len(candles) <= 30:
+        return features, dates, raw_features
+
+    for i in range(30, len(candles)):
+        today = candles[i]
+        if not today.get("close") or not candles[i - 1].get("close"):
+            continue
+
+        consecutive_days = 0
+        if today["close"] > candles[i - 1]["close"]:
+            temp = 1
+            while (i - temp > 0
+                   and candles[i - temp].get("close")
+                   and candles[i - temp - 1].get("close")
+                   and candles[i - temp]["close"] > candles[i - temp - 1]["close"]):
+                consecutive_days += 1
+                temp += 1
+            if consecutive_days == 0:
+                consecutive_days = 1
+        elif today["close"] < candles[i - 1]["close"]:
+            temp = 1
+            while (i - temp > 0
+                   and candles[i - temp].get("close")
+                   and candles[i - temp - 1].get("close")
+                   and candles[i - temp]["close"] < candles[i - temp - 1]["close"]):
+                consecutive_days -= 1
+                temp += 1
+            if consecutive_days == 0:
+                consecutive_days = -1
+
+        def get_change_pct(days_ago: int) -> float:
+            past = candles[i - days_ago]
+            if not past or not past.get("close") or past["close"] == 0:
+                return 0.0
+            pct = ((today["close"] - past["close"]) / past["close"]) * 100
+            return round(pct, 2) if pct == pct else 0.0  # NaN guard
+
+        change1d = get_change_pct(1)
+        change7d = get_change_pct(7)
+        change30d = get_change_pct(30)
+
+        features.append([consecutive_days, change1d, change7d, change30d])
+        dates.append(today.get("date", ""))
+        raw_features.append({
+            "consecutiveDays": consecutive_days,
+            "change1d": change1d,
+            "change7d": change7d,
+            "change30d": change30d,
+        })
+
+    return features, dates, raw_features
+
+
 # ── 통합 수집 파이프라인 ──────────────────────────────────────
 
 async def collect_and_train_data(
