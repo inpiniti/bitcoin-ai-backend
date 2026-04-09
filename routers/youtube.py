@@ -8,12 +8,17 @@ import os
 import re
 import tempfile
 
-import yt_dlp
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 logger = logging.getLogger("youtube_router")
 router = APIRouter(prefix="/youtube", tags=["youtube"])
+
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+    logger.warning("yt-dlp not installed. Run: pip install yt-dlp")
 
 
 def _extract_video_id(url: str) -> str | None:
@@ -31,11 +36,13 @@ def _extract_video_id(url: str) -> str | None:
 
 @router.get("/download")
 async def download(url: str = Query(..., description="YouTube URL")):
+    if yt_dlp is None:
+        raise HTTPException(status_code=503, detail="yt-dlp not installed on server")
+
     video_id = _extract_video_id(url)
     if not video_id:
         raise HTTPException(status_code=400, detail="유효한 YouTube URL이 아닙니다")
 
-    # 임시 폴더에 다운로드 후 클라이언트로 전송
     tmp_dir = tempfile.mkdtemp()
     outtmpl = os.path.join(tmp_dir, "%(title)s.%(ext)s")
 
@@ -61,17 +68,14 @@ async def download(url: str = Query(..., description="YouTube URL")):
         logger.error(f"[youtube] 다운로드 실패: {e}")
         raise HTTPException(status_code=500, detail=f"다운로드 실패: {e}")
 
-    # 변환된 mp3 파일 찾기
     mp3_files = [f for f in os.listdir(tmp_dir) if f.endswith(".mp3")]
     if not mp3_files:
-        raise HTTPException(status_code=500, detail="MP3 변환 실패")
+        raise HTTPException(status_code=500, detail="MP3 변환 실패 (ffmpeg 확인 필요)")
 
     mp3_path = os.path.join(tmp_dir, mp3_files[0])
-    filename = f"{title}.mp3"
 
     return FileResponse(
         path=mp3_path,
         media_type="audio/mpeg",
-        filename=filename,
-        background=None,
+        filename=f"{title}.mp3",
     )
