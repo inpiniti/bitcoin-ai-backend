@@ -6,6 +6,9 @@ fastapi
 uvicorn[standard]
 httpx
 
+# ── YouTube MP3 ───────────────────────────────────
+yt-dlp
+
 # ── PyTorch ──────────────────────────────────────
 torch
 

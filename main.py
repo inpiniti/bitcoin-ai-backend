@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl, gemini, news
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl, gemini, news, youtube
 
 logging.basicConfig(
     level=logging.INFO,
@@ -248,6 +248,7 @@ app.include_router(train_ws.router)
 app.include_router(job_crawl.router)
 app.include_router(gemini.router)
 app.include_router(news.router)
+app.include_router(youtube.router)
 
 
 @app.get(
