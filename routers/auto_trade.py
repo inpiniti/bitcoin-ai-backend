@@ -16,7 +16,13 @@ from fastapi import APIRouter, HTTPException, Header
 from typing import Optional
 
 from services import auto_trade_service
-from services.supabase_service import load_automation_settings_active, get_auto_trade_logs
+from services.supabase_service import (
+    load_automation_settings_active,
+    get_auto_trade_logs,
+    get_top_tickers_log,
+    get_top_tickers_by_date,
+    get_dl_logs_by_date,
+)
 
 logger = logging.getLogger("auto_trade_router")
 router = APIRouter(prefix="/auto-trade", tags=["auto-trade"])
@@ -145,6 +151,40 @@ async def reschedule_auto_trade(
         return {"status": "ok", **result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/top-tickers",
+    summary="매수 후보 TOP10 로그 조회",
+    description="""
+Supabase `top_tickers_log` 테이블에서 매수 후보 TOP10 기록을 조회합니다.
+
+### 쿼리 파라미터
+- `setting_name`: 설정 이름으로 필터링 (생략 시 전체)
+- `trade_date`: 특정 날짜 (YYYY-MM-DD) 조회 (생략 시 최근 목록)
+- `limit`: 최대 조회 건수 (기본값: 30)
+""",
+)
+async def get_top_tickers(
+    setting_name: Optional[str] = None,
+    trade_date: Optional[str] = None,
+    limit: int = 30,
+):
+    if trade_date:
+        return await get_top_tickers_by_date(trade_date, setting_name)
+    return await get_top_tickers_log(setting_name, limit)
+
+
+@router.get(
+    "/dl-logs-by-date",
+    summary="날짜별 자동매매 실행 로그 조회",
+    description="특정 날짜의 auto_trade_dl_logs 조회 (앱 달력 뷰용)",
+)
+async def get_dl_logs_for_date(
+    trade_date: str,
+    setting_name: Optional[str] = None,
+):
+    return await get_dl_logs_by_date(trade_date, setting_name)
 
 
 @router.get(

@@ -365,3 +365,70 @@ async def get_job_listings(limit: int = 50) -> list[dict]:
     if resp.status_code >= 400:
         raise Exception(f"공고 조회 실패 ({resp.status_code}): {resp.text}")
     return resp.json()
+
+
+# ─────────────────────────────────────────────
+# 상위 종목 로그 (top_tickers_log)
+# ─────────────────────────────────────────────
+
+async def save_top_tickers_log(data: dict) -> None:
+    """top_tickers_log 테이블에 매수 후보 TOP10 저장"""
+    _check_config()
+    from datetime import datetime, timezone
+    data.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    url = f"{SUPABASE_URL}/rest/v1/top_tickers_log"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=data, headers=_headers())
+    if resp.status_code >= 400:
+        logger.warning(f"top_tickers_log 저장 실패 ({resp.status_code}): {resp.text}")
+
+
+async def get_top_tickers_log(
+    setting_name: str | None = None,
+    limit: int = 30,
+) -> list[dict]:
+    """top_tickers_log 최근 목록 조회"""
+    _check_config()
+    filters = f"order=trade_date.desc&limit={limit}"
+    if setting_name:
+        filters = f"setting_name=eq.{setting_name}&{filters}"
+    url = f"{SUPABASE_URL}/rest/v1/top_tickers_log?select=*&{filters}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"top_tickers_log 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+async def get_top_tickers_by_date(
+    trade_date: str,
+    setting_name: str | None = None,
+) -> list[dict]:
+    """특정 날짜의 top_tickers_log 조회"""
+    _check_config()
+    filters = f"trade_date=eq.{trade_date}&order=created_at.desc"
+    if setting_name:
+        filters = f"setting_name=eq.{setting_name}&{filters}"
+    url = f"{SUPABASE_URL}/rest/v1/top_tickers_log?select=*&{filters}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"top_tickers_log 날짜 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+async def get_dl_logs_by_date(
+    trade_date: str,
+    setting_name: str | None = None,
+) -> list[dict]:
+    """특정 날짜의 auto_trade_dl_logs 조회"""
+    _check_config()
+    filters = f"date=eq.{trade_date}&order=created_at.desc"
+    if setting_name:
+        filters = f"setting_name=eq.{setting_name}&{filters}"
+    url = f"{SUPABASE_URL}/rest/v1/auto_trade_dl_logs?select=*&{filters}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"auto_trade_dl_logs 날짜 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()

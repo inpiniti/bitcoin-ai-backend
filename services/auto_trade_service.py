@@ -465,12 +465,13 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         buy_order_count = len([r for r in buy_results if r.get("simulated") or r.get("result", {}).get("success")])
         sell_order_count = len([r for r in sell_results if r.get("simulated") or r.get("result", {}).get("success")])
 
-        # Supabase 저장용 (테이블 컬럼에 있는 필드만)
+        # Supabase 저장용
         supabase_log = {
             "date": today_str,
             "is_test": is_test,
             "model_id": model_id,
             "target_group": target_group,
+            "setting_name": cfg.get("name", ""),
             "holdings_count": len(holdings),
             "buy_signals": len(buy_list),
             "sell_signals": len(sell_list),
@@ -491,7 +492,32 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
             "buy_threshold": buy_threshold,
         }
 
-        # ── 11. 카카오 리포트 전송 ────────────────────
+        # ── 11. TOP10 종목 DB 저장 ────────────────────
+        try:
+            from services.supabase_service import save_top_tickers_log
+            top10_raw = sorted(all_buy_candidates, key=lambda x: x.get("buy_prob", 0), reverse=True)[:10]
+            top10_data = [
+                {
+                    "rank": i + 1,
+                    "ticker": t["ticker"],
+                    "name": t.get("name", ""),
+                    "buy_prob": t["buy_prob"],
+                }
+                for i, t in enumerate(top10_raw)
+            ]
+            await save_top_tickers_log({
+                "trade_date": today_str,
+                "setting_name": cfg.get("name", ""),
+                "target_group": target_group,
+                "tickers": top10_data,
+                "buy_threshold": buy_threshold,
+                "total_scanned": len(all_buy_candidates),
+            })
+            log(f"[TopTickers] TOP{len(top10_data)} 저장 완료")
+        except Exception as e:
+            logger.warning(f"[TopTickers] 저장 실패 (매매 결과에는 영향 없음): {e}")
+
+        # ── 12. 카카오 리포트 전송 ────────────────────
         try:
             from services.kakao_service import send_trade_report, build_trade_report_parts
             report_parts = build_trade_report_parts(summary, mode)
