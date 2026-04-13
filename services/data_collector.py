@@ -73,7 +73,9 @@ async def _fetch_qqq() -> list[str]:
 
 
 async def _fetch_usall() -> list[str]:
-    """Nasdaq + NYSE 전체 (nasdaqtrader.com FTP)"""
+    """Nasdaq + NYSE 전체 (nasdaqtrader.com FTP)
+    주의: 정상적인 주식만 필터링 (warrants, preferred stocks, delisted 제외)
+    """
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     async with httpx.AsyncClient(timeout=60) as client:
         nasdaq_res, other_res = await asyncio.gather(
@@ -82,6 +84,24 @@ async def _fetch_usall() -> list[str]:
         )
 
     tickers = []
+
+    def _is_valid_ticker(ticker: str) -> bool:
+        """유효한 주식 티커만 필터링"""
+        if not ticker:
+            return False
+        # $ 포함 (preferred stock, warrant) 제외
+        if "$" in ticker:
+            return False
+        # . 포함하면 대부분 특수 주식 (warrants, units 등), 한국주식(-로 표시된 것) 제외
+        if "." in ticker:
+            return False
+        # 길이 체크: 1-5자 (nasdaq.com 규칙)
+        if len(ticker) > 5 or len(ticker) < 1:
+            return False
+        # 알파벳 + 숫자만 (특수문자 제외)
+        if not all(c.isalnum() for c in ticker):
+            return False
+        return True
 
     if nasdaq_res.status_code == 200:
         lines = nasdaq_res.text.split("\n")[1:]  # 헤더 제거
@@ -92,7 +112,8 @@ async def _fetch_usall() -> list[str]:
             ticker = cols[0].strip()
             test_issue = cols[3].strip()
             etf = cols[6].strip()
-            if ticker and test_issue != "Y" and etf != "Y" and "File Creation" not in ticker and len(ticker) <= 5:
+            # 테스트 이슈, ETF 제외
+            if test_issue != "Y" and etf != "Y" and "File Creation" not in ticker and _is_valid_ticker(ticker):
                 tickers.append(ticker)
         logger.info(f"[USALL] NASDAQ: {len(tickers)}개")
 
@@ -106,7 +127,8 @@ async def _fetch_usall() -> list[str]:
             ticker = cols[0].strip()
             etf = cols[4].strip()
             test_issue = cols[6].strip()
-            if ticker and test_issue != "Y" and etf != "Y" and "File Creation" not in ticker and len(ticker) <= 5:
+            # 테스트 이슈, ETF 제외
+            if test_issue != "Y" and etf != "Y" and "File Creation" not in ticker and _is_valid_ticker(ticker):
                 tickers.append(ticker)
         logger.info(f"[USALL] NYSE/AMEX: {len(tickers) - nasdaq_count}개, 총 {len(tickers)}개")
 
@@ -136,9 +158,36 @@ async def _fetch_kospi200() -> list[str]:
 
 
 async def _fetch_kosdaq150() -> list[str]:
-    # KOSDAQ 150은 별도 소스가 없어 빈 목록 반환
-    logger.warning("[KOSDAQ150] 자동 수집 미지원 - 빈 목록 반환")
-    return []
+    """KOSDAQ 150 지수 구성 종목 (한국 증권거래소 중형주)"""
+    url = "https://ko.wikipedia.org/wiki/%EC%BD%94%EC%8A%A4%EB%8B%A5_150"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        from bs4 import BeautifulSoup
+        import re
+        soup = BeautifulSoup(resp.text, "html.parser")
+        tickers = []
+        for table in soup.find_all("table", class_="wikitable"):
+            # KOSDAQ 150 테이블 찾기 (테이블에 특정 내용 포함 여부 확인)
+            if "종목명" in table.text or "코드" in table.text:
+                tbody = table.find("tbody")
+                if tbody:
+                    for row in tbody.find_all("tr"):
+                        cols = row.find_all("td")
+                        if len(cols) >= 2:
+                            # 보통 첫 또는 두 번째 컬럼이 종목 코드
+                            ticker = cols[0].text.strip() if cols else ""
+                            if not ticker:
+                                ticker = cols[1].text.strip() if len(cols) > 1 else ""
+                            # 6자리 숫자 코드만 사용
+                            if re.match(r"^\d{6}$", ticker):
+                                tickers.append(ticker)
+        logger.info(f"[KOSDAQ150] {len(tickers)}개 종목 로드")
+        return tickers
+    except Exception as e:
+        logger.warning(f"[KOSDAQ150] 자동 수집 실패: {e} - 빈 목록 반환")
+        return []
 
 
 # ── Yahoo Finance 히스토리 수집 ───────────────────────────────
@@ -357,8 +406,11 @@ async def collect_and_train_data(
     all_features: list = []
     all_labels: list = []
     total = len(tickers)
-    # yf.download() 배치로 한 번에 여러 종목 다운로드 (레이트 리밋 우회)
-    BATCH_SIZE = 50
+    # yf.download() 배치로 한 번에 여러 종목 다운로드 (rate limit 회피)
+    # 배치 크기는 20-30 정도로 유지 (너무 크면 rate limit 걸림)
+    BATCH_SIZE = 25
+    # 배치 간 딜레이: rate limit 회피용
+    BATCH_DELAY = 2.0  # 초
 
     period_map = {
         30: "1mo", 60: "3mo", 90: "3mo", 180: "6mo",
@@ -376,6 +428,7 @@ async def collect_and_train_data(
         def _batch_download(batch_tickers, period):
             import yfinance as yf
             import pandas as pd
+            import time
             try:
                 df = yf.download(
                     batch_tickers,
@@ -442,8 +495,8 @@ async def collect_and_train_data(
         progress = min(round(((i + BATCH_SIZE) / total) * 100), 99)
         await progress_callback(progress)
 
-        # 배치 간 딜레이
-        await asyncio.sleep(0.5)
+        # 배치 간 딜레이: rate limit 회피
+        await asyncio.sleep(BATCH_DELAY)
 
     logger.info(f"[Collector] 수집 완료: 총 {len(all_features)}개 샘플")
     return all_features, all_labels
