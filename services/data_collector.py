@@ -357,28 +357,93 @@ async def collect_and_train_data(
     all_features: list = []
     all_labels: list = []
     total = len(tickers)
-    BATCH_SIZE = 5
+    # yf.download() 배치로 한 번에 여러 종목 다운로드 (레이트 리밋 우회)
+    BATCH_SIZE = 50
+
+    period_map = {
+        30: "1mo", 60: "3mo", 90: "3mo", 180: "6mo",
+        365: "1y", 730: "2y", 1825: "5y",
+    }
+    yf_period = period_map.get(period_days, "1y")
+    if period_days > 1825:
+        yf_period = "max"
+
+    loop = asyncio.get_event_loop()
 
     for i in range(0, total, BATCH_SIZE):
         batch = tickers[i: i + BATCH_SIZE]
 
-        results = await asyncio.gather(
-            *[fetch_stock_history_yf(ticker, period_days) for ticker in batch],
-            return_exceptions=True,
-        )
+        def _batch_download(batch_tickers, period):
+            import yfinance as yf
+            import pandas as pd
+            try:
+                df = yf.download(
+                    batch_tickers,
+                    period=period,
+                    auto_adjust=True,
+                    progress=False,
+                    threads=True,
+                )
+                if df is None or df.empty:
+                    return {}
+                # 단일 티커면 컬럼이 1-level, 복수면 MultiIndex
+                if isinstance(df.columns, pd.MultiIndex):
+                    result = {}
+                    for tkr in batch_tickers:
+                        try:
+                            tkr_df = df.xs(tkr, axis=1, level=1).dropna(how="all")
+                            if tkr_df.empty:
+                                continue
+                            candles = []
+                            for ts, row in tkr_df.iterrows():
+                                close = row.get("Close")
+                                if pd.isna(close):
+                                    continue
+                                candles.append({
+                                    "date": ts.strftime("%Y-%m-%d"),
+                                    "open":   float(row.get("Open",  close)),
+                                    "high":   float(row.get("High",  close)),
+                                    "low":    float(row.get("Low",   close)),
+                                    "close":  float(close),
+                                    "volume": float(row.get("Volume", 0) or 0),
+                                })
+                            result[tkr] = candles
+                        except Exception:
+                            continue
+                    return result
+                else:
+                    # 단일 티커 (배치 크기 1일 때)
+                    tkr = batch_tickers[0]
+                    candles = []
+                    for ts, row in df.iterrows():
+                        close = row.get("Close")
+                        if pd.isna(close):
+                            continue
+                        candles.append({
+                            "date": ts.strftime("%Y-%m-%d"),
+                            "open":   float(row.get("Open",  close)),
+                            "high":   float(row.get("High",  close)),
+                            "low":    float(row.get("Low",   close)),
+                            "close":  float(close),
+                            "volume": float(row.get("Volume", 0) or 0),
+                        })
+                    return {tkr: candles}
+            except Exception as e:
+                logger.warning(f"[Collector] 배치 다운로드 실패 {batch_tickers[:3]}...: {e}")
+                return {}
 
-        for result in results:
-            if isinstance(result, Exception) or not result:
-                continue
-            feats, labs = process_stock_data_for_ml(result)
+        ticker_candles = await loop.run_in_executor(None, _batch_download, batch, yf_period)
+
+        for candles in ticker_candles.values():
+            feats, labs = process_stock_data_for_ml(candles)
             all_features.extend(feats)
             all_labels.extend(labs)
 
         progress = min(round(((i + BATCH_SIZE) / total) * 100), 99)
         await progress_callback(progress)
 
-        # 약간의 딜레이로 Rate Limit 방지
-        await asyncio.sleep(0.1)
+        # 배치 간 딜레이
+        await asyncio.sleep(0.5)
 
     logger.info(f"[Collector] 수집 완료: 총 {len(all_features)}개 샘플")
     return all_features, all_labels
