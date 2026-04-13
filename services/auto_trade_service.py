@@ -469,6 +469,7 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         supabase_log = {
             "date": today_str,
             "is_test": is_test,
+            "setting_id": cfg.get("id"),
             "model_id": model_id,
             "target_group": target_group,
             "setting_name": cfg.get("name", ""),
@@ -534,7 +535,7 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         logger.exception(error_msg)
         logs.append(error_msg)
         try:
-            await save_auto_trade_log({"date": today_str, "is_test": is_test, "error": str(e), "logs": logs})
+            await save_auto_trade_log({"date": today_str, "is_test": is_test, "setting_id": cfg.get("id"), "setting_name": cfg.get("name", ""), "error": str(e), "logs": logs})
         except Exception:
             pass
         raise
