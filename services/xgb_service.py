@@ -132,13 +132,14 @@ async def predict(
     # features 확보 — ticker 우선, 그 다음 datasetId, 마지막으로 inline features
     dates: list = []
     raw_features: list = []
+    actuals: list = []
 
     if ticker and not features:
         logger.info(f"[XGB:Predict] ticker={ticker} 데이터 수집 시작 (days={days})")
         candles = await data_collector.fetch_stock_history_yf(ticker, days)
         if not candles:
             raise ValueError(f"ticker '{ticker}' 의 데이터를 가져올 수 없습니다")
-        features, dates, raw_features = data_collector.process_stock_data_for_prediction(candles)
+        features, dates, raw_features, actuals = data_collector.process_stock_data_for_prediction(candles)
         logger.info(f"[XGB:Predict] 피처 추출 완료: {len(features)}개")
     elif dataset_id and not features:
         logger.info(f"[XGB:Predict] 데이터셋 로드: {dataset_id}")
@@ -164,6 +165,8 @@ async def predict(
             entry["date"] = dates[idx]
         if idx < len(raw_features):
             entry.update(raw_features[idx])
+        if idx < len(actuals):
+            entry["actual"] = actuals[idx]
         result_list.append(entry)
 
     logger.info(f"[XGB:Predict] {len(result_list)}건 예측 완료")

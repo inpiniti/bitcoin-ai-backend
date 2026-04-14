@@ -313,18 +313,19 @@ def process_stock_data_for_ml(candles: list[dict]) -> tuple[list, list]:
 
 # ── 예측용 피처 추출 (레이블 없음, 마지막 날까지 포함) ──────────────
 
-def process_stock_data_for_prediction(candles: list[dict]) -> tuple[list, list, list]:
+def process_stock_data_for_prediction(candles: list[dict]) -> tuple[list, list, list, list]:
     """
     processStockDataForPrediction(allHistory=true) JS 로직과 동일.
-    레이블 없이 피처와 날짜, rawFeatures를 반환합니다.
-    Returns: (features, dates, raw_features)
+    레이블 없이 피처와 날짜, rawFeatures, actuals(다음날 실제 변동률)를 반환합니다.
+    Returns: (features, dates, raw_features, actuals)
     """
     features = []
     dates = []
     raw_features = []
+    actuals = []
 
     if not candles or len(candles) <= 30:
-        return features, dates, raw_features
+        return features, dates, raw_features, actuals
 
     for i in range(30, len(candles)):
         today = candles[i]
@@ -373,7 +374,17 @@ def process_stock_data_for_prediction(candles: list[dict]) -> tuple[list, list, 
             "change30d": change30d,
         })
 
-    return features, dates, raw_features
+        # 다음날 실제 변동률 (백테스팅용) — JS mlProcessor.js의 actuals 계산과 동일
+        if (i + 1 < len(candles)
+                and candles[i + 1].get("close")
+                and today["close"] != 0):
+            next_close = candles[i + 1]["close"]
+            actual_change = ((next_close - today["close"]) / today["close"]) * 100
+            actuals.append(round(actual_change, 2))
+        else:
+            actuals.append(None)
+
+    return features, dates, raw_features, actuals
 
 
 # ── 통합 수집 파이프라인 ──────────────────────────────────────
