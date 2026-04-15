@@ -31,7 +31,7 @@ async def train(dataset_id: str, model_name: str) -> dict:
     return await train_from_data(features, labels, model_name)
 
 
-async def train_from_data(features: list, labels: list, model_name: str) -> dict:
+async def train_from_data(features: list, labels: list, model_name: str, stage: int = 6) -> dict:
     """
     이미 수집된 features/labels로 XGBoost 학습 후 Supabase에 저장합니다.
     data_collector.py에서 서버 사이드 수집 완료 후 직접 호출하는 경로입니다.
@@ -86,6 +86,7 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
         "auc":           auc,
         "feature_count": int(X.shape[1]),
         "sample_count":  int(X.shape[0]),
+        "stage":         stage,
         "model_json":    model_json,
     }
 
@@ -102,6 +103,7 @@ async def train_from_data(features: list, labels: list, model_name: str) -> dict
         "auc":          auc,
         "featureCount": int(X.shape[1]),
         "sampleCount":  int(X.shape[0]),
+        "stage":        stage,
     }
 
 
@@ -122,7 +124,9 @@ async def predict(
     xgb, np = _get_deps()
 
     logger.info(f"[XGB:Predict] 모델 로드: {model_id}")
-    model_json = await supabase_service.load_model(model_id)
+    model_record = await supabase_service.load_model(model_id)
+    model_json = model_record["model_json"]
+    model_stage = model_record.get("stage", 6)  # 기존 모델은 기본 stage 6
 
     # bytearray로 직접 로드 (임시 파일 불필요)
     model_bytes = json.dumps(model_json).encode("utf-8")
@@ -135,11 +139,24 @@ async def predict(
     actuals: list = []
 
     if ticker and not features:
-        logger.info(f"[XGB:Predict] ticker={ticker} 데이터 수집 시작 (days={days})")
-        candles = await data_collector.fetch_stock_history_yf(ticker, days)
+        # 예측용: stage lookback + 여유분만 취득
+        from services.data_collector import get_required_calendar_days, get_max_achievable_stage
+        pred_days = max(days, get_required_calendar_days(model_stage, min_rows=10))
+        logger.info(f"[XGB:Predict] ticker={ticker} 데이터 수집 (days={pred_days}, stage={model_stage})")
+        candles = await data_collector.fetch_stock_history_yf(ticker, pred_days)
         if not candles:
             raise ValueError(f"ticker '{ticker}' 의 데이터를 가져올 수 없습니다")
-        features, dates, raw_features, actuals = data_collector.process_stock_data_for_prediction(candles)
+
+        # 보유 데이터가 모델 stage를 충족하지 못하면 경고
+        achievable = get_max_achievable_stage(len(candles), min_rows=10)
+        if achievable < model_stage:
+            logger.warning(
+                f"[XGB:Predict] {ticker}: 캔들 {len(candles)}개, 모델 stage={model_stage} 예측 불가 "
+                f"(최대 stage={achievable}). 빈 결과 반환."
+            )
+            return {"predictions": [], "error": f"데이터 부족: {ticker}는 stage {model_stage} 예측에 필요한 데이터가 없습니다 (보유 {len(candles)}일)"}
+
+        features, dates, raw_features, actuals = data_collector.process_stock_data_for_prediction(candles, model_stage)
         logger.info(f"[XGB:Predict] 피처 추출 완료: {len(features)}개")
     elif dataset_id and not features:
         logger.info(f"[XGB:Predict] 데이터셋 로드: {dataset_id}")

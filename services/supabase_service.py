@@ -62,9 +62,11 @@ async def load_features(dataset_id: str) -> list:
 
 
 async def load_model(model_id: str) -> dict:
-    """ml_models 테이블에서 model_json 로드"""
+    """ml_models 테이블에서 model_json, stage 로드
+    Returns: {"model_json": dict, "stage": int}
+    """
     _check_config()
-    url = f"{SUPABASE_URL}/rest/v1/ml_models?id=eq.{model_id}&select=model_json"
+    url = f"{SUPABASE_URL}/rest/v1/ml_models?id=eq.{model_id}&select=model_json,stage"
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers=_headers())
@@ -76,7 +78,11 @@ async def load_model(model_id: str) -> dict:
     if not result:
         raise Exception(f"Model {model_id} 를 찾을 수 없습니다")
 
-    return result[0]["model_json"]
+    row = result[0]
+    return {
+        "model_json": row["model_json"],
+        "stage": row.get("stage", 6),  # 기존 모델 기본값 6
+    }
 
 
 async def save_model(model_data: dict) -> str:

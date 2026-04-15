@@ -10,6 +10,70 @@ import httpx
 
 logger = logging.getLogger("data_collector")
 
+# ── 피처 Stage 상수 ────────────────────────────────────────────
+# 2의 거듭제곱 거래일 lookback (거래일 기준)
+STAGE_LOOKBACKS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+
+def get_stage_lookbacks(stage: int) -> list[int]:
+    """stage(1~11)에 해당하는 lookback 목록 반환"""
+    stage = max(1, min(stage, len(STAGE_LOOKBACKS)))
+    return STAGE_LOOKBACKS[:stage]
+
+
+def get_required_calendar_days(stage: int, min_rows: int = 200) -> int:
+    """학습에 필요한 최소 캘린더 일수 (여유 포함)"""
+    stage = max(1, min(stage, len(STAGE_LOOKBACKS)))
+    max_lookback = STAGE_LOOKBACKS[stage - 1]
+    total_trading = max_lookback + min_rows
+    return int(total_trading * (365 / 250)) + 30
+
+
+def get_max_achievable_stage(available_candles: int, min_rows: int = 50) -> int:
+    """보유 캔들 수 기준으로 학습 가능한 최대 stage 반환"""
+    for stage in range(len(STAGE_LOOKBACKS), 0, -1):
+        if available_candles > STAGE_LOOKBACKS[stage - 1] + min_rows:
+            return stage
+    return 1
+
+
+def _days_to_yf_period(days: int) -> str:
+    """캘린더 일수를 yfinance period 문자열로 변환"""
+    if days <= 30:   return "1mo"
+    if days <= 90:   return "3mo"
+    if days <= 180:  return "6mo"
+    if days <= 365:  return "1y"
+    if days <= 730:  return "2y"
+    if days <= 1825: return "5y"
+    return "max"
+
+
+def _calc_consecutive_days(candles: list[dict], i: int) -> int:
+    """i번째 캔들의 연속 상승/하락 일수 계산"""
+    today = candles[i]
+    if not today.get("close") or not candles[i - 1].get("close"):
+        return 0
+    consecutive = 0
+    if today["close"] > candles[i - 1]["close"]:
+        temp = 1
+        while (i - temp > 0
+               and candles[i - temp].get("close")
+               and candles[i - temp - 1].get("close")
+               and candles[i - temp]["close"] > candles[i - temp - 1]["close"]):
+            consecutive += 1
+            temp += 1
+        return consecutive if consecutive > 0 else 1
+    elif today["close"] < candles[i - 1]["close"]:
+        temp = 1
+        while (i - temp > 0
+               and candles[i - temp].get("close")
+               and candles[i - temp - 1].get("close")
+               and candles[i - temp]["close"] < candles[i - temp - 1]["close"]):
+            consecutive -= 1
+            temp += 1
+        return consecutive if consecutive < 0 else -1
+    return 0
+
 
 # ── 티커 그룹 목록 수집 ──────────────────────────────────────
 
@@ -198,18 +262,7 @@ async def fetch_stock_history_yf(ticker: str, days: int) -> list[dict]:
         import yfinance as yf
         import pandas as pd
 
-        period_map = {
-            30: "1mo",
-            60: "3mo",
-            90: "3mo",
-            180: "6mo",
-            365: "1y",
-            730: "2y",
-            1825: "5y",
-        }
-        period = period_map.get(days, "1y")
-        if days > 1825:
-            period = "max"
+        period = _days_to_yf_period(days)
 
         # yfinance는 동기 라이브러리이므로 executor에서 실행
         loop = asyncio.get_event_loop()
@@ -249,132 +302,97 @@ async def fetch_stock_history_yf(ticker: str, days: int) -> list[dict]:
         return []
 
 
-# ── 피처 엔지니어링 (mlProcessor.js 포팅) ────────────────────
+# ── 피처 엔지니어링 ───────────────────────────────────────────
 
-def process_stock_data_for_ml(candles: list[dict]) -> tuple[list, list]:
+def process_stock_data_for_ml(candles: list[dict], stage: int = 6) -> tuple[list, list]:
     """
-    mlProcessor.js processStockDataForML 와 동일한 로직
-    - 4개 피처: [consecutiveDays, change1d%, change7d%, change30d%]
-    - 레이블: 다음날 2% 이상 상승 → 1, 아니면 → 0
+    TO-BE: 2의 거듭제곱 lookback 기반 피처 엔지니어링
+    - 피처: [consecutiveDays, change1d%, change2d%, change4d%, ...] (stage에 따라 개수 증가)
+    - 레이블: 다음날 상승(>0%) → 1, 아니면 → 0
     """
+    lookbacks = get_stage_lookbacks(stage)
+    max_lookback = max(lookbacks)
     features = []
     labels = []
 
-    if not candles or len(candles) <= 30:
+    if not candles or len(candles) <= max_lookback + 1:
         return features, labels
 
-    for i in range(30, len(candles) - 1):
+    for i in range(max_lookback, len(candles) - 1):
         today = candles[i]
         tomorrow = candles[i + 1]
 
         if not today.get("close") or not tomorrow.get("close"):
             continue
-        if not candles[i - 1].get("close"):
+
+        consecutive = _calc_consecutive_days(candles, i)
+
+        changes = []
+        valid = True
+        for lb in lookbacks:
+            past = candles[i - lb]
+            if not past or not past.get("close") or past["close"] == 0:
+                valid = False
+                break
+            pct = ((today["close"] - past["close"]) / past["close"]) * 100
+            changes.append(round(pct, 2) if pct == pct else 0.0)
+
+        if not valid:
             continue
 
-        # 1. 연속 상승/하락 일수
-        consecutive_days = 0
-        if today["close"] > candles[i - 1]["close"]:
-            temp = 1
-            while i - temp > 0 and candles[i - temp].get("close") and candles[i - temp - 1].get("close") and candles[i - temp]["close"] > candles[i - temp - 1]["close"]:
-                consecutive_days += 1
-                temp += 1
-            if consecutive_days == 0:
-                consecutive_days = 1
-        elif today["close"] < candles[i - 1]["close"]:
-            temp = 1
-            while i - temp > 0 and candles[i - temp].get("close") and candles[i - temp - 1].get("close") and candles[i - temp]["close"] < candles[i - temp - 1]["close"]:
-                consecutive_days -= 1
-                temp += 1
-            if consecutive_days == 0:
-                consecutive_days = -1
-
-        # 2. 변화율 (1일, 7일, 30일)
-        def get_change_pct(days: int) -> float:
-            past = candles[i - days]
-            if not past or not past.get("close") or past["close"] == 0:
-                return 0.0
-            pct = ((today["close"] - past["close"]) / past["close"]) * 100
-            if pct != pct:  # NaN check
-                return 0.0
-            return round(pct, 2)
-
-        change1d = get_change_pct(1)
-        change7d = get_change_pct(7)
-        change30d = get_change_pct(30)
-
-        features.append([consecutive_days, change1d, change7d, change30d])
+        features.append([consecutive] + changes)
 
         next_day_change = ((tomorrow["close"] - today["close"]) / today["close"]) * 100
-        labels.append(1 if next_day_change >= 2.0 else 0)
+        labels.append(1 if next_day_change > 0 else 0)
 
     return features, labels
 
 
 # ── 예측용 피처 추출 (레이블 없음, 마지막 날까지 포함) ──────────────
 
-def process_stock_data_for_prediction(candles: list[dict]) -> tuple[list, list, list, list]:
+def process_stock_data_for_prediction(candles: list[dict], stage: int = 6) -> tuple[list, list, list, list]:
     """
-    processStockDataForPrediction(allHistory=true) JS 로직과 동일.
-    레이블 없이 피처와 날짜, rawFeatures, actuals(다음날 실제 변동률)를 반환합니다.
+    TO-BE: stage 기반 피처 추출 (레이블 없음, 마지막 날까지 포함)
     Returns: (features, dates, raw_features, actuals)
+    raw_features 딕셔너리 키: consecutiveDays, change1d, change2d, change4d, ... (stage에 따라 동적)
     """
+    lookbacks = get_stage_lookbacks(stage)
+    max_lookback = max(lookbacks)
     features = []
     dates = []
     raw_features = []
     actuals = []
 
-    if not candles or len(candles) <= 30:
+    if not candles or len(candles) <= max_lookback:
         return features, dates, raw_features, actuals
 
-    for i in range(30, len(candles)):
+    for i in range(max_lookback, len(candles)):
         today = candles[i]
-        if not today.get("close") or not candles[i - 1].get("close"):
+        if not today.get("close"):
             continue
 
-        consecutive_days = 0
-        if today["close"] > candles[i - 1]["close"]:
-            temp = 1
-            while (i - temp > 0
-                   and candles[i - temp].get("close")
-                   and candles[i - temp - 1].get("close")
-                   and candles[i - temp]["close"] > candles[i - temp - 1]["close"]):
-                consecutive_days += 1
-                temp += 1
-            if consecutive_days == 0:
-                consecutive_days = 1
-        elif today["close"] < candles[i - 1]["close"]:
-            temp = 1
-            while (i - temp > 0
-                   and candles[i - temp].get("close")
-                   and candles[i - temp - 1].get("close")
-                   and candles[i - temp]["close"] < candles[i - temp - 1]["close"]):
-                consecutive_days -= 1
-                temp += 1
-            if consecutive_days == 0:
-                consecutive_days = -1
+        consecutive = _calc_consecutive_days(candles, i)
 
-        def get_change_pct(days_ago: int) -> float:
-            past = candles[i - days_ago]
+        changes = []
+        raw = {"consecutiveDays": consecutive}
+        valid = True
+        for lb in lookbacks:
+            past = candles[i - lb]
             if not past or not past.get("close") or past["close"] == 0:
-                return 0.0
+                valid = False
+                break
             pct = ((today["close"] - past["close"]) / past["close"]) * 100
-            return round(pct, 2) if pct == pct else 0.0  # NaN guard
+            val = round(pct, 2) if pct == pct else 0.0
+            changes.append(val)
+            raw[f"change{lb}d"] = val
 
-        change1d = get_change_pct(1)
-        change7d = get_change_pct(7)
-        change30d = get_change_pct(30)
+        if not valid:
+            continue
 
-        features.append([consecutive_days, change1d, change7d, change30d])
+        features.append([consecutive] + changes)
         dates.append(today.get("date", ""))
-        raw_features.append({
-            "consecutiveDays": consecutive_days,
-            "change1d": change1d,
-            "change7d": change7d,
-            "change30d": change30d,
-        })
+        raw_features.append(raw)
 
-        # 다음날 실제 변동률 (백테스팅용) — JS mlProcessor.js의 actuals 계산과 동일
         if (i + 1 < len(candles)
                 and candles[i + 1].get("close")
                 and today["close"] != 0):
@@ -394,42 +412,48 @@ async def collect_and_train_data(
     period_days: int,
     single_ticker: str | None,
     progress_callback: Callable,
-) -> tuple[list, list]:
+    stage: int = 6,
+) -> tuple[list, list, int]:
     """
     티커 그룹(또는 단일 티커)에 대해 데이터를 수집하고 피처를 추출합니다.
-    progress_callback(progress: int) 은 0~100 수집 진행률로 호출됩니다.
+    - period_days: 사용자가 선택한 학습 기간(캘린더 일수)
+    - stage: 피처 단계 (1~11). 데이터 부족 시 자동 하향 조정됨.
+    Returns: (features, labels, actual_stage)
     """
+    # stage에 필요한 최소 캘린더 일수보다 크게 설정
+    required_days = get_required_calendar_days(stage)
+    effective_days = max(period_days, required_days)
+    yf_period = _days_to_yf_period(effective_days)
+
     if single_ticker:
         await progress_callback(0)
-        candles = await fetch_stock_history_yf(single_ticker, period_days)
-        features, labels = process_stock_data_for_ml(candles)
+        candles = await fetch_stock_history_yf(single_ticker, effective_days)
+
+        # 데이터 부족 시 stage 자동 하향
+        actual_stage = min(stage, get_max_achievable_stage(len(candles)))
+        if actual_stage < stage:
+            logger.warning(
+                f"[Collector] {single_ticker}: 캔들 {len(candles)}개 — "
+                f"stage {stage}→{actual_stage} 자동 조정"
+            )
+
+        features, labels = process_stock_data_for_ml(candles, actual_stage)
         await progress_callback(100)
-        logger.info(f"[Collector] {single_ticker}: {len(features)}개 샘플")
-        return features, labels
+        logger.info(f"[Collector] {single_ticker}: {len(features)}개 샘플 (stage={actual_stage})")
+        return features, labels, actual_stage
 
     # 그룹 수집
     tickers = await fetch_tickers_for_group(group_key)
     if not tickers:
         raise ValueError(f"그룹 '{group_key}'에서 종목을 찾을 수 없습니다")
 
-    logger.info(f"[Collector] {group_key}: {len(tickers)}개 종목 수집 시작")
+    logger.info(f"[Collector] {group_key}: {len(tickers)}개 종목 수집 시작 (stage={stage}, period={yf_period})")
 
     all_features: list = []
     all_labels: list = []
     total = len(tickers)
-    # yf.download() 배치로 한 번에 여러 종목 다운로드 (rate limit 회피)
-    # 배치 크기는 20-30 정도로 유지 (너무 크면 rate limit 걸림)
     BATCH_SIZE = 25
-    # 배치 간 딜레이: rate limit 회피용
-    BATCH_DELAY = 2.0  # 초
-
-    period_map = {
-        30: "1mo", 60: "3mo", 90: "3mo", 180: "6mo",
-        365: "1y", 730: "2y", 1825: "5y",
-    }
-    yf_period = period_map.get(period_days, "1y")
-    if period_days > 1825:
-        yf_period = "max"
+    BATCH_DELAY = 2.0
 
     loop = asyncio.get_event_loop()
 
@@ -439,7 +463,6 @@ async def collect_and_train_data(
         def _batch_download(batch_tickers, period):
             import yfinance as yf
             import pandas as pd
-            import time
             try:
                 df = yf.download(
                     batch_tickers,
@@ -450,7 +473,6 @@ async def collect_and_train_data(
                 )
                 if df is None or df.empty:
                     return {}
-                # 단일 티커면 컬럼이 1-level, 복수면 MultiIndex
                 if isinstance(df.columns, pd.MultiIndex):
                     result = {}
                     for tkr in batch_tickers:
@@ -476,7 +498,6 @@ async def collect_and_train_data(
                             continue
                     return result
                 else:
-                    # 단일 티커 (배치 크기 1일 때)
                     tkr = batch_tickers[0]
                     candles = []
                     for ts, row in df.iterrows():
@@ -499,15 +520,18 @@ async def collect_and_train_data(
         ticker_candles = await loop.run_in_executor(None, _batch_download, batch, yf_period)
 
         for candles in ticker_candles.values():
-            feats, labs = process_stock_data_for_ml(candles)
-            all_features.extend(feats)
-            all_labels.extend(labs)
+            # 종목별 달성 가능한 stage로 학습 (신생 종목 자동 조정)
+            ticker_stage = min(stage, get_max_achievable_stage(len(candles)))
+            feats, labs = process_stock_data_for_ml(candles, ticker_stage)
+            # 피처 개수가 다른 종목 데이터는 혼합 불가 → stage 맞는 것만 사용
+            if feats and len(feats[0]) == stage + 1:  # consecutiveDays + stage개 lookback
+                all_features.extend(feats)
+                all_labels.extend(labs)
 
         progress = min(round(((i + BATCH_SIZE) / total) * 100), 99)
         await progress_callback(progress)
 
-        # 배치 간 딜레이: rate limit 회피
         await asyncio.sleep(BATCH_DELAY)
 
-    logger.info(f"[Collector] 수집 완료: 총 {len(all_features)}개 샘플")
-    return all_features, all_labels
+    logger.info(f"[Collector] 수집 완료: 총 {len(all_features)}개 샘플 (stage={stage})")
+    return all_features, all_labels, stage

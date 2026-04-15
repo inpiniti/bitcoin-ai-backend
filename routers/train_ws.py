@@ -47,10 +47,11 @@ async def websocket_train(websocket: WebSocket):
         data = await websocket.receive_json()
         group_key     = data.get("group", "sp500")
         period_days   = int(data.get("period", 365))
-        model_name    = data.get("modelName", f"XGB_{group_key}")
+        stage         = int(data.get("stage", 6))
+        model_name    = data.get("modelName", f"XGB_{group_key}_s{stage}")
         single_ticker = data.get("ticker")
 
-        logger.info(f"[WS:Train] 설정: group={group_key}, period={period_days}d, model={model_name}")
+        logger.info(f"[WS:Train] 설정: group={group_key}, period={period_days}d, stage={stage}, model={model_name}")
         _set_job(status="collecting", collect_progress=0, train_progress=0,
                  model_name=model_name, group=group_key, result=None, error=None)
 
@@ -67,12 +68,23 @@ async def websocket_train(websocket: WebSocket):
 
         await websocket.send_json({"type": "collection", "progress": 0})
 
-        features, labels = await collect_and_train_data(
+        features, labels, actual_stage = await collect_and_train_data(
             group_key=group_key,
             period_days=period_days,
             single_ticker=single_ticker,
             progress_callback=on_collection_progress,
+            stage=stage,
         )
+        if actual_stage != stage:
+            logger.warning(f"[WS:Train] stage {stage}→{actual_stage} 자동 조정됨")
+            stage = actual_stage
+            try:
+                await websocket.send_json({
+                    "type": "notice",
+                    "message": f"데이터 부족으로 stage {actual_stage}로 자동 조정됐어요.",
+                })
+            except (WebSocketDisconnect, RuntimeError):
+                pass
 
         if not features:
             _set_job(status="error", error="데이터 수집 결과가 없습니다.")
@@ -93,7 +105,7 @@ async def websocket_train(websocket: WebSocket):
             pass
 
         # 3. 학습 (브라우저 닫혀도 여기까지 실행됨)
-        result = await train_from_data(features, labels, model_name)
+        result = await train_from_data(features, labels, model_name, stage)
 
         _set_job(status="complete", train_progress=100, result=result)
         logger.info(f"[WS:Train] 학습 완료: {result}")
