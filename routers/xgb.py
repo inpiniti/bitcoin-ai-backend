@@ -1,12 +1,14 @@
 """
-POST /v1/xgb/train   - XGBoost 학습
-POST /v1/xgb/predict - XGBoost 예측
+POST /v1/xgb/train          - XGBoost 학습
+POST /v1/xgb/predict        - XGBoost 예측
+GET  /v1/xgb/group-tickers  - 그룹 티커 목록 반환
 """
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from services import xgb_service
+from services.data_collector import fetch_tickers_for_group
 
 router = APIRouter()
 logger = logging.getLogger("router.xgb")
@@ -104,4 +106,19 @@ async def predict(body: PredictRequest):
         return result
     except Exception as e:
         logger.exception(f"[/v1/xgb/predict] 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/v1/xgb/group-tickers",
+    summary="그룹 티커 목록 조회",
+    tags=["XGBoost"],
+)
+async def group_tickers(group: str = Query(..., description="그룹 키 (sp500, qqq, usall, kospi200, kosdaq150)")):
+    """학습에 사용되는 그룹의 티커 목록을 반환합니다."""
+    try:
+        tickers = await fetch_tickers_for_group(group)
+        return {"group": group, "tickers": tickers, "count": len(tickers)}
+    except Exception as e:
+        logger.exception(f"[/v1/xgb/group-tickers] 오류: {e}")
         raise HTTPException(status_code=500, detail=str(e))
