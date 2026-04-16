@@ -423,15 +423,6 @@ async def get_top_tickers_by_date(
     return resp.json()
 
 
-async def patch_top_tickers_log(record_id: str, data: dict) -> None:
-    """top_tickers_log 특정 레코드 부분 업데이트 (PATCH)"""
-    _check_config()
-    url = f"{SUPABASE_URL}/rest/v1/top_tickers_log?id=eq.{record_id}"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.patch(url, json=data, headers=_headers())
-    if resp.status_code >= 400:
-        logger.warning(f"top_tickers_log PATCH 실패 ({resp.status_code}): {resp.text}")
-
 
 async def get_dl_logs_by_date(
     trade_date: str,
