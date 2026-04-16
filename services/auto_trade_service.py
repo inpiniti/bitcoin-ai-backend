@@ -493,29 +493,46 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
             "buy_threshold": buy_threshold,
         }
 
-        # ── 11. TOP10 종목 DB 저장 ────────────────────
+        # ── 11. TOP20 종목 DB 저장 (+ TimesFM 방향 신호) ─────────────
         try:
             from services.supabase_service import save_top_tickers_log
-            top10_raw = sorted(all_buy_candidates, key=lambda x: x.get("buy_prob", 0), reverse=True)[:10]
-            top10_data = [
+            from services import timesfm_service
+
+            top20_raw = sorted(all_buy_candidates, key=lambda x: x.get("buy_prob", 0), reverse=True)[:20]
+
+            # TimesFM: 각 종목의 종가 데이터로 다음날 방향 예측 (비동기 병렬 처리)
+            async def _timesfm_signal(stock: dict) -> str | None:
+                candles = data_cache.get(stock["ticker"])
+                if not candles:
+                    return None
+                closes = [c["close"] for c in candles if c.get("close") is not None]
+                return await asyncio.to_thread(timesfm_service.predict_direction, closes)
+
+            timesfm_results = await asyncio.gather(
+                *[_timesfm_signal(s) for s in top20_raw],
+                return_exceptions=True,
+            )
+
+            top20_data = [
                 {
                     "rank": i + 1,
                     "ticker": t["ticker"],
                     "name": t.get("name", ""),
                     "buy_prob": t["buy_prob"],
+                    "timesfm_signal": sig if not isinstance(sig, Exception) else None,
                 }
-                for i, t in enumerate(top10_raw)
+                for i, (t, sig) in enumerate(zip(top20_raw, timesfm_results))
             ]
             await save_top_tickers_log({
                 "trade_date": today_str,
                 "setting_id": cfg.get("id"),
                 "setting_name": cfg.get("name", ""),
                 "target_group": target_group,
-                "tickers": top10_data,
+                "tickers": top20_data,
                 "buy_threshold": buy_threshold,
                 "total_scanned": len(all_buy_candidates),
             })
-            log(f"[TopTickers] TOP{len(top10_data)} 저장 완료")
+            log(f"[TopTickers] TOP{len(top20_data)} 저장 완료 (TimesFM 신호 포함)")
         except Exception as e:
             logger.warning(f"[TopTickers] 저장 실패 (매매 결과에는 영향 없음): {e}")
 
