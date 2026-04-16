@@ -508,6 +508,7 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
             ]
             await save_top_tickers_log({
                 "trade_date": today_str,
+                "setting_id": cfg.get("id"),
                 "setting_name": cfg.get("name", ""),
                 "target_group": target_group,
                 "tickers": top10_data,
