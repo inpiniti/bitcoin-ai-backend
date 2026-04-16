@@ -22,6 +22,7 @@ from services.supabase_service import (
     get_top_tickers_log,
     get_top_tickers_by_date,
     get_dl_logs_by_date,
+    patch_top_tickers_log,
 )
 
 logger = logging.getLogger("auto_trade_router")
@@ -185,6 +186,96 @@ async def get_dl_logs_for_date(
     setting_name: Optional[str] = None,
 ):
     return await get_dl_logs_by_date(trade_date, setting_name)
+
+
+# ─────────────────────────────────────────────
+# [임시] TimesFM 신호 백필 (기존 top_tickers_log 업데이트용)
+# TODO: 백필 완료 후 이 엔드포인트 삭제
+# ─────────────────────────────────────────────
+
+@router.post(
+    "/backfill-timesfm",
+    summary="[임시] 기존 top_tickers_log에 TimesFM 신호 백필",
+    description="""
+기존 `top_tickers_log` 레코드 중 `timesfm_signal` 없는 종목에 신호를 채워 넣습니다.
+
+- 각 레코드의 `trade_date` 기준으로 그 날까지의 종가만 사용해 예측
+- 이미 `timesfm_signal`이 있는 종목은 건너뜀
+- **임시 엔드포인트 — 백필 완료 후 삭제 예정**
+""",
+)
+async def backfill_timesfm(
+    limit: int = 50,
+    x_cron_secret: Optional[str] = Header(None),
+):
+    _verify_cron(x_cron_secret)
+
+    import asyncio
+    import json
+    from services import timesfm_service
+    from services.yahoo_service import fetch_stock_history_for_trade
+
+    records = await get_top_tickers_log(limit=limit)
+    updated_count = 0
+    skipped_count = 0
+    error_count = 0
+    detail_log = []
+
+    for rec in records:
+        rec_id = rec["id"]
+        trade_date = rec.get("trade_date", "")
+        raw_tickers = rec.get("tickers") or []
+        if isinstance(raw_tickers, str):
+            raw_tickers = json.loads(raw_tickers)
+
+        # 이미 전부 신호가 있으면 스킵
+        missing = [t for t in raw_tickers if t.get("timesfm_signal") is None]
+        if not missing:
+            skipped_count += 1
+            continue
+
+        updated_tickers = list(raw_tickers)
+        any_changed = False
+
+        for idx, ticker_obj in enumerate(updated_tickers):
+            if ticker_obj.get("timesfm_signal") is not None:
+                continue
+
+            symbol = ticker_obj.get("ticker", "")
+            if not symbol:
+                continue
+
+            try:
+                # trade_date 기준 이전 종가 데이터 수집 (2년치 → 날짜 필터)
+                candles = await fetch_stock_history_for_trade(symbol, range_str="2y")
+                closes = [
+                    c["close"]
+                    for c in candles
+                    if c.get("close") is not None and c.get("date", "") <= trade_date
+                ]
+                if len(closes) < 32:
+                    detail_log.append(f"{trade_date}/{symbol}: 종가 데이터 부족 ({len(closes)}개)")
+                    continue
+
+                signal = await asyncio.to_thread(timesfm_service.predict_direction, closes)
+                updated_tickers[idx] = {**ticker_obj, "timesfm_signal": signal}
+                any_changed = True
+                detail_log.append(f"{trade_date}/{symbol}: {signal}")
+
+            except Exception as exc:
+                error_count += 1
+                detail_log.append(f"{trade_date}/{symbol}: 오류 - {exc}")
+
+        if any_changed:
+            await patch_top_tickers_log(rec_id, {"tickers": updated_tickers})
+            updated_count += 1
+
+    return {
+        "updated_records": updated_count,
+        "skipped_records": skipped_count,
+        "errors": error_count,
+        "log": detail_log,
+    }
 
 
 @router.get(
