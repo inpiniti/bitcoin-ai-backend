@@ -243,6 +243,50 @@ async def backfill_timesfm(body: BackfillTimesFMRequest):
     return {"status": "ok", "message": f"TimesFM 신호 보정 완료", "updated": len(missing), "filled": filled}
 
 
+class IndexPredictRequest(BaseModel):
+    symbol: str      # e.g. "^GSPC", "QQQ", "^NDX"
+    trade_date: str  # YYYY-MM-DD — 이 날짜까지의 데이터만 사용
+    model_id: str    # ml_models 테이블의 XGBoost 모델 UUID (= ai_model_key)
+
+
+@router.post(
+    "/predict-index",
+    summary="지수 데이터 기반 XGBoost + TimesFM 예측",
+    description="""
+지수 심볼(^GSPC, QQQ 등)의 과거 OHLCV 데이터를 기반으로
+XGBoost 모델의 상승 확률과 TimesFM의 방향 신호를 반환합니다.
+""",
+)
+async def predict_index(body: IndexPredictRequest):
+    import asyncio
+    from services import timesfm_service, dl_model_service, data_collector
+    from services.yahoo_service import fetch_stock_history_for_trade
+
+    # 1. 지수 데이터 수집 (trade_date 이전까지만 사용)
+    candles = await fetch_stock_history_for_trade(body.symbol, range_str="2y")
+    candles = [c for c in candles if c.get("date", "") <= body.trade_date]
+    if not candles:
+        raise HTTPException(status_code=404, detail=f"지수 데이터 없음: {body.symbol}")
+
+    closes = [c["close"] for c in candles if c.get("close") is not None]
+
+    # 2. TimesFM 방향 예측 (비동기 스레드)
+    timesfm_signal = await asyncio.to_thread(timesfm_service.predict_direction, closes)
+
+    # 3. XGBoost 상승 확률 예측
+    buy_prob = None
+    try:
+        meta, booster = await dl_model_service.get_model(body.model_id)
+        stage = meta.get("stage", 6)
+        features, _, _, _ = data_collector.process_stock_data_for_prediction(candles, stage)
+        if features:
+            buy_prob, _ = dl_model_service.predict(booster, meta, features)
+    except Exception as exc:
+        logger.warning(f"[predict-index] XGBoost 예측 실패 ({body.symbol}): {exc}")
+
+    return {"buy_prob": buy_prob, "timesfm_signal": timesfm_signal}
+
+
 @router.get(
     "/dl-logs-by-date",
     summary="날짜별 자동매매 실행 로그 조회",
