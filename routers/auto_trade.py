@@ -277,7 +277,9 @@ async def predict_index(body: IndexPredictRequest):
     buy_prob = None
     try:
         meta, booster = await dl_model_service.get_model(body.model_id)
-        stage = meta.get("stage", 6)
+        # stage가 없으면 feature_count로 역산: feature_count = stage + 1
+        stage = meta.get("stage") or max(1, (meta.get("feature_count") or 7) - 1)
+        logger.info(f"[predict-index] model stage={stage}, feature_count={meta.get('feature_count')}")
         features, _, _, _ = data_collector.process_stock_data_for_prediction(candles, stage)
         if features:
             buy_prob, _ = dl_model_service.predict(booster, meta, features)
