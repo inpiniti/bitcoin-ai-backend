@@ -69,6 +69,11 @@ class StockTradingEnv(gym.Env):
 
         return self._get_obs(), {}
 
+    @staticmethod
+    def _scale(ret: float) -> float:
+        """손실 1.5배 패널티 / 이익 0.8배 보상 — 손실 회피 비대칭 보상"""
+        return ret * 1.5 if ret < 0 else ret * 0.8
+
     def step(self, action: int):
         reward = 0.0
         current_price = float(self.prices[self.current_step])
@@ -83,7 +88,8 @@ class StockTradingEnv(gym.Env):
 
         elif action == 2:  # SELL
             if self.holding:
-                reward = (current_price - self.buy_price) / self.buy_price
+                ret = (current_price - self.buy_price) / self.buy_price
+                reward = self._scale(ret)
                 self.holding = False
                 self.buy_price = 0.0
                 self.holding_days = 0
@@ -94,7 +100,8 @@ class StockTradingEnv(gym.Env):
             if self.holding and self.current_step > 0:
                 prev_price = float(self.prices[self.current_step - 1])
                 if prev_price > 0:
-                    reward = (current_price - prev_price) / prev_price
+                    ret = (current_price - prev_price) / prev_price
+                    reward = self._scale(ret)
 
         if self.holding:
             self.holding_days += 1
@@ -104,7 +111,8 @@ class StockTradingEnv(gym.Env):
 
         # 에피소드 종료 시 보유 포지션 강제 청산
         if terminated and self.holding:
-            reward += (current_price - self.buy_price) / self.buy_price
+            ret = (current_price - self.buy_price) / self.buy_price
+            reward += self._scale(ret)
             self.holding = False
 
         obs = (
