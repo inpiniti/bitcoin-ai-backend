@@ -406,6 +406,17 @@ async def get_top_tickers_log(
     return resp.json()
 
 
+async def update_top_tickers_timesfm(record_id: str, tickers: list[dict]) -> None:
+    """top_tickers_log의 tickers 필드 업데이트 (TimesFM 신호 보정용)"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/top_tickers_log?id=eq.{record_id}"
+    headers = {**_headers(), "Prefer": "return=representation"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.patch(url, json={"tickers": tickers}, headers=headers)
+    if resp.status_code >= 400:
+        logger.warning(f"top_tickers_log 업데이트 실패 ({resp.status_code}): {resp.text}")
+
+
 async def get_top_tickers_by_date(
     trade_date: str,
     setting_name: str | None = None,

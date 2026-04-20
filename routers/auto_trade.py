@@ -16,12 +16,14 @@ from fastapi import APIRouter, HTTPException, Header
 from typing import Optional
 
 from services import auto_trade_service
+from pydantic import BaseModel
 from services.supabase_service import (
     load_automation_settings_active,
     get_auto_trade_logs,
     get_top_tickers_log,
     get_top_tickers_by_date,
     get_dl_logs_by_date,
+    update_top_tickers_timesfm,
 )
 
 logger = logging.getLogger("auto_trade_router")
@@ -173,6 +175,72 @@ async def get_top_tickers(
     if trade_date:
         return await get_top_tickers_by_date(trade_date, setting_name)
     return await get_top_tickers_log(setting_name, limit)
+
+
+class BackfillTimesFMRequest(BaseModel):
+    record_id: str
+    trade_date: str
+
+
+@router.post(
+    "/backfill-timesfm",
+    summary="누락된 TimesFM 신호 소급 계산",
+    description="""
+특정 날짜의 top_tickers_log 레코드에서 `timesfm_signal`이 null인 종목들을 대상으로
+당시 데이터를 기준으로 TimesFM을 재실행하여 DB를 업데이트합니다.
+
+### 요청 바디
+- `record_id`: top_tickers_log 레코드의 UUID
+- `trade_date`: 해당 거래일 (YYYY-MM-DD) — Yahoo Finance 데이터를 이 날짜까지 잘라 사용
+""",
+)
+async def backfill_timesfm(body: BackfillTimesFMRequest):
+    import asyncio
+    from services import timesfm_service
+    from services.yahoo_service import fetch_stock_history_for_trade
+
+    # 1. 기존 레코드 조회
+    records = await get_top_tickers_by_date(body.trade_date)
+    target = next((r for r in records if str(r.get("id")) == body.record_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="해당 레코드를 찾을 수 없습니다.")
+
+    raw_tickers = target.get("tickers") or []
+    tickers = raw_tickers if isinstance(raw_tickers, list) else []
+
+    # 이미 모두 채워진 경우
+    missing = [t for t in tickers if t.get("timesfm_signal") is None]
+    if not missing:
+        return {"status": "ok", "message": "누락된 TimesFM 신호가 없습니다.", "updated": 0}
+
+    # 2. 누락 종목만 Yahoo Finance 조회 + TimesFM 예측
+    async def _predict(ticker_info: dict) -> dict:
+        ticker = ticker_info["ticker"]
+        try:
+            candles = await fetch_stock_history_for_trade(ticker, range_str="2y")
+            # trade_date 이전 데이터만 사용 (소급 계산 정확성)
+            candles = [c for c in candles if c.get("date", "") <= body.trade_date]
+            closes = [c["close"] for c in candles if c.get("close") is not None]
+            signal = await asyncio.to_thread(timesfm_service.predict_direction, closes)
+        except Exception as exc:
+            logger.warning(f"[backfill-timesfm] {ticker} 예측 실패: {exc}")
+            signal = None
+        return {**ticker_info, "timesfm_signal": signal}
+
+    updated_missing = await asyncio.gather(*[_predict(t) for t in missing])
+    signal_map = {t["ticker"]: t["timesfm_signal"] for t in updated_missing}
+
+    # 3. 전체 tickers 리스트에 신호 반영
+    new_tickers = [
+        {**t, "timesfm_signal": signal_map.get(t["ticker"], t.get("timesfm_signal"))}
+        if t.get("timesfm_signal") is None else t
+        for t in tickers
+    ]
+
+    # 4. DB 업데이트
+    await update_top_tickers_timesfm(body.record_id, new_tickers)
+    filled = sum(1 for t in new_tickers if t.get("timesfm_signal") is not None)
+    return {"status": "ok", "message": f"TimesFM 신호 보정 완료", "updated": len(missing), "filled": filled}
 
 
 @router.get(
