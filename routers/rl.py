@@ -160,7 +160,17 @@ async def websocket_rl_train(websocket: WebSocket):
 
         # ── 2단계: PPO 학습 (blocking → executor) ───────────
         # 브라우저가 닫혀도 서버에서 계속 실행됩니다.
-        result = await rl_service.train_rl(episodes, model_name, total_timesteps)
+        # 10,000 스텝마다 진행률을 클라이언트에 전송합니다.
+        async def on_train_progress(pct: int):
+            _set_job(train_progress=pct)
+            await _send({"type": "training", "progress": pct,
+                         "message": f"PPO 학습 중... {pct}%"})
+
+        result = await rl_service.train_rl(
+            episodes, model_name, total_timesteps,
+            stage=stage,
+            train_progress_callback=on_train_progress,
+        )
 
         _set_job(status="complete", train_progress=100, result=result)
         await _send({"type": "training", "progress": 100})

@@ -113,12 +113,36 @@ async def collect_rl_episodes(
 # PPO 학습 (동기 → executor에서 호출)
 # ─────────────────────────────────────────────────────────
 
-def _train_ppo_sync(episodes: list[dict], total_timesteps: int) -> object:
+def _train_ppo_sync(
+    episodes: list[dict],
+    total_timesteps: int,
+    on_progress=None,   # callable(pct: int) — 스레드에서 호출 (동기)
+) -> object:
     """stable-baselines3 PPO 학습 (blocking). asyncio executor에서 실행됩니다."""
+    from stable_baselines3.common.callbacks import BaseCallback
     from services.rl_environment import StockTradingEnv
 
     PPO = _get_ppo()
     env = StockTradingEnv(episodes)
+
+    class _ProgressCb(BaseCallback):
+        """10,000 스텝마다 진행률을 on_progress 콜백으로 전달합니다."""
+        def __init__(self, total, cb):
+            super().__init__()
+            self._total = total
+            self._cb = cb
+            self._last_pct = -1
+
+        def _on_step(self) -> bool:
+            if self._cb and self.num_timesteps % 10_000 == 0:
+                pct = min(99, int(self.num_timesteps / self._total * 100))
+                if pct != self._last_pct:
+                    self._last_pct = pct
+                    try:
+                        self._cb(pct)
+                    except Exception:
+                        pass
+            return True
 
     model = PPO(
         "MlpPolicy",
@@ -132,8 +156,9 @@ def _train_ppo_sync(episodes: list[dict], total_timesteps: int) -> object:
         verbose=0,
     )
 
+    cb = _ProgressCb(total_timesteps, on_progress) if on_progress else None
     logger.info(f"[RL:Train] PPO 학습 시작: timesteps={total_timesteps}, episodes={len(episodes)}")
-    model.learn(total_timesteps=total_timesteps)
+    model.learn(total_timesteps=total_timesteps, callback=cb)
     logger.info("[RL:Train] PPO 학습 완료")
     return model
 
@@ -184,13 +209,21 @@ async def train_rl(
     episodes: list[dict],
     model_name: str,
     total_timesteps: int = 300_000,
+    stage: int = 6,
+    train_progress_callback=None,   # async callable(pct: int)
 ) -> dict:
     """PPO 학습 후 Supabase ml_models 테이블에 저장합니다."""
     from services import supabase_service
 
     loop = asyncio.get_event_loop()
+
+    # 동기 콜백 → asyncio 이벤트 루프로 브리지
+    def _sync_progress(pct: int):
+        if train_progress_callback:
+            asyncio.run_coroutine_threadsafe(train_progress_callback(pct), loop)
+
     model = await loop.run_in_executor(
-        None, _train_ppo_sync, episodes, total_timesteps
+        None, _train_ppo_sync, episodes, total_timesteps, _sync_progress
     )
 
     model_b64 = await loop.run_in_executor(None, _serialize_model, model)
@@ -207,10 +240,11 @@ async def train_rl(
         "auc":           0.0,
         "feature_count": n_features,
         "sample_count":  total_steps,
-        "stage":         0,
+        "stage":         stage,   # 학습에 사용된 피처 stage (예측 시 동일 stage 필요)
         "model_json": {
             "type":             "rl",
             "algorithm":        "PPO",
+            "stage":            stage,
             "n_episodes":       len(episodes),
             "total_timesteps":  total_timesteps,
             "model_b64":        model_b64,
@@ -234,7 +268,7 @@ async def predict_rl(
     model_id: str,
     ticker: str,
     days: int = 500,
-    stage: int = 6,
+    stage: int | None = None,   # None이면 model_json에서 자동 로드
 ) -> dict:
     """RL 모델로 종목의 날짜별 BUY/HOLD/SELL 시퀀스를 반환합니다."""
     from services import supabase_service, data_collector
@@ -245,6 +279,9 @@ async def predict_rl(
 
     if not isinstance(model_json, dict) or model_json.get("type") != "rl":
         raise ValueError(f"모델 {model_id}는 RL 모델이 아닙니다 (type={model_json.get('type')})")
+
+    # stage: model_json 우선 (학습 시 저장된 값), 없으면 파라미터, 최후 기본값 6
+    stage = model_json.get("stage") or stage or model_record.get("stage") or 6
 
     loop = asyncio.get_event_loop()
     model = await loop.run_in_executor(
