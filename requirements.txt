@@ -26,6 +26,8 @@ pandas
 utilsforecast
 scikit-learn
 xgboost
+stable-baselines3[extra]
+gymnasium
 
 # ── Misc ─────────────────────────────────────────
 beautifulsoup4
