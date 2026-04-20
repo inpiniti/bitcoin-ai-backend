@@ -173,7 +173,10 @@ async def websocket_rl_train(websocket: WebSocket):
         )
 
         _set_job(status="complete", train_progress=100, result=result)
-        await _send({"type": "training", "progress": 100})
+        await _send({"type": "training", "progress": 100,
+                     "message": f"백테스트 완료 — 승률 {result.get('winRate', 0):.1f}%, "
+                                f"평균수익 {result.get('avgTradeReturn', 0):.2f}%, "
+                                f"샤프 {result.get('sharpeRatio', 0):.2f}"})
         await _send({"type": "complete", "result": result})
 
         logger.info(f"[WS:RLTrain] 학습 완료: {result}")

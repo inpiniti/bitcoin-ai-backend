@@ -202,6 +202,88 @@ def _deserialize_model(model_b64: str):
 
 
 # ─────────────────────────────────────────────────────────
+# 백테스트 (동기 — executor에서 실행)
+# ─────────────────────────────────────────────────────────
+
+def _backtest_sync(model, episodes: list[dict], max_episodes: int = 100) -> dict:
+    """
+    학습된 모델로 에피소드를 시뮬레이션해 성능 지표를 계산합니다.
+
+    Returns:
+        win_rate       : 수익 거래 비율 (0~100%)  → accuracy 컬럼에 저장
+        avg_trade_ret  : 거래당 평균 수익률 %     → f1 컬럼에 저장
+        sharpe_ratio   : 샤프 비율               → auc 컬럼에 저장
+        total_trades   : 총 거래 횟수
+        total_return   : 전체 누적 수익률 %
+    """
+    sample = episodes[:max_episodes]
+    trade_returns: list[float] = []
+    episode_returns: list[float] = []
+
+    for ep in sample:
+        holding      = False
+        buy_price    = 0.0
+        holding_days = 0
+
+        for i in range(len(ep["features"])):
+            feat = ep["features"][i]
+            holding_flag   = 1.0 if holding else 0.0
+            holding_return = (float(ep["prices"][i]) - buy_price) / buy_price if holding and buy_price > 0 else 0.0
+            obs = np.append(feat, [holding_flag, holding_return, float(holding_days)]).astype(np.float32)
+
+            action, _ = model.predict(obs, deterministic=True)
+            action = int(action)
+
+            if action == 1 and not holding:
+                holding      = True
+                buy_price    = float(ep["prices"][i])
+                holding_days = 0
+            elif action == 2 and holding:
+                ret = (float(ep["prices"][i]) - buy_price) / buy_price
+                trade_returns.append(ret)
+                holding      = False
+                buy_price    = 0.0
+                holding_days = 0
+
+            if holding:
+                holding_days += 1
+
+        # 미청산 포지션 강제 청산
+        if holding and buy_price > 0:
+            ret = (float(ep["prices"][-1]) - buy_price) / buy_price
+            trade_returns.append(ret)
+
+        if len(ep["prices"]) > 1:
+            ep_ret = (float(ep["prices"][-1]) - float(ep["prices"][0])) / float(ep["prices"][0])
+            episode_returns.append(ep_ret)
+
+    n = len(trade_returns)
+    if n == 0:
+        return {"win_rate": 0.0, "avg_trade_ret": 0.0, "sharpe_ratio": 0.0,
+                "total_trades": 0, "total_return": 0.0}
+
+    wins         = sum(1 for r in trade_returns if r > 0)
+    win_rate     = round(wins / n * 100, 2)
+    avg_ret      = float(np.mean(trade_returns)) * 100
+    total_return = float(np.sum(episode_returns)) / len(episode_returns) * 100 if episode_returns else 0.0
+
+    # 샤프 비율 (무위험 수익률 0 가정)
+    ret_std = float(np.std(trade_returns))
+    sharpe  = round(float(np.mean(trade_returns)) / ret_std, 3) if ret_std > 0 else 0.0
+
+    logger.info(
+        f"[RL:Backtest] 거래={n}, 승률={win_rate}%, 평균수익={avg_ret:.2f}%, 샤프={sharpe}"
+    )
+    return {
+        "win_rate":      win_rate,
+        "avg_trade_ret": round(avg_ret, 2),
+        "sharpe_ratio":  sharpe,
+        "total_trades":  n,
+        "total_return":  round(total_return, 2),
+    }
+
+
+# ─────────────────────────────────────────────────────────
 # 공개 API
 # ─────────────────────────────────────────────────────────
 
@@ -226,18 +308,24 @@ async def train_rl(
         None, _train_ppo_sync, episodes, total_timesteps, _sync_progress
     )
 
-    model_b64 = await loop.run_in_executor(None, _serialize_model, model)
+    # 직렬화 + 백테스트 병렬 실행
+    model_b64, bt = await asyncio.gather(
+        loop.run_in_executor(None, _serialize_model, model),
+        loop.run_in_executor(None, _backtest_sync, model, episodes),
+    )
 
     n_features = int(episodes[0]["features"].shape[1]) + 3  # +3 포트폴리오 상태
     total_steps = sum(len(ep["features"]) for ep in episodes)
 
     model_data = {
         "name":          model_name,
-        "accuracy":      0.0,
-        "f1":            0.0,
+        # XGBoost accuracy 자리에 승률, auc 자리에 샤프비율 저장
+        # → 기존 모델 목록 UI에서 그대로 성능 지표로 활용 가능
+        "accuracy":      bt["win_rate"] / 100,     # 0~1 범위로 저장 (UI가 % 표시)
+        "f1":            max(0.0, bt["avg_trade_ret"] / 100),
         "precision":     0.0,
         "recall":        0.0,
-        "auc":           0.0,
+        "auc":           max(0.0, bt["sharpe_ratio"]),
         "feature_count": n_features,
         "sample_count":  total_steps,
         "stage":         stage,   # 학습에 사용된 피처 stage (예측 시 동일 stage 필요)
@@ -247,6 +335,12 @@ async def train_rl(
             "stage":            stage,
             "n_episodes":       len(episodes),
             "total_timesteps":  total_timesteps,
+            # 백테스트 지표 (model_json에도 원본 수치 보존)
+            "win_rate":         bt["win_rate"],
+            "avg_trade_ret":    bt["avg_trade_ret"],
+            "sharpe_ratio":     bt["sharpe_ratio"],
+            "total_trades":     bt["total_trades"],
+            "total_return":     bt["total_return"],
             "model_b64":        model_b64,
         },
     }
@@ -261,6 +355,12 @@ async def train_rl(
         "totalTimesteps": total_timesteps,
         "featureCount":   n_features,
         "sampleCount":    total_steps,
+        # 백테스트 성능 지표
+        "winRate":        bt["win_rate"],
+        "avgTradeReturn": bt["avg_trade_ret"],
+        "sharpeRatio":    bt["sharpe_ratio"],
+        "totalTrades":    bt["total_trades"],
+        "totalReturn":    bt["total_return"],
     }
 
 
@@ -323,6 +423,20 @@ async def predict_rl(
         action, _ = model.predict(obs, deterministic=True)
         action = int(action)
 
+        # 알파고처럼 각 액션 확률 추출 (Policy Network softmax 출력)
+        try:
+            import torch
+            obs_t = obs.reshape(1, -1)
+            obs_tensor, _ = model.policy.obs_to_tensor(obs_t)
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs_tensor)
+                probs = dist.distribution.probs.squeeze().cpu().numpy()
+            prob_hold = round(float(probs[0]) * 100, 1)
+            prob_buy  = round(float(probs[1]) * 100, 1)
+            prob_sell = round(float(probs[2]) * 100, 1)
+        except Exception:
+            prob_hold = prob_buy = prob_sell = None
+
         if action == 1 and not holding:
             holding = True
             buy_price = float(prices_arr[i])
@@ -342,6 +456,10 @@ async def predict_rl(
             "price":          float(prices_arr[i]),
             "holding":        holding,
             "holding_return": round(holding_return * 100, 2),
+            # 알파고처럼 각 액션의 확률 (Policy Network 출력)
+            "prob_hold":      prob_hold,
+            "prob_buy":       prob_buy,
+            "prob_sell":      prob_sell,
         }
         if i < len(raw_features):
             entry.update(raw_features[i])
