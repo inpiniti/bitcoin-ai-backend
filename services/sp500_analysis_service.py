@@ -179,31 +179,41 @@ async def analyze_sector_with_retry(
     key_manager: GeminiKeyManager,
 ) -> Optional[SectorAnalysisResult]:
     """재시도 + 키 로테이션 포함 섹터 분석"""
-    for attempt in range(RETRY_LIMIT):
+    max_attempts = 30  # 충분한 재시도 횟수 부여
+    for attempt in range(max_attempts):
         try:
             api_key = key_manager.next_key()
         except NoAvailableKeyError:
-            logger.warning(f"[Analysis] 모든 키 소진, 섹터 스킵: {sector}")
-            return None
+            # 모든 키가 쿨다운 중일 경우 잠시 대기 후 재시도
+            logger.warning(f"[Analysis] 모든 키 소진. 10초 대기 후 재시도... ({sector})")
+            await asyncio.sleep(10)
+            continue
 
         try:
             result = await _call_gemini_sector(context, sector, stocks, api_key)
             if result is not None:
                 logger.info(f"[Analysis] {sector}: {len(result.stocks)}종목 분석 완료")
                 return result
-            if attempt < RETRY_LIMIT - 1:
+            # 결과가 None 인데 429 등의 예외는 아닌 경우 (파싱 실패 등)
+            if attempt < max_attempts - 1:
                 await asyncio.sleep(RETRY_DELAY)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 key_manager.mark_rate_limited(api_key, cooldown_seconds=60)
                 logger.warning(f"[Analysis] 429 ({sector}): {api_key[:8]}... 재시도")
+                # 429가 발생하면 다음 키로 바로 시도 (또는 모든 키가 rate limited면 위에서 대기)
                 continue
             logger.error(f"[Analysis] HTTP 오류 ({sector}): {e}")
-            return None
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(RETRY_DELAY)
+                continue
         except Exception as e:
             logger.exception(f"[Analysis] 예외 ({sector}): {e}")
-            return None
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(RETRY_DELAY)
+                continue
 
+    logger.error(f"[Analysis] {sector} 최대 재시도({max_attempts}) 넘음. 스킵.")
     return None
 
 
