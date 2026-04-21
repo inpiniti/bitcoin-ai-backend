@@ -128,6 +128,24 @@ curl -X POST https://your-space.hf.space/v1/whale \
 }
 ```
 
+### S&P 500 종목 뉴스 영향도 분석 API
+최근 24시간의 Yahoo/Google 금융 뉴스를 크롤링하고, Gemini Flash를 이용해 GICS 11개 섹터별로 S&P 500 등록 종목들의 시장 영향도(Bullish/Bearish/Neutral)를 분석합니다.
+
+#### 실행 (수동)
+```bash
+curl -X POST "https://your-space.hf.space/sp500/run?hours=24" \
+  -H "accept: application/json"
+```
+
+#### 분석 결과 조회
+```bash
+curl -X GET "https://your-space.hf.space/sp500/impact?date=2026-04-21&sector=Technology&direction=bullish&limit=50" \
+  -H "accept: application/json"
+```
+
+#### 스케줄링
+매일 06:00 KST (미국 정규장 마감 후) 백그라운드 스케줄러를 통해 자동 실행되며 결과는 Supabase `sp500_daily_impact` 테이블에 저장됩니다.
+
 ### 데이터 정리 정책
 - **TTL**: 결과는 10분 후 자동 만료
 - **조회 후 삭제**: 완료된 결과는 조회 시 자동 삭제

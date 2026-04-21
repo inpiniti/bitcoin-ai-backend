@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl, gemini, news, youtube, rl
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl, gemini, news, youtube, rl, sp500
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +80,19 @@ async def _scheduled_news_crawl():
 
     except Exception as e:
         logger.exception(f"[NewsCrawl] 실패: {e}")
+
+
+async def _scheduled_sp500_analysis():
+    """매일 06:00 KST 실행 - S&P 500 뉴스 영향도 분석"""
+    from services.sp500_analysis_service import run_sp500_analysis
+    from services.gemini_key_manager import get_key_manager
+    try:
+        logger.info("[SP500] 스케줄 분석 시작")
+        key_mgr = get_key_manager()
+        result = await run_sp500_analysis(key_mgr, hours=24)
+        logger.info(f"[SP500] 스케줄 분석 완료: {result}")
+    except Exception as e:
+        logger.exception(f"[SP500] 스케줄 분석 실패: {e}")
 
 
 async def _scheduled_job_crawl():
@@ -194,6 +207,15 @@ async def lifespan(app: FastAPI):
     logger.info("[Scheduler] 채용공고 크롤러 등록: 매일 09:00 KST")
 
     # ── 뉴스 크롤러 스케줄 등록 (#63: 매시 정각) ──
+    # ── S&P 500 영향도 분석 스케줄 등록 (매일 06:00 KST, 미장 마감 후) ──
+    scheduler.add_job(
+        _scheduled_sp500_analysis,
+        CronTrigger(hour=6, minute=0, timezone="Asia/Seoul"),
+        id="sp500_analysis",
+        replace_existing=True,
+    )
+    logger.info("[Scheduler] S&P 500 영향도 분석 등록: 매일 06:00 KST")
+
     scheduler.add_job(
         _scheduled_news_crawl,
         CronTrigger(minute=0, timezone="Asia/Seoul"),
@@ -258,6 +280,7 @@ app.include_router(gemini.router)
 app.include_router(news.router)
 app.include_router(youtube.router)
 app.include_router(rl.router)
+app.include_router(sp500.router)
 
 
 @app.get(

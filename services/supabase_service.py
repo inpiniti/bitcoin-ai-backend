@@ -450,3 +450,100 @@ async def get_dl_logs_by_date(
     if resp.status_code >= 400:
         raise Exception(f"auto_trade_dl_logs 날짜 조회 실패 ({resp.status_code}): {resp.text}")
     return resp.json()
+
+
+# ─────────────────────────────────────────────
+# S&P 500 일별 영향도 분석 (sp500_daily_impact / sp500_daily_analysis_meta)
+# ─────────────────────────────────────────────
+
+async def upsert_sp500_daily_impact(rows: list[dict]) -> int:
+    """
+    sp500_daily_impact 테이블에 종목 영향도 upsert.
+    (analysis_date, ticker) unique 제약으로 중복 시 업데이트.
+
+    Returns:
+        처리된 건수
+    """
+    if not rows:
+        return 0
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_impact"
+    headers = {
+        **_headers(),
+        "Prefer": "resolution=merge-duplicates,return=representation",
+    }
+    # Supabase REST는 대량 insert 시 배치 처리
+    BATCH_SIZE = 100
+    total = 0
+    async with httpx.AsyncClient(timeout=30) as client:
+        for i in range(0, len(rows), BATCH_SIZE):
+            batch = rows[i:i + BATCH_SIZE]
+            resp = await client.post(url, json=batch, headers=headers)
+            if resp.status_code >= 400:
+                logger.warning(
+                    f"sp500_daily_impact upsert 실패 "
+                    f"(batch {i//BATCH_SIZE+1}, {resp.status_code}): {resp.text[:200]}"
+                )
+            else:
+                result = resp.json()
+                total += len(result) if isinstance(result, list) else 0
+    return total
+
+
+async def upsert_sp500_analysis_meta(data: dict) -> None:
+    """
+    sp500_daily_analysis_meta 테이블에 분석 메타 upsert.
+    analysis_date unique 제약으로 중복 시 업데이트.
+    """
+    _check_config()
+    import json as _json
+    # news_sources가 list인 경우 JSON 직렬화
+    if "news_sources" in data and isinstance(data["news_sources"], list):
+        data["news_sources"] = _json.dumps(data["news_sources"])
+    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_analysis_meta"
+    headers = {**_headers(), "Prefer": "resolution=merge-duplicates"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=data, headers=headers)
+    if resp.status_code >= 400:
+        logger.warning(f"sp500_daily_analysis_meta upsert 실패 ({resp.status_code}): {resp.text[:200]}")
+
+
+async def get_sp500_daily_impact(
+    analysis_date: str,
+    sector: str | None = None,
+    direction: str | None = None,
+    limit: int = 600,
+) -> list[dict]:
+    """
+    특정 날짜의 S&P 500 영향도 조회.
+
+    Args:
+        analysis_date: 조회 날짜 (YYYY-MM-DD)
+        sector: 섹터 필터 (optional)
+        direction: 방향 필터 - bullish/bearish/neutral (optional)
+        limit: 최대 건수
+    """
+    _check_config()
+    filters = f"analysis_date=eq.{analysis_date}&order=confidence.desc&limit={limit}"
+    if sector:
+        filters += f"&sector=eq.{sector}"
+    if direction:
+        filters += f"&direction=eq.{direction}"
+    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_impact?select=*&{filters}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"sp500_daily_impact 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+async def get_sp500_analysis_meta(analysis_date: str) -> dict | None:
+    """특정 날짜의 분석 메타 조회"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_analysis_meta?analysis_date=eq.{analysis_date}&select=*"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"sp500_analysis_meta 조회 실패 ({resp.status_code}): {resp.text}")
+    rows = resp.json()
+    return rows[0] if rows else None
