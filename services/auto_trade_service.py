@@ -493,23 +493,47 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
             "buy_threshold": buy_threshold,
         }
 
-        # ── 11. TOP20 종목 DB 저장 (+ TimesFM 방향 신호) ─────────────
+        # ── 11. TOP20 종목 DB 저장 (+ TimesFM + RL 방향 신호) ────────
         try:
             from services.supabase_service import save_top_tickers_log
-            from services import timesfm_service
+            from services import timesfm_service, rl_service as _rl_service
 
             top20_raw = sorted(all_buy_candidates, key=lambda x: x.get("buy_prob", 0), reverse=True)[:20]
 
-            # TimesFM: 각 종목의 종가 데이터로 다음날 방향 예측 (비동기 병렬 처리)
-            async def _timesfm_signal(stock: dict) -> str | None:
-                candles = data_cache.get(stock["ticker"])
-                if not candles:
-                    return None
-                closes = [c["close"] for c in candles if c.get("close") is not None]
-                return await asyncio.to_thread(timesfm_service.predict_direction, closes)
+            # RL 모델 로드 (설정된 경우)
+            rl_model_id = cfg.get("rl_model_key", "") or ""
+            rl_ppo_model = None
+            rl_stage = 6
+            if rl_model_id:
+                try:
+                    rl_model_record, rl_ppo_model = await _rl_service.load_rl_model(rl_model_id)
+                    rl_stage = rl_model_record.get("model_json", {}).get("stage") or rl_model_record.get("stage") or 6
+                    log(f"[RL] 모델 로드 완료: stage={rl_stage}")
+                except Exception as e:
+                    logger.warning(f"[RL] 모델 로드 실패 (계속 진행): {e}")
 
-            timesfm_results = await asyncio.gather(
-                *[_timesfm_signal(s) for s in top20_raw],
+            # TimesFM + RL 예측 병렬 처리
+            async def _ticker_signals(stock: dict) -> tuple:
+                candles = data_cache.get(stock["ticker"])
+
+                tf_signal = None
+                if candles:
+                    closes = [c["close"] for c in candles if c.get("close") is not None]
+                    tf_signal = await asyncio.to_thread(timesfm_service.predict_direction, closes)
+
+                rl_sig = None
+                if rl_ppo_model and candles:
+                    try:
+                        rl_sig = await asyncio.to_thread(
+                            _rl_service.get_latest_signal_sync, rl_ppo_model, candles, rl_stage
+                        )
+                    except Exception as e:
+                        logger.warning(f"[RL] {stock['ticker']} 예측 실패: {e}")
+
+                return tf_signal, rl_sig
+
+            signal_results = await asyncio.gather(
+                *[_ticker_signals(s) for s in top20_raw],
                 return_exceptions=True,
             )
 
@@ -519,9 +543,10 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                     "ticker": t["ticker"],
                     "name": t.get("name", ""),
                     "buy_prob": t["buy_prob"],
-                    "timesfm_signal": sig if not isinstance(sig, Exception) else None,
+                    "timesfm_signal": res[0] if not isinstance(res, Exception) else None,
+                    "rl_signal": res[1] if not isinstance(res, Exception) else None,
                 }
-                for i, (t, sig) in enumerate(zip(top20_raw, timesfm_results))
+                for i, (t, res) in enumerate(zip(top20_raw, signal_results))
             ]
             await save_top_tickers_log({
                 "trade_date": today_str,
@@ -531,8 +556,10 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
                 "tickers": top20_data,
                 "buy_threshold": buy_threshold,
                 "total_scanned": len(all_buy_candidates),
+                "rl_model_key": rl_model_id or None,
             })
-            log(f"[TopTickers] TOP{len(top20_data)} 저장 완료 (TimesFM 신호 포함)")
+            rl_note = " + RL 신호" if rl_ppo_model else ""
+            log(f"[TopTickers] TOP{len(top20_data)} 저장 완료 (TimesFM{rl_note} 포함)")
         except Exception as e:
             logger.warning(f"[TopTickers] 저장 실패 (매매 결과에는 영향 없음): {e}")
 

@@ -287,6 +287,81 @@ def _backtest_sync(model, episodes: list[dict], max_episodes: int = 100) -> dict
 # 공개 API
 # ─────────────────────────────────────────────────────────
 
+async def load_rl_model(model_id: str) -> tuple[dict, object]:
+    """RL 모델 로드 및 역직렬화. (model_record, ppo_model) 반환."""
+    from services import supabase_service
+
+    model_record = await supabase_service.load_model(model_id)
+    model_json = model_record.get("model_json") or {}
+
+    if not isinstance(model_json, dict) or model_json.get("type") != "rl":
+        raise ValueError(f"모델 {model_id}는 RL 모델이 아닙니다 (type={model_json.get('type')})")
+
+    loop = asyncio.get_event_loop()
+    ppo_model = await loop.run_in_executor(None, _deserialize_model, model_json["model_b64"])
+    return model_record, ppo_model
+
+
+def get_latest_signal_sync(ppo_model, candles: list[dict], stage: int) -> str:
+    """
+    캔들 데이터로 RL 최신 시그널 반환 (BUY/SELL/HOLD).
+    순차 시뮬레이션으로 실제 포지션 상태를 반영합니다.
+    """
+    from services.data_collector import process_stock_data_for_prediction, get_stage_lookbacks
+
+    features, _, _, _ = process_stock_data_for_prediction(candles, stage)
+    if not features:
+        return "HOLD"
+
+    lookbacks = get_stage_lookbacks(stage)
+    max_lookback = max(lookbacks)
+
+    if len(candles) < max_lookback + len(features):
+        return "HOLD"
+
+    prices = [
+        candles[max_lookback + j]["close"]
+        for j in range(len(features))
+        if candles[max_lookback + j].get("close")
+    ]
+
+    if len(prices) != len(features):
+        return "HOLD"
+
+    features_arr = np.array(features, dtype=np.float32)
+    prices_arr = np.array(prices, dtype=np.float32)
+
+    SIGNAL = {0: "HOLD", 1: "BUY", 2: "SELL"}
+    holding = False
+    buy_price = 0.0
+    holding_days = 0
+    latest_signal = "HOLD"
+
+    for i in range(len(features_arr)):
+        feat = features_arr[i]
+        holding_flag = 1.0 if holding else 0.0
+        holding_return = (float(prices_arr[i]) - buy_price) / buy_price if holding and buy_price > 0 else 0.0
+        obs = np.append(feat, [holding_flag, holding_return, float(holding_days)]).astype(np.float32)
+
+        action, _ = ppo_model.predict(obs, deterministic=True)
+        action = int(action)
+        latest_signal = SIGNAL[action]
+
+        if action == 1 and not holding:
+            holding = True
+            buy_price = float(prices_arr[i])
+            holding_days = 0
+        elif action == 2 and holding:
+            holding = False
+            buy_price = 0.0
+            holding_days = 0
+
+        if holding:
+            holding_days += 1
+
+    return latest_signal
+
+
 async def train_rl(
     episodes: list[dict],
     model_name: str,
