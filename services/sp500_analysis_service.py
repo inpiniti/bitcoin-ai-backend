@@ -32,7 +32,7 @@ GEMINI_API_URL = (
 
 RETRY_LIMIT = 3
 RETRY_DELAY = 3.0
-CONCURRENCY = 3  # 동시 Gemini 호출 수
+CONCURRENCY = 1  # 동시 Gemini 호출 수 (429 에러 방지를 위해 1로 낮춤)
 
 
 # ── 데이터클래스 ──────────────────────────────────────────────────────────────
