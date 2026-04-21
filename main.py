@@ -165,9 +165,17 @@ async def lifespan(app: FastAPI):
     try:
         from services.forecast_service import get_model
         get_model()
-        logger.info("TimesFM 모델 로드 완료")
+        logger.info("TimesFM forecast 모델 로드 완료")
     except Exception as e:
-        logger.warning(f"TimesFM 사전 로드 실패 (첫 요청 시 로드): {e}")
+        logger.warning(f"TimesFM forecast 사전 로드 실패 (첫 요청 시 로드): {e}")
+
+    # ── 자동매매용 TimesFM 모델 사전 로드 ─────────────
+    try:
+        from services.timesfm_service import _load_model as _load_timesfm
+        _load_timesfm()
+        logger.info("TimesFM 자동매매 모델 사전 로드 완료")
+    except Exception as e:
+        logger.warning(f"TimesFM 자동매매 사전 로드 실패 (자동매매 실행 시 로드): {e}")
 
     # ── 자동매매 스케줄러 시작 ──────────────────────
     # Supabase 설정에서 실행 시간 읽기 → 동적 스케줄 등록
