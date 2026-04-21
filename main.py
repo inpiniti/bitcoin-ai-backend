@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, job_crawl, gemini, news, youtube, rl, sp500
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,35 +51,7 @@ async def _scheduled_auto_trade():
         logger.exception(f"[Scheduler] 자동매매 실패: {e}")
 
 
-async def _scheduled_news_crawl():
-    """#63 1시간마다 실행되는 뉴스 크롤링 + AI 분석 진입점"""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    from services.news_crawler_service import crawl_all_news
-    from services.supabase_service import upsert_news, get_news_count_by_date
-    from services.news_analysis_service import analyze_unanalyzed_news
-    from services.gemini_key_manager import get_key_manager
 
-    today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
-    try:
-        logger.info(f"[NewsCrawl] 크롤링 시작 (date={today})")
-        existing = await get_news_count_by_date(today)
-        logger.info(f"[NewsCrawl] 당일 기존 뉴스 {existing}건")
-
-        items = await crawl_all_news()
-        if not items:
-            logger.info("[NewsCrawl] 수집된 뉴스 없음")
-            return
-
-        inserted = await upsert_news([i.to_dict() for i in items])
-        logger.info(f"[NewsCrawl] {len(items)}건 수집 → 신규 {inserted}건 저장")
-
-        key_mgr = get_key_manager()
-        analyzed = await analyze_unanalyzed_news(key_mgr)
-        logger.info(f"[NewsCrawl] AI 분석 완료: {analyzed}건")
-
-    except Exception as e:
-        logger.exception(f"[NewsCrawl] 실패: {e}")
 
 
 async def _scheduled_sp500_analysis():
@@ -95,48 +67,7 @@ async def _scheduled_sp500_analysis():
         logger.exception(f"[SP500] 스케줄 분석 실패: {e}")
 
 
-async def _scheduled_job_crawl():
-    """#46 스케줄러가 호출하는 채용공고 크롤링 진입점 (매일 09:00 KST)"""
-    from services.job_crawler_service import crawl_all_jobs
-    from services.supabase_service import upsert_job_listings, get_unnotified_jobs, mark_jobs_notified
-    from services.kakao_service import send_trade_report, build_job_report, load_kakao_config
-    try:
-        logger.info("[JobCrawl] 채용공고 크롤링 시작")
-        jobs = await crawl_all_jobs()
 
-        if not jobs:
-            logger.info("[JobCrawl] 수집된 공고 없음")
-            return
-
-        # Supabase 저장 (중복 무시)
-        inserted = await upsert_job_listings([j.to_dict() for j in jobs])
-        logger.info(f"[JobCrawl] {len(jobs)}건 수집 → 신규 {inserted}건 저장")
-
-        # 미발송 공고 조회 → 카카오 발송
-        unnotified = await get_unnotified_jobs()
-        if not unnotified:
-            logger.info("[JobCrawl] 발송할 신규 공고 없음")
-            return
-
-        cfg = await load_kakao_config()
-        if not cfg:
-            logger.warning("[JobCrawl] 카카오 설정 없음, 발송 스킵")
-            return
-
-        report, web_url = build_job_report(unnotified)
-        if not report:
-            return
-
-        sent = await send_trade_report(cfg, report, web_url=web_url)
-        if sent:
-            job_ids = [j["id"] for j in unnotified]
-            await mark_jobs_notified(job_ids)
-            logger.info(f"[JobCrawl] {len(unnotified)}건 카카오 발송 완료")
-        else:
-            logger.warning("[JobCrawl] 카카오 발송 실패")
-
-    except Exception as e:
-        logger.exception(f"[JobCrawl] 크롤링 실패: {e}")
 
 
 async def reschedule_from_settings() -> dict:
@@ -197,14 +128,7 @@ async def lifespan(app: FastAPI):
     result = await reschedule_from_settings()
     logger.info(f"[Scheduler] 자동매매 스케줄러 시작: {result['schedule']}")
 
-    # ── 채용공고 크롤러 스케줄 등록 (매일 09:00 KST) ──
-    scheduler.add_job(
-        _scheduled_job_crawl,
-        CronTrigger(hour=9, minute=0, timezone="Asia/Seoul"),
-        id="job_crawl",
-        replace_existing=True,
-    )
-    logger.info("[Scheduler] 채용공고 크롤러 등록: 매일 09:00 KST")
+
 
     # ── 뉴스 크롤러 스케줄 등록 (#63: 매시 정각) ──
     # ── S&P 500 영향도 분석 스케줄 등록 (매일 06:00 KST, 미장 마감 후) ──
@@ -216,13 +140,7 @@ async def lifespan(app: FastAPI):
     )
     logger.info("[Scheduler] S&P 500 영향도 분석 등록: 매일 06:00 KST")
 
-    scheduler.add_job(
-        _scheduled_news_crawl,
-        CronTrigger(minute=0, timezone="Asia/Seoul"),
-        id="news_crawl",
-        replace_existing=True,
-    )
-    logger.info("[Scheduler] 뉴스 크롤러 등록: 매시 정각 KST")
+
 
     yield
 
@@ -275,9 +193,7 @@ app.include_router(xgb.router)
 app.include_router(market_cap.router)
 app.include_router(auto_trade.router)
 app.include_router(train_ws.router)
-app.include_router(job_crawl.router)
 app.include_router(gemini.router)
-app.include_router(news.router)
 app.include_router(youtube.router)
 app.include_router(rl.router)
 app.include_router(sp500.router)
