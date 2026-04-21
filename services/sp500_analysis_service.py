@@ -25,10 +25,19 @@ from services import supabase_service
 
 logger = logging.getLogger("sp500_analysis_service")
 
-GEMINI_API_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models"
-    "/gemini-2.0-flash:generateContent?key={api_key}"
-)
+import os
+
+# Hugging Face Secrets에 VERCEL_PROXY_URL (예: https://내버셀앱.vercel.app/api/simple/gemini-backend) 등록
+# 값이 없으면 기존 구글 API 직접 호출로 폴백
+VERCEL_PROXY_URL = os.environ.get("VERCEL_PROXY_URL", "").strip()
+
+if VERCEL_PROXY_URL:
+    GEMINI_API_URL = VERCEL_PROXY_URL
+else:
+    GEMINI_API_URL = (
+        "https://generativelanguage.googleapis.com/v1beta/models"
+        "/gemini-2.0-flash:generateContent?key={api_key}"
+    )
 
 RETRY_LIMIT = 3
 RETRY_DELAY = 3.0
