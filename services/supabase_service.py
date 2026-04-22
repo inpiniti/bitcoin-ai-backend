@@ -296,7 +296,8 @@ async def upsert_sp500_daily_impact(rows: list[dict]) -> int:
     if not rows:
         return 0
     _check_config()
-    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_impact"
+    # PostgREST upsert 시 on_conflict 파라미터가 명시적이어야 충돌 방지가 잘 됨
+    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_impact?on_conflict=analysis_date,ticker"
     headers = {
         **_headers(),
         "Prefer": "resolution=merge-duplicates,return=representation",
@@ -329,7 +330,7 @@ async def upsert_sp500_analysis_meta(data: dict) -> None:
     # news_sources가 list인 경우 JSON 직렬화
     if "news_sources" in data and isinstance(data["news_sources"], list):
         data["news_sources"] = _json.dumps(data["news_sources"])
-    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_analysis_meta"
+    url = f"{SUPABASE_URL}/rest/v1/sp500_daily_analysis_meta?on_conflict=analysis_date"
     headers = {**_headers(), "Prefer": "resolution=merge-duplicates"}
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(url, json=data, headers=headers)

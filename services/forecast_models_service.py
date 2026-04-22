@@ -101,8 +101,8 @@ def _predict_chronos_sync(closes: list[float]) -> str | None:
         import torch
         context = torch.tensor(closes[-64:], dtype=torch.float32).unsqueeze(0)
         # predict_quantiles: (samples, time, quantiles) 반환
-        quantile_forecasts, quantiles = pipeline.predict_quantiles(
-            context=context,
+        quantile_forecasts = pipeline.predict_quantiles(
+            inputs=context, # context 대신 inputs 명칭 사용
             prediction_length=1,
             quantile_levels=[0.5],  # 중간값
         )
@@ -131,10 +131,16 @@ def _predict_moirai_sync(closes: list[float]) -> str | None:
         past_values = torch.tensor(closes[-context_len:], dtype=torch.float32)
         # (batch=1, time, feat=1) 형태로 reshape
         past_values = past_values.unsqueeze(0).unsqueeze(-1)
+        # GluonTS/UNI2TS 호출 규격에 맞춰 인자 구성
+        # past_observed_target, past_is_pad 등이 필수인 버전 대응
+        # 로그상 past_is_pad가 누락되었다고 함
         past_observed = torch.ones_like(past_values, dtype=torch.bool)
+        past_is_pad = torch.zeros(past_values.shape[:-1], dtype=torch.bool) # (1, time)
+        
         future_values, _, _ = model(
-            past_target=rearrange(past_values, "b t f -> b t f"),
-            past_observed_target=rearrange(past_observed, "b t f -> b t f"),
+            past_target=past_values,
+            past_observed_target=past_observed,
+            past_is_pad=past_is_pad,
         )
         # (1, 1, samples) → 중간값
         forecast_price = float(future_values.median())

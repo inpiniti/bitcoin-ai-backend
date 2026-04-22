@@ -140,16 +140,16 @@ async def _enrich_single_stock(
     }
 
 
-async def enrich_bullish_stocks(
+async def enrich_stocks_with_models(
     tickers: list[str],
     xgb_model_id: str | None,
     rl_model_id: str | None,
 ) -> dict[str, dict]:
     """
-    낙관(bullish) 종목 리스트에 모델 예측 신호를 추가합니다.
+    대상 종목 리스트(bullish/bearish)에 모델 예측 신호를 추가합니다.
 
     Args:
-        tickers: bullish & confidence >= 0.5 종목 티커 리스트
+        tickers: 분석 대상 티커 리스트
         xgb_model_id: 사용할 XGBoost 모델 ID (None이면 스킵)
         rl_model_id: 사용할 강화학습 모델 ID (None이면 스킵)
 
@@ -180,7 +180,8 @@ async def enrich_bullish_stocks(
 
 async def load_active_model_ids() -> tuple[str | None, str | None]:
     """
-    현재 활성화된 automation_settings에서 XGBoost 및 RL 모델 ID를 조회합니다.
+    automation_settings에서 'sp500_news' 전용 설정 또는
+    활성화된 첫 번째 설정의 XGBoost 및 RL 모델 ID를 조회합니다.
 
     Returns:
         (xgb_model_id, rl_model_id)
@@ -192,13 +193,22 @@ async def load_active_model_ids() -> tuple[str | None, str | None]:
         xgb_model_id = None
         rl_model_id = None
         
-        for settings in settings_list:
-            if settings.get("model_id") and not xgb_model_id:
-                xgb_model_id = str(settings["model_id"])
-            if settings.get("rl_model_id") and not rl_model_id:
-                rl_model_id = str(settings["rl_model_id"])
+        # 1. 'sp500_news' 전용 설정이 있는지 먼저 확인
+        news_setting = next((s for s in settings_list if s.get("ticker_group_key") == "sp500_news"), None)
         
-        logger.info(f"[Signal] 활성 모델: XGB={xgb_model_id}, RL={rl_model_id}")
+        if news_setting:
+            xgb_model_id = str(news_setting["ai_model_key"]) if news_setting.get("ai_model_key") else None
+            rl_model_id = str(news_setting["rl_model_key"]) if news_setting.get("rl_model_key") else None
+            logger.info(f"[Signal] 전용 설정 발견 (sp500_news): XGB={xgb_model_id}, RL={rl_model_id}")
+        else:
+            # 2. 전용 설정 없으면 활성화된 첫 번째 설정의 모델 사용
+            for settings in settings_list:
+                if settings.get("ai_model_key") and not xgb_model_id:
+                    xgb_model_id = str(settings["ai_model_key"])
+                if settings.get("rl_model_key") and not rl_model_id:
+                    rl_model_id = str(settings["rl_model_key"])
+            logger.info(f"[Signal] 범용 활성 모델 사용: XGB={xgb_model_id}, RL={rl_model_id}")
+        
         return xgb_model_id, rl_model_id
     except Exception as e:
         logger.warning(f"[Signal] 활성 모델 조회 실패: {e}")

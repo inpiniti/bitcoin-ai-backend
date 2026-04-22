@@ -322,23 +322,23 @@ async def run_sp500_analysis(
         f"(↑{bullish_count} ↓{bearish_count} →{neutral_count})"
     )
 
-    # Step 4-1~4-5: Bullish & Confidence >= 0.5 종목에만 모델 신호 추가
-    bullish_high_conf = [
+    # Step 4-1~4-5: Bullish/Bearish & Confidence >= 0.5 종목에 모델 신호 추가
+    actionable_stocks = [
         s for s in all_results
-        if s.direction == "bullish" and s.confidence >= 0.5
+        if s.direction in ["bullish", "bearish"] and s.confidence >= 0.5
     ]
     logger.info(
         f"[SP500] Step 4-1~4-5: 모델 신호 수집 시작 "
-        f"({len(bullish_high_conf)}개 종목, bullish & confidence >= 0.5)"
+        f"({len(actionable_stocks)}개 종목: bullish/bearish & confidence >= 0.5)"
     )
 
     # 활성 XGBoost / RL 모델 ID 조회
     xgb_model_id, rl_model_id = await sp500_signal_service.load_active_model_ids()
 
     # 종목별 모델 신호 병렬 수집
-    bullish_tickers = [s.ticker for s in bullish_high_conf]
-    signal_map = await sp500_signal_service.enrich_bullish_stocks(
-        tickers=bullish_tickers,
+    actionable_tickers = [s.ticker for s in actionable_stocks]
+    signal_map = await sp500_signal_service.enrich_stocks_with_models(
+        tickers=actionable_tickers,
         xgb_model_id=xgb_model_id,
         rl_model_id=rl_model_id,
     )

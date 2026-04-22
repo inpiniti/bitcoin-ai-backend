@@ -69,11 +69,13 @@ def predict_direction(closes: list[float]) -> str | None:
         # 최근 512개 종가 사용 (모델 컨텍스트 상한 고려)
         context = np.array(closes[-512:], dtype=np.float32)
 
-        # forecast_naive(horizon=1): 1일 앞 예측
-        # 반환값 outputs[0] shape: (output_patch_len=128, horizon=1)
-        # outputs[0][0, 0] = 1-step ahead point forecast (첫 번째 출력 패치의 첫 스텝)
-        outputs = model.model.forecast_naive(horizon=1, inputs=[context])
-        forecast_price = float(outputs[0][0, 0])
+        # forecast API 수정 (PyTorch 2.5 200M 규격)
+        # inputs는 리스트여야 하며, freq도 명시적으로 전달 (0은 단위 없음/주식 데이터용)
+        # forecast 결과는 [forecast_tensor, full_output_tensor] 형태로 반환됨
+        forecast_results = model.forecast(inputs=[context], freq=[0])
+        forecast_values = forecast_results[0] # (batch, horizon)
+        
+        forecast_price = float(forecast_values[0, 0])
         current_price = float(closes[-1])
 
         if current_price <= 0:
