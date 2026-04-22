@@ -9,41 +9,37 @@ httpx
 # ── YouTube MP3 ───────────────────────────────────
 yt-dlp
 
-# ── PyTorch ──────────────────────────────────────
-torch
-
-# ── TimesFM (GitHub 최신)
-timesfm @ git+https://github.com/google-research/timesfm.git
-
-# ── JAX (CPU) ────────────────────────────────────
-jax[cpu]
-
-# ── Data Processing ──────────────────────────────
-numpy
+# ── Core ML Libraries (Versions pinned to avoid backtracking) ────
+torch>=2.0.0
+jax[cpu]>=0.4.0
+numpy<2.0.0
 pandas
 
-# ── ML ───────────────────────────────────────────
-utilsforecast
-scikit-learn
-xgboost
-stable-baselines3[extra]
-gymnasium
+# ── TimesFM (Google) ─────────────────────────────
+timesfm @ git+https://github.com/google-research/timesfm.git
 
-# ── Misc ─────────────────────────────────────────
-beautifulsoup4
-huggingface_hub
-tensorflow
-joblib
-yfinance
-lxml
-google-generativeai
-
-# ── Time-series Forecast Models ──────────────────────────
+# ── Time-series Forecast Models ──────────────────
 # Amazon Chronos-2
 chronos-forecasting @ git+https://github.com/amazon-science/chronos-forecasting.git
 # Salesforce Moirai
 uni2ts @ git+https://github.com/SalesforceAIResearch/uni2ts.git
 einops
+
+# ── ML Algorithms & Tools ────────────────────────
+utilsforecast
+scikit-learn
+xgboost
+stable-baselines3
+gymnasium
+
+# ── Data & Misc ──────────────────────────────────
+beautifulsoup4
+huggingface_hub
+tensorflow>=2.15.0
+joblib
+yfinance
+lxml
+google-generativeai
 
 # ── Scheduler ────────────────────────────────────
 apscheduler
