@@ -61,20 +61,34 @@ def _load_model():
 
             logger.info(f"[TimesFM] 모델 로드 중: {ModelClass.__name__} (첫 실행 시 HuggingFace 다운로드 발생)...")
 
+            # from_pretrained의 proxies 인자 오류를 피하기 위해 저수준 로드
             if hasattr(ModelClass, 'from_pretrained'):
                 try:
-                    _model = ModelClass.from_pretrained(
+                    # cache_dir을 명시해서 proxies 전달 우회 시도
+                    from huggingface_hub import snapshot_download
+                    import os
+                    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+                    model_dir = snapshot_download(
                         "google/timesfm-2.5-200m-pytorch",
-                        force_download=False,
+                        cache_dir=cache_dir,
+                        local_files_only=False,
                     )
-                except TypeError as e:
-                    if 'proxies' in str(e):
-                        logger.warning(f"[TimesFM] proxies 인자 제거 후 재시도...")
+                    logger.info(f"[TimesFM] 모델 파일 다운로드 완료: {model_dir}")
+                    # 다운로드한 경로에서 직접 로드 (proxies 우회)
+                    _model = ModelClass.from_pretrained(model_dir)
+                except Exception as e:
+                    logger.warning(f"[TimesFM] snapshot_download 로드 실패, 기본 로드 시도: {e}")
+                    try:
+                        # 마지막 시도: 기존 방식
                         _model = ModelClass.from_pretrained(
                             "google/timesfm-2.5-200m-pytorch",
                         )
-                    else:
-                        raise
+                    except TypeError as te:
+                        if 'proxies' in str(te):
+                            logger.warning(f"[TimesFM] proxies 인자 오류 감지, TimesFM 비활성화")
+                            raise ImportError("TimesFM_2p5_200M_torch이 proxies 인자를 지원하지 않습니다")
+                        else:
+                            raise
             else:
                 # 구버전 API (TimesFm 클래스)
                 _model = ModelClass(
