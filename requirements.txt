@@ -12,7 +12,7 @@ yt-dlp
 # ── Core ML Libraries (Versions pinned to avoid backtracking) ────
 torch>=2.0.0
 jax[cpu]>=0.4.0
-numpy<2.0.0
+numpy>=1.21.0,<2.0.0
 pandas
 
 # ── TimesFM (Google) ─────────────────────────────
@@ -29,7 +29,7 @@ einops
 utilsforecast
 scikit-learn
 xgboost
-stable-baselines3
+stable-baselines3>=2.0.0
 gymnasium
 
 # ── Data & Misc ──────────────────────────────────
