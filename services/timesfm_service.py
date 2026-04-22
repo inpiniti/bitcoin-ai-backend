@@ -17,12 +17,32 @@ logger = logging.getLogger("timesfm_service")
 
 _model = None           # 싱글턴 모델 인스턴스
 _load_attempted = False  # 로드 시도 여부 (재시도 방지)
+_load_error: str | None = None  # 마지막 로드 실패 메시지
 _model_lock = threading.Lock()  # 병렬 스레드에서 중복 로드 방지
+
+
+def reset_model():
+    """모델 싱글턴을 초기화해 다음 호출 시 재시도하도록 합니다."""
+    global _model, _load_attempted, _load_error
+    with _model_lock:
+        _model = None
+        _load_attempted = False
+        _load_error = None
+    logger.info("[TimesFM] 모델 상태 초기화 완료 (다음 predict 시 재로드)")
+
+
+def get_load_status() -> dict:
+    """모델 로드 상태를 반환합니다."""
+    return {
+        "loaded": _model is not None,
+        "attempted": _load_attempted,
+        "error": _load_error,
+    }
 
 
 def _load_model():
     """TimesFM 모델 로드 (최초 1회만 수행, 이후 캐시된 인스턴스 반환)."""
-    global _model, _load_attempted
+    global _model, _load_attempted, _load_error
     # 락 없이 먼저 체크 (로드 완료 후 빠른 경로)
     if _load_attempted and _model is not None:
         return _model
@@ -33,16 +53,41 @@ def _load_model():
         _load_attempted = True
 
         try:
-            from timesfm import TimesFM_2p5_200M_torch  # type: ignore
-            logger.info("[TimesFM] 모델 로드 중 (첫 실행 시 HuggingFace 다운로드 발생)...")
-            _model = TimesFM_2p5_200M_torch.from_pretrained(
-                "google/timesfm-2.5-200m-pytorch",
-                force_download=False,
-            )
+            import timesfm as tfm_module  # type: ignore
+            # 버전별 클래스명 대응: TimesFM_2p5_200M_torch 또는 TimesFm
+            ModelClass = getattr(tfm_module, 'TimesFM_2p5_200M_torch', None) or getattr(tfm_module, 'TimesFm', None)
+            if ModelClass is None:
+                raise ImportError(f"timesfm 패키지에서 사용 가능한 모델 클래스를 찾을 수 없습니다. 사용 가능한 속성: {dir(tfm_module)}")
+
+            logger.info(f"[TimesFM] 모델 로드 중: {ModelClass.__name__} (첫 실행 시 HuggingFace 다운로드 발생)...")
+
+            if hasattr(ModelClass, 'from_pretrained'):
+                _model = ModelClass.from_pretrained(
+                    "google/timesfm-2.5-200m-pytorch",
+                    force_download=False,
+                )
+            else:
+                # 구버전 API (TimesFm 클래스)
+                _model = ModelClass(
+                    hparams=tfm_module.TimesFmHparams(
+                        backend="pytorch",
+                        per_core_batch_size=32,
+                        horizon_len=1,
+                        num_layers=20,
+                        model_dims=1280,
+                        context_len=512,
+                    ),
+                    checkpoint=tfm_module.TimesFmCheckpoint(
+                        huggingface_repo_id="google/timesfm-2.5-200m-pytorch",
+                    ),
+                )
+
             logger.info("[TimesFM] 모델 로드 완료")
+            _load_error = None
         except Exception as exc:
-            logger.warning(f"[TimesFM] 모델 로드 실패 (TimesFM 예측 비활성화): {exc}")
+            logger.exception(f"[TimesFM] 모델 로드 실패 (TimesFM 예측 비활성화): {exc}")
             _model = None
+            _load_error = str(exc)
 
     return _model
 
@@ -68,15 +113,17 @@ def predict_direction(closes: list[float]) -> str | None:
     try:
         # 최근 512개 종가 사용 (모델 컨텍스트 상한 고려)
         context = np.array(closes[-512:], dtype=np.float32)
+        current_price = float(closes[-1])
 
-        # forecast API 수정 (PyTorch 2.5 200M 규격)
-        # inputs는 리스트여야 하며, freq도 명시적으로 전달 (0은 단위 없음/주식 데이터용)
+        # 신버전 API (TimesFM_2p5_200M_torch.from_pretrained 방식)
         # forecast 결과는 [forecast_tensor, full_output_tensor] 형태로 반환됨
         forecast_results = model.forecast(inputs=[context], freq=[0])
-        forecast_values = forecast_results[0] # (batch, horizon)
-        
-        forecast_price = float(forecast_values[0, 0])
-        current_price = float(closes[-1])
+        if isinstance(forecast_results, (list, tuple)):
+            forecast_values = forecast_results[0]
+            forecast_price = float(forecast_values[0, 0])
+        else:
+            # 구버전 API: (point_forecast, quantile_forecast) 반환
+            forecast_price = float(forecast_results[0][0])
 
         if current_price <= 0:
             return None
@@ -84,5 +131,5 @@ def predict_direction(closes: list[float]) -> str | None:
         return "up" if forecast_price > current_price else "down"
 
     except Exception as exc:
-        logger.warning(f"[TimesFM] 예측 중 오류: {exc}")
+        logger.exception(f"[TimesFM] 예측 중 오류: {exc}")
         return None

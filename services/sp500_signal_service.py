@@ -41,7 +41,7 @@ async def _get_xgb_prediction(ticker: str, model_id: str | None, closes: list[fl
             return round(prob, 3), model_id
         return None, None
     except Exception as e:
-        logger.debug(f"[Signal] XGBoost 예측 실패 ({ticker}): {e}")
+        logger.warning(f"[Signal] XGBoost 예측 실패 ({ticker}): {e}")
         return None, None
 
 
@@ -55,7 +55,7 @@ async def _get_rl_prediction(ticker: str, model_id: str | None) -> tuple[str | N
         signal = result.get("latest_signal", "HOLD")
         return signal, model_id
     except Exception as e:
-        logger.debug(f"[Signal] RL 예측 실패 ({ticker}): {e}")
+        logger.warning(f"[Signal] RL 예측 실패 ({ticker}): {e}")
         return None, None
 
 
@@ -66,7 +66,7 @@ async def _get_timesfm_prediction(closes: list[float]) -> str | None:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, timesfm_service.predict_direction, closes)
     except Exception as e:
-        logger.debug(f"[Signal] TimesFM 예측 실패: {e}")
+        logger.warning(f"[Signal] TimesFM 예측 실패: {e}")
         return None
 
 
@@ -76,7 +76,7 @@ async def _get_chronos_prediction(closes: list[float]) -> str | None:
         from services.forecast_models_service import predict_direction_chronos
         return await predict_direction_chronos(closes)
     except Exception as e:
-        logger.debug(f"[Signal] Chronos 예측 실패: {e}")
+        logger.warning(f"[Signal] Chronos 예측 실패: {e}")
         return None
 
 
@@ -86,7 +86,7 @@ async def _get_moirai_prediction(closes: list[float]) -> str | None:
         from services.forecast_models_service import predict_direction_moirai
         return await predict_direction_moirai(closes)
     except Exception as e:
-        logger.debug(f"[Signal] Moirai 예측 실패: {e}")
+        logger.warning(f"[Signal] Moirai 예측 실패: {e}")
         return None
 
 
@@ -100,7 +100,7 @@ async def _enrich_single_stock(
     closes = await _fetch_closes(ticker)
 
     if not closes:
-        logger.debug(f"[Signal] {ticker}: 종가 데이터 없음 → 스킵")
+        logger.warning(f"[Signal] {ticker}: 종가 데이터 없음 → 스킵")
         return {
             "ticker": ticker,
             "xgb_prob": None,

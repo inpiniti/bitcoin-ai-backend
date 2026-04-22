@@ -80,3 +80,42 @@ async def run_analysis(
     except Exception as e:
         logger.exception(f"[SP500] 분석 실행 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/model-status",
+    summary="시계열 모델 로드 상태 조회",
+    description="TimesFM / Chronos / Moirai 모델의 로드 성공 여부와 오류 메시지를 반환합니다.",
+)
+async def get_model_status():
+    from services import timesfm_service, forecast_models_service
+    return {
+        "timesfm": timesfm_service.get_load_status(),
+        "chronos": {
+            "loaded": forecast_models_service._chronos_pipeline is not None,
+            "attempted": forecast_models_service._chronos_attempted,
+        },
+        "moirai": {
+            "loaded": forecast_models_service._moirai_model is not None,
+            "attempted": forecast_models_service._moirai_attempted,
+        },
+    }
+
+
+@router.post(
+    "/model-reset",
+    summary="시계열 모델 싱글턴 초기화",
+    description="로드 실패한 모델을 초기화해 다음 파이프라인 실행 시 재시도하도록 합니다.",
+)
+async def reset_models():
+    from services import timesfm_service, forecast_models_service
+    import threading
+    timesfm_service.reset_model()
+    with forecast_models_service._chronos_lock:
+        forecast_models_service._chronos_pipeline = None
+        forecast_models_service._chronos_attempted = False
+    with forecast_models_service._moirai_lock:
+        forecast_models_service._moirai_model = None
+        forecast_models_service._moirai_attempted = False
+    logger.info("[SP500] 시계열 모델 싱글턴 초기화 완료")
+    return {"status": "ok", "message": "TimesFM / Chronos / Moirai 모델 초기화 완료. 다음 실행 시 재로드합니다."}

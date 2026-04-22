@@ -46,7 +46,7 @@ def _load_chronos():
             )
             logger.info("[Chronos] 모델 로드 완료")
         except Exception as exc:
-            logger.warning(f"[Chronos] 모델 로드 실패 (예측 비활성화): {exc}")
+            logger.exception(f"[Chronos] 모델 로드 실패 (예측 비활성화): {exc}")
             _chronos_pipeline = None
     return _chronos_pipeline
 
@@ -83,7 +83,7 @@ def _load_moirai():
             )
             logger.info("[Moirai] 모델 로드 완료")
         except Exception as exc:
-            logger.warning(f"[Moirai] 모델 로드 실패 (예측 비활성화): {exc}")
+            logger.exception(f"[Moirai] 모델 로드 실패 (예측 비활성화): {exc}")
             _moirai_model = None
     return _moirai_model
 
@@ -113,7 +113,7 @@ def _predict_chronos_sync(closes: list[float]) -> str | None:
             return None
         return "up" if forecast_price > current_price else "down"
     except Exception as exc:
-        logger.warning(f"[Chronos] 예측 오류: {exc}")
+        logger.exception(f"[Chronos] 예측 오류: {exc}")
         return None
 
 
@@ -149,7 +149,7 @@ def _predict_moirai_sync(closes: list[float]) -> str | None:
             return None
         return "up" if forecast_price > current_price else "down"
     except Exception as exc:
-        logger.warning(f"[Moirai] 예측 오류: {exc}")
+        logger.exception(f"[Moirai] 예측 오류: {exc}")
         return None
 
 
