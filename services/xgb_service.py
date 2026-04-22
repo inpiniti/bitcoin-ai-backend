@@ -147,14 +147,14 @@ async def predict(
         if not candles:
             raise ValueError(f"ticker '{ticker}' 의 데이터를 가져올 수 없습니다")
 
-        # 보유 데이터가 모델 stage를 충족하지 못하면 경고
+        # 데이터 부족 시 예측 불가 (피처 개수 불일치 방지)
         achievable = get_max_achievable_stage(len(candles), min_rows=10)
         if achievable < model_stage:
             logger.warning(
                 f"[XGB:Predict] {ticker}: 캔들 {len(candles)}개, 모델 stage={model_stage} 예측 불가 "
-                f"(최대 stage={achievable}). 빈 결과 반환."
+                f"(최대 achievable stage={achievable}). 예측 스킵."
             )
-            return {"predictions": [], "error": f"데이터 부족: {ticker}는 stage {model_stage} 예측에 필요한 데이터가 없습니다 (보유 {len(candles)}일)"}
+            return {"predictions": []}
 
         features, dates, raw_features, actuals = data_collector.process_stock_data_for_prediction(candles, model_stage)
         logger.info(f"[XGB:Predict] 피처 추출 완료: {len(features)}개")
