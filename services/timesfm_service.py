@@ -74,19 +74,27 @@ def _load_model():
                         local_files_only=False,
                     )
                     logger.info(f"[TimesFM] 모델 파일 다운로드 완료: {model_dir}")
-                    # 다운로드한 경로에서 직접 로드 (proxies 우회)
-                    _model = ModelClass.from_pretrained(model_dir)
+                    # 다운로드한 경로에서 직접 로드 (proxies=None 명시)
+                    _model = ModelClass.from_pretrained(model_dir, proxies=None)
                 except Exception as e:
-                    logger.warning(f"[TimesFM] snapshot_download 로드 실패, 기본 로드 시도: {e}")
+                    logger.warning(f"[TimesFM] snapshot_download 로드 실패, proxies=None 로드 시도: {e}")
                     try:
-                        # 마지막 시도: 기존 방식
+                        # 두 번째 시도: proxies=None 명시
                         _model = ModelClass.from_pretrained(
                             "google/timesfm-2.5-200m-pytorch",
+                            proxies=None,
                         )
                     except TypeError as te:
                         if 'proxies' in str(te):
-                            logger.warning(f"[TimesFM] proxies 인자 오류 감지, TimesFM 비활성화")
-                            raise ImportError("TimesFM_2p5_200M_torch이 proxies 인자를 지원하지 않습니다")
+                            logger.warning(f"[TimesFM] proxies 인자 오류 감지, 오프라인 모드 시도")
+                            try:
+                                # 세 번째 시도: 오프라인 모드
+                                import os
+                                os.environ['HF_HUB_OFFLINE'] = 'true'
+                                _model = ModelClass.from_pretrained("google/timesfm-2.5-200m-pytorch")
+                            except Exception as offline_err:
+                                logger.warning(f"[TimesFM] 오프라인 모드도 실패: {offline_err}")
+                                raise ImportError("TimesFM_2p5_200M_torch을 로드할 수 없습니다 (proxies 호환성 문제)")
                         else:
                             raise
             else:
