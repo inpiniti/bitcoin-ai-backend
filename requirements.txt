@@ -38,5 +38,12 @@ yfinance
 lxml
 google-generativeai
 
+# ── Time-series Forecast Models ──────────────────────────
+# Amazon Chronos-2
+chronos-forecasting @ git+https://github.com/amazon-science/chronos-forecasting.git
+# Salesforce Moirai
+uni2ts @ git+https://github.com/SalesforceAIResearch/uni2ts.git
+einops
+
 # ── Scheduler ────────────────────────────────────
 apscheduler

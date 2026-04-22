@@ -15,6 +15,16 @@ CREATE TABLE IF NOT EXISTS sp500_daily_impact (
   confidence DECIMAL(3,2) CHECK (confidence >= 0 AND confidence <= 1),
   reason TEXT,
   news_count INTEGER,
+  
+  -- 모델 예측 신호 컬럼
+  xgb_prob DECIMAL(4,3),
+  xgb_model_id TEXT,
+  rl_signal VARCHAR(4),
+  rl_model_id TEXT,
+  timesfm_signal VARCHAR(4),
+  chronos_signal VARCHAR(4),
+  moirai_signal VARCHAR(4),
+
   created_at TIMESTAMPTZ DEFAULT NOW(),
   
   UNIQUE(analysis_date, ticker)
@@ -38,10 +48,13 @@ CREATE TABLE IF NOT EXISTS sp500_daily_analysis_meta (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- RLS (Row Level Security) - 필요 시 활성화
--- ALTER TABLE sp500_daily_impact ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE sp500_daily_analysis_meta ENABLE ROW LEVEL SECURITY;
+-- RLS (Row Level Security) 활성화
+ALTER TABLE sp500_daily_impact ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sp500_daily_analysis_meta ENABLE ROW LEVEL SECURITY;
 
--- anon 키로 읽기/쓰기 허용 (서버 사이드 사용)
--- CREATE POLICY "Allow all for anon" ON sp500_daily_impact FOR ALL USING (true);
--- CREATE POLICY "Allow all for anon" ON sp500_daily_analysis_meta FOR ALL USING (true);
+-- anon 키(또는 모든 환경)에서 읽기/쓰기/수정을 허용하는 정책 생성
+CREATE POLICY "Allow all for anon" ON sp500_daily_impact 
+  FOR ALL USING (true) WITH CHECK (true);
+
+CREATE POLICY "Allow all for anon" ON sp500_daily_analysis_meta 
+  FOR ALL USING (true) WITH CHECK (true);

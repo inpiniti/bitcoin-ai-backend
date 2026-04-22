@@ -6,6 +6,11 @@ S&P 500 뉴스 기반 영향도 분석 서비스
   2. 뉴스 → 하나의 컨텍스트
   3. S&P 500 종목 리스트 (Wikipedia)
   4. GICS 섹터별로 Gemini에게 분석 요청
+  4-1. Bullish 종목별 XGBoost 상승 확률
+  4-2. Bullish 종목별 강화학습(RL) 신호
+  4-3. Bullish 종목별 TimesFM 예측
+  4-4. Bullish 종목별 Amazon Chronos-2 예측
+  4-5. Bullish 종목별 Salesforce Moirai 예측
   5. 결과를 Supabase에 저장
 """
 import asyncio
@@ -54,9 +59,17 @@ class StockImpactResult:
     direction: str      # bullish | bearish | neutral
     confidence: float   # 0.0 ~ 1.0
     reason: str
+    # 모델 예측 신호 (Step 4-1 ~ 4-5, bullish 종목만 채워짐)
+    xgb_prob: Optional[float] = None        # XGBoost 상승 확률
+    xgb_model_id: Optional[str] = None
+    rl_signal: Optional[str] = None         # BUY / HOLD / SELL
+    rl_model_id: Optional[str] = None
+    timesfm_signal: Optional[str] = None    # up / down
+    chronos_signal: Optional[str] = None    # up / down
+    moirai_signal: Optional[str] = None     # up / down
 
     def to_dict(self, analysis_date: str, news_count: int) -> dict:
-        return {
+        d = {
             "analysis_date": analysis_date,
             "ticker": self.ticker,
             "name": self.name,
@@ -66,6 +79,15 @@ class StockImpactResult:
             "reason": self.reason,
             "news_count": news_count,
         }
+        # 모델 신호 포함 (None이면 생략하지 않고 null로 저장)
+        d["xgb_prob"] = self.xgb_prob
+        d["xgb_model_id"] = self.xgb_model_id
+        d["rl_signal"] = self.rl_signal
+        d["rl_model_id"] = self.rl_model_id
+        d["timesfm_signal"] = self.timesfm_signal
+        d["chronos_signal"] = self.chronos_signal
+        d["moirai_signal"] = self.moirai_signal
+        return d
 
 
 @dataclass
@@ -236,12 +258,15 @@ async def run_sp500_analysis(
     1. 뉴스 크롤링
     2. 컨텍스트 생성
     3. S&P 500 리스트 조회
-    4. 섹터별 Gemini 분석 (병렬, Semaphore 제한)
+    4. 섹터별 Gemini 분석 (병렬, Semaphore)
+    4-1~4-5. Bullish 종목 모델 신호 수집 (XGB/RL/TimesFM/Chronos/Moirai)
     5. Supabase 저장
 
     Returns:
         실행 결과 요약 dict
     """
+    from services import sp500_signal_service
+
     analysis_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     logger.info(f"[SP500] ═══ 분석 시작 (date={analysis_date}) ═══")
 
@@ -297,6 +322,41 @@ async def run_sp500_analysis(
         f"(↑{bullish_count} ↓{bearish_count} →{neutral_count})"
     )
 
+    # Step 4-1~4-5: Bullish & Confidence >= 0.5 종목에만 모델 신호 추가
+    bullish_high_conf = [
+        s for s in all_results
+        if s.direction == "bullish" and s.confidence >= 0.5
+    ]
+    logger.info(
+        f"[SP500] Step 4-1~4-5: 모델 신호 수집 시작 "
+        f"({len(bullish_high_conf)}개 종목, bullish & confidence >= 0.5)"
+    )
+
+    # 활성 XGBoost / RL 모델 ID 조회
+    xgb_model_id, rl_model_id = await sp500_signal_service.load_active_model_ids()
+
+    # 종목별 모델 신호 병렬 수집
+    bullish_tickers = [s.ticker for s in bullish_high_conf]
+    signal_map = await sp500_signal_service.enrich_bullish_stocks(
+        tickers=bullish_tickers,
+        xgb_model_id=xgb_model_id,
+        rl_model_id=rl_model_id,
+    )
+
+    # 결과 객체에 신호 병합
+    for stock in all_results:
+        if stock.ticker in signal_map:
+            sig = signal_map[stock.ticker]
+            stock.xgb_prob = sig.get("xgb_prob")
+            stock.xgb_model_id = sig.get("xgb_model_id")
+            stock.rl_signal = sig.get("rl_signal")
+            stock.rl_model_id = sig.get("rl_model_id")
+            stock.timesfm_signal = sig.get("timesfm_signal")
+            stock.chronos_signal = sig.get("chronos_signal")
+            stock.moirai_signal = sig.get("moirai_signal")
+
+    logger.info("[SP500] Step 4-1~4-5: 모델 신호 수집 완료")
+
     # Step 5: Supabase 저장
     logger.info("[SP500] Step 5: Supabase 저장...")
     news_count = len(news_items)
@@ -330,6 +390,9 @@ async def run_sp500_analysis(
         "bullish": bullish_count,
         "bearish": bearish_count,
         "neutral": neutral_count,
+        "model_enriched": len(signal_map),
+        "xgb_model_id": xgb_model_id,
+        "rl_model_id": rl_model_id,
     }
     logger.info(f"[SP500] ═══ 분석 완료 ═══ {summary}")
     return summary
