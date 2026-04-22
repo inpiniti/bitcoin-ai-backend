@@ -62,10 +62,19 @@ def _load_model():
             logger.info(f"[TimesFM] 모델 로드 중: {ModelClass.__name__} (첫 실행 시 HuggingFace 다운로드 발생)...")
 
             if hasattr(ModelClass, 'from_pretrained'):
-                _model = ModelClass.from_pretrained(
-                    "google/timesfm-2.5-200m-pytorch",
-                    force_download=False,
-                )
+                try:
+                    _model = ModelClass.from_pretrained(
+                        "google/timesfm-2.5-200m-pytorch",
+                        force_download=False,
+                    )
+                except TypeError as e:
+                    if 'proxies' in str(e):
+                        logger.warning(f"[TimesFM] proxies 인자 제거 후 재시도...")
+                        _model = ModelClass.from_pretrained(
+                            "google/timesfm-2.5-200m-pytorch",
+                        )
+                    else:
+                        raise
             else:
                 # 구버전 API (TimesFm 클래스)
                 _model = ModelClass(

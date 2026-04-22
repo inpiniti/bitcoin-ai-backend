@@ -100,12 +100,16 @@ def _predict_chronos_sync(closes: list[float]) -> str | None:
     try:
         import torch
         context = torch.tensor(closes[-64:], dtype=torch.float32).unsqueeze(0)
-        # predict_quantiles: (samples, time, quantiles) 반환
+        # predict_quantiles 반환값: 구버전은 tuple, 신버전은 tensor
         quantile_forecasts = pipeline.predict_quantiles(
-            inputs=context, # context 대신 inputs 명칭 사용
+            inputs=context,
             prediction_length=1,
-            quantile_levels=[0.5],  # 중간값
+            quantile_levels=[0.5],
         )
+        # tuple인 경우 첫 번째 원소 추출
+        if isinstance(quantile_forecasts, tuple):
+            quantile_forecasts = quantile_forecasts[0]
+
         # shape: (1, 1, 1) → 스칼라 추출
         forecast_price = float(quantile_forecasts[0, 0, 0])
         current_price = float(closes[-1])
@@ -126,27 +130,33 @@ def _predict_moirai_sync(closes: list[float]) -> str | None:
         return None
     try:
         import torch
-        from einops import rearrange  # type: ignore
+        current_price = float(closes[-1])
+        if current_price <= 0:
+            return None
+
+        # Moirai context_len: 모델은 64 고정이지만, 입력 데이터 길이가 불일치하면 실패
+        # → 정확히 64개 또는 그보다 적으면 padding, 많으면 최근 64개만 사용
         context_len = min(64, len(closes))
         past_values = torch.tensor(closes[-context_len:], dtype=torch.float32)
-        # (batch=1, time, feat=1) 형태로 reshape
-        past_values = past_values.unsqueeze(0).unsqueeze(-1)
-        # GluonTS/UNI2TS 호출 규격에 맞춰 인자 구성
-        # past_observed_target, past_is_pad 등이 필수인 버전 대응
-        # 로그상 past_is_pad가 누락되었다고 함
+
+        # Moirai가 기대하는 input shape 확인
+        # 일반적으로: (batch, time, features) = (1, 64, 1)
+        # 하지만 context_len < 64이면 (1, context_len, 1)
+        # → 모델이 strict하면 padding 필요
+        if context_len < 64:
+            padding = torch.full((64 - context_len,), closes[0], dtype=torch.float32)
+            past_values = torch.cat([padding, past_values])
+
+        past_values = past_values.unsqueeze(0).unsqueeze(-1)  # (1, 64, 1)
         past_observed = torch.ones_like(past_values, dtype=torch.bool)
-        past_is_pad = torch.zeros(past_values.shape[:-1], dtype=torch.bool) # (1, time)
-        
+        past_is_pad = torch.zeros(past_values.shape[:-1], dtype=torch.bool)
+
         future_values, _, _ = model(
             past_target=past_values,
             past_observed_target=past_observed,
             past_is_pad=past_is_pad,
         )
-        # (1, 1, samples) → 중간값
         forecast_price = float(future_values.median())
-        current_price = float(closes[-1])
-        if current_price <= 0:
-            return None
         return "up" if forecast_price > current_price else "down"
     except Exception as exc:
         logger.exception(f"[Moirai] 예측 오류: {exc}")
