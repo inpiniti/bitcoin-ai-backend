@@ -91,10 +91,12 @@ async def list_all_models(model_type: str | None = None) -> list[dict]:
         model_type: 필터 ("xgboost", "rl", None=모두)
     Returns: [{"id": str, "model_type": str, "name": str, ...}, ...]
     """
+    import logging
+    logger = logging.getLogger("supabase_service")
     _check_config()
 
-    # Supabase REST API로 모델 목록 조회
-    url = f"{SUPABASE_URL}/rest/v1/ml_models?select=id,model_type,name,stage,created_at"
+    # Supabase REST API로 모델 목록 조회 (모든 필드 선택)
+    url = f"{SUPABASE_URL}/rest/v1/ml_models?select=*"
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers=_headers())
@@ -103,13 +105,21 @@ async def list_all_models(model_type: str | None = None) -> list[dict]:
         raise Exception(f"Supabase 에러 ({resp.status_code}): {resp.text}")
 
     models = resp.json()
+    logger.info(f"[Supabase] ml_models 조회: {len(models)}개 모델, 첫 모델 필드: {list(models[0].keys()) if models else 'empty'}")
 
-    # 타입으로 필터링
+    # 타입으로 필터링 - model_type 또는 name 기반
     if model_type:
-        models = [m for m in models if m.get("model_type", "").lower() == model_type.lower()]
+        filtered = []
+        for m in models:
+            mtype = m.get("model_type", "").lower()
+            mname = m.get("name", "").lower()
+            if model_type.lower() in mtype or model_type.lower() in mname:
+                filtered.append(m)
+        models = filtered
 
     # 최신 순 정렬
-    models.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    if models and "created_at" in models[0]:
+        models.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
     return models
 
