@@ -119,3 +119,50 @@ async def reset_models():
         forecast_models_service._moirai_attempted = False
     logger.info("[SP500] 시계열 모델 싱글턴 초기화 완료")
     return {"status": "ok", "message": "TimesFM / Chronos / Moirai 모델 초기화 완료. 다음 실행 시 재로드합니다."}
+
+
+# ── 파이프라인 (단계별 실행) ────────────────────────────────────
+
+@router.post(
+    "/pipeline/start",
+    summary="파이프라인 실행 시작",
+    description="새로운 파이프라인 실행을 생성합니다.",
+)
+async def start_pipeline(ticker: str = "AAPL"):
+    from services import pipeline_service
+    run = pipeline_service.create_run(ticker)
+    return {"run_id": run.run_id, "status": "created"}
+
+
+@router.get(
+    "/pipeline/{run_id}",
+    summary="파이프라인 상태 조회",
+    description="파이프라인 실행 상태 및 각 단계별 결과를 조회합니다.",
+)
+async def get_pipeline_status(run_id: str):
+    from services import pipeline_service
+    run = pipeline_service.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="파이프라인을 찾을 수 없습니다")
+    return run.get_status()
+
+
+@router.post(
+    "/pipeline/{run_id}/step/{step_name}",
+    summary="파이프라인 단계 실행",
+    description="파이프라인의 특정 단계를 실행합니다.",
+)
+async def execute_pipeline_step(run_id: str, step_name: str):
+    from services import pipeline_service
+    run = pipeline_service.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="파이프라인을 찾을 수 없습니다")
+
+    try:
+        result = await pipeline_service.execute_step(run, step_name)
+        return {"status": "success", "step": step_name, "result": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"[Pipeline:{run_id}] {step_name} 실행 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
