@@ -107,6 +107,64 @@ async def train_from_data(features: list, labels: list, model_name: str, stage: 
     }
 
 
+# ── 공통 전처리 모듈 (모든 XGBoost 예측에서 사용) ───────────────────────
+
+async def extract_features_for_prediction(
+    ticker: str,
+    days: int = 2000,
+    target_stage: int = 6,
+) -> tuple[list, int]:
+    """
+    XGBoost 예측용 피처 추출 (학습과 동일한 로직 보장).
+    모든 XGBoost 예측 엔드포인트에서 이 함수를 사용하도록 통일.
+
+    Args:
+        ticker: 종목 코드
+        days: 수집할 과거 캘린더 일수
+        target_stage: 목표 stage (기본 6)
+
+    Returns:
+        (features, actual_stage) - 피처 리스트와 실제 사용된 stage
+
+    Raises:
+        ValueError: 데이터 부족 또는 유효한 피처 없음
+    """
+    from services import data_collector
+
+    xgb, np = _get_deps()
+
+    # 1. 데이터 수집
+    candles = await data_collector.fetch_stock_history_yf(ticker, days)
+    if not candles:
+        raise ValueError(f"ticker '{ticker}'의 데이터를 가져올 수 없습니다")
+
+    # 2. Stage 계산 (학습과 동일: min_rows=200)
+    from services.data_collector import get_max_achievable_stage
+    achievable = get_max_achievable_stage(len(candles), min_rows=200)
+
+    actual_stage = min(achievable, target_stage)
+    logger.info(
+        f"[XGB:Extract] {ticker}: 캔들={len(candles)}개, "
+        f"목표stage={target_stage}, achievable={achievable}, 사용stage={actual_stage}"
+    )
+
+    if actual_stage < target_stage:
+        logger.warning(
+            f"[XGB:Extract] {ticker}: 데이터 부족으로 stage {target_stage}→{actual_stage} 조정"
+        )
+
+    # 3. 피처 추출
+    features, _, _, _ = data_collector.process_stock_data_for_prediction(candles, actual_stage)
+
+    if not features:
+        raise ValueError(
+            f"{ticker}: stage={actual_stage}로 추출 가능한 피처 없음 (캔들: {len(candles)}개)"
+        )
+
+    logger.info(f"[XGB:Extract] {ticker}: {len(features)}행, stage={actual_stage} 피처 추출 완료")
+    return features, actual_stage
+
+
 # ── 예측 ─────────────────────────────────────────────────
 
 async def predict(
@@ -139,25 +197,13 @@ async def predict(
     actuals: list = []
 
     if ticker and not features:
-        # 예측용: stage lookback + 여유분만 취득
-        from services.data_collector import get_required_calendar_days, get_max_achievable_stage
-        pred_days = max(days, get_required_calendar_days(model_stage, min_rows=10))
-        logger.info(f"[XGB:Predict] ticker={ticker} 데이터 수집 (days={pred_days}, stage={model_stage})")
-        candles = await data_collector.fetch_stock_history_yf(ticker, pred_days)
-        if not candles:
-            raise ValueError(f"ticker '{ticker}' 의 데이터를 가져올 수 없습니다")
-
-        # 데이터 부족 시 예측 불가 (피처 개수 불일치 방지)
-        achievable = get_max_achievable_stage(len(candles), min_rows=10)
-        if achievable < model_stage:
-            logger.warning(
-                f"[XGB:Predict] {ticker}: 캔들 {len(candles)}개, 모델 stage={model_stage} 예측 불가 "
-                f"(최대 achievable stage={achievable}). 예측 스킵."
-            )
+        # 공통 전처리 모듈 사용 (모든 API에서 일관된 로직)
+        try:
+            features, actual_stage = await extract_features_for_prediction(ticker, days, target_stage=model_stage)
+            logger.info(f"[XGB:Predict] {ticker}: {len(features)}개 샘플, stage={actual_stage}")
+        except ValueError as e:
+            logger.warning(f"[XGB:Predict] {ticker}: 피처 추출 실패 - {e}")
             return {"predictions": []}
-
-        features, dates, raw_features, actuals = data_collector.process_stock_data_for_prediction(candles, model_stage)
-        logger.info(f"[XGB:Predict] 피처 추출 완료: {len(features)}개")
     elif dataset_id and not features:
         logger.info(f"[XGB:Predict] 데이터셋 로드: {dataset_id}")
         features = await supabase_service.load_features(dataset_id)
@@ -174,13 +220,13 @@ async def predict(
     actual_features = input_data.shape[1]
     if expected_features > 0 and actual_features != expected_features:
         logger.error(
-            f"[XGB:Predict] 피처 개수 불일치 (ticker={ticker}): "
-            f"모델이 기대하는 피처={expected_features}개, 실제 피처={actual_features}개. "
-            f"model_stage={model_stage}, 데이터={len(features)}행"
+            f"[XGB:Predict] 피처 개수 불일치: "
+            f"모델이 기대하는={expected_features}개, 실제={actual_features}개. "
+            f"ticker={ticker}, model_stage={model_stage}, 샘플={len(features)}행. "
+            f"이 에러는 모델 재학습이 필요할 수 있습니다."
         )
         raise ValueError(
-            f"Feature count mismatch: expected {expected_features}, got {actual_features}. "
-            f"데이터 수집/전처리 과정에서 피처가 손실되었을 수 있습니다."
+            f"Feature count mismatch: expected {expected_features}, got {actual_features}"
         )
 
     dmatrix = xgb.DMatrix(input_data)

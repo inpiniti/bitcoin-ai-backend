@@ -148,13 +148,18 @@ def _predict_moirai_sync(closes: list[float]) -> str | None:
         # 일반적으로: (batch, time, features) = (1, 64, 1)
         # 하지만 context_len < 64이면 (1, context_len, 1)
         # → 모델이 strict하면 padding 필요
+        pad_len = 0
         if context_len < 64:
-            padding = torch.full((64 - context_len,), closes[0], dtype=torch.float32)
+            pad_len = 64 - context_len
+            padding = torch.full((pad_len,), closes[0], dtype=torch.float32)
             past_values = torch.cat([padding, past_values])
 
         past_values = past_values.unsqueeze(0).unsqueeze(-1)  # (1, 64, 1)
         past_observed = torch.ones_like(past_values, dtype=torch.bool)
+        # 패딩된 부분은 is_pad=True로 표시
         past_is_pad = torch.zeros(past_values.shape[:-1], dtype=torch.bool)
+        if pad_len > 0:
+            past_is_pad[0, :pad_len] = True
 
         future_values, _, _ = model(
             past_target=past_values,
