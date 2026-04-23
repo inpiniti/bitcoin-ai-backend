@@ -85,45 +85,6 @@ async def load_model(model_id: str) -> dict:
     }
 
 
-async def list_all_models(model_type: str | None = None) -> list[dict]:
-    """ml_models 테이블에서 모든 모델 조회
-    Args:
-        model_type: 필터 ("xgboost", "rl", None=모두)
-    Returns: [{"id": str, "model_type": str, "name": str, ...}, ...]
-    """
-    import logging
-    logger = logging.getLogger("supabase_service")
-    _check_config()
-
-    # Supabase REST API로 모델 목록 조회 (모든 필드 선택)
-    url = f"{SUPABASE_URL}/rest/v1/ml_models?select=*"
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=_headers())
-
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise Exception(f"Supabase 에러 ({resp.status_code}): {resp.text}")
-
-    models = resp.json()
-    logger.info(f"[Supabase] ml_models 조회: {len(models)}개 모델, 첫 모델 필드: {list(models[0].keys()) if models else 'empty'}")
-
-    # 타입으로 필터링 - model_type 또는 name 기반
-    if model_type:
-        filtered = []
-        for m in models:
-            mtype = m.get("model_type", "").lower()
-            mname = m.get("name", "").lower()
-            if model_type.lower() in mtype or model_type.lower() in mname:
-                filtered.append(m)
-        models = filtered
-
-    # 최신 순 정렬
-    if models and "created_at" in models[0]:
-        models.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-
-    return models
-
-
 async def save_model(model_data: dict) -> str:
     """ml_models 테이블에 모델 저장 후 생성된 id 반환"""
     _check_config()

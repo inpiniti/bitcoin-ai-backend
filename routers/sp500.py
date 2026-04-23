@@ -123,57 +123,6 @@ async def reset_models():
 
 # ── 파이프라인 (단계별 실행) ────────────────────────────────────
 
-@router.get(
-    "/pipeline/models",
-    summary="파이프라인용 모델 목록 조회",
-    description="사용 가능한 XGBoost와 RL 모델 목록을 반환합니다.",
-)
-async def get_pipeline_models():
-    from services.sp500_signal_service import load_active_model_ids
-    from services.supabase_service import list_all_models
-
-    try:
-        # 활성 모델 ID
-        active_xgb, active_rl = await load_active_model_ids()
-
-        # 전체 모델 목록 조회
-        all_models = await list_all_models()
-
-        # 모델 이름으로 타입 판단
-        xgb_models = []
-        rl_models = []
-
-        for m in all_models:
-            model_id = m.get("id", "")
-            model_name = m.get("name", model_id)
-
-            # 이름 기반으로 모델 타입 판단
-            if any(x in model_name.upper() for x in ["XGB_", "XGB-", "USALL"]):
-                xgb_models.append({"id": model_id, "name": model_name})
-            elif any(x in model_name.upper() for x in ["RL_", "RL-", "PPO"]):
-                rl_models.append({"id": model_id, "name": model_name})
-
-        return {
-            "active": {
-                "xgb_model_id": active_xgb,
-                "rl_model_id": active_rl,
-            },
-            "xgboost_models": xgb_models,
-            "rl_models": rl_models,
-        }
-    except Exception as e:
-        logger.error(f"[Pipeline] 모델 목록 조회 실패: {e}")
-        return {
-            "active": {
-                "xgb_model_id": None,
-                "rl_model_id": None,
-            },
-            "xgboost_models": [],
-            "rl_models": [],
-            "error": str(e)
-        }
-
-
 @router.post(
     "/pipeline/start",
     summary="파이프라인 실행 시작",
