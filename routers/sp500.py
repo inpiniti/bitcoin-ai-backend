@@ -123,6 +123,34 @@ async def reset_models():
 
 # ── 파이프라인 (단계별 실행) ────────────────────────────────────
 
+@router.get(
+    "/pipeline/models",
+    summary="파이프라인용 모델 목록 조회",
+    description="사용 가능한 XGBoost와 RL 모델 목록을 반환합니다.",
+)
+async def get_pipeline_models():
+    from services.sp500_signal_service import load_active_model_ids
+
+    try:
+        xgb_id, rl_id = await load_active_model_ids()
+        return {
+            "active": {
+                "xgb_model_id": xgb_id,
+                "rl_model_id": rl_id,
+            },
+            "message": "미지정 시 위 활성 모델이 자동 사용됩니다"
+        }
+    except Exception as e:
+        logger.error(f"[Pipeline] 모델 목록 조회 실패: {e}")
+        return {
+            "active": {
+                "xgb_model_id": None,
+                "rl_model_id": None,
+            },
+            "error": str(e)
+        }
+
+
 @router.post(
     "/pipeline/start",
     summary="파이프라인 실행 시작",
