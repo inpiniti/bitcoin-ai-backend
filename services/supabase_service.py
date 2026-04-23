@@ -85,6 +85,35 @@ async def load_model(model_id: str) -> dict:
     }
 
 
+async def list_all_models(model_type: str | None = None) -> list[dict]:
+    """ml_models 테이블에서 모든 모델 조회
+    Args:
+        model_type: 필터 ("xgboost", "rl", None=모두)
+    Returns: [{"id": str, "model_type": str, "name": str, ...}, ...]
+    """
+    _check_config()
+
+    # Supabase REST API로 모델 목록 조회
+    url = f"{SUPABASE_URL}/rest/v1/ml_models?select=id,model_type,name,stage,created_at"
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=_headers())
+
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise Exception(f"Supabase 에러 ({resp.status_code}): {resp.text}")
+
+    models = resp.json()
+
+    # 타입으로 필터링
+    if model_type:
+        models = [m for m in models if m.get("model_type", "").lower() == model_type.lower()]
+
+    # 최신 순 정렬
+    models.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    return models
+
+
 async def save_model(model_data: dict) -> str:
     """ml_models 테이블에 모델 저장 후 생성된 id 반환"""
     _check_config()

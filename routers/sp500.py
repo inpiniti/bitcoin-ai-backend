@@ -130,15 +130,23 @@ async def reset_models():
 )
 async def get_pipeline_models():
     from services.sp500_signal_service import load_active_model_ids
+    from services.supabase_service import list_all_models
 
     try:
-        xgb_id, rl_id = await load_active_model_ids()
+        # 활성 모델 ID
+        active_xgb, active_rl = await load_active_model_ids()
+
+        # 전체 모델 목록
+        xgb_models = await list_all_models("xgboost")
+        rl_models = await list_all_models("rl")
+
         return {
             "active": {
-                "xgb_model_id": xgb_id,
-                "rl_model_id": rl_id,
+                "xgb_model_id": active_xgb,
+                "rl_model_id": active_rl,
             },
-            "message": "미지정 시 위 활성 모델이 자동 사용됩니다"
+            "xgboost_models": [{"id": m["id"], "name": m.get("name", m["id"])} for m in xgb_models],
+            "rl_models": [{"id": m["id"], "name": m.get("name", m["id"])} for m in rl_models],
         }
     except Exception as e:
         logger.error(f"[Pipeline] 모델 목록 조회 실패: {e}")
@@ -147,6 +155,8 @@ async def get_pipeline_models():
                 "xgb_model_id": None,
                 "rl_model_id": None,
             },
+            "xgboost_models": [],
+            "rl_models": [],
             "error": str(e)
         }
 
