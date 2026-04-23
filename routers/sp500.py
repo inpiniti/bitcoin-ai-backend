@@ -136,17 +136,30 @@ async def get_pipeline_models():
         # 활성 모델 ID
         active_xgb, active_rl = await load_active_model_ids()
 
-        # 전체 모델 목록
-        xgb_models = await list_all_models("xgboost")
-        rl_models = await list_all_models("rl")
+        # 전체 모델 목록 조회
+        all_models = await list_all_models()
+
+        # 모델 이름으로 타입 판단
+        xgb_models = []
+        rl_models = []
+
+        for m in all_models:
+            model_id = m.get("id", "")
+            model_name = m.get("name", model_id)
+
+            # 이름 기반으로 모델 타입 판단
+            if any(x in model_name.upper() for x in ["XGB_", "XGB-", "USALL"]):
+                xgb_models.append({"id": model_id, "name": model_name})
+            elif any(x in model_name.upper() for x in ["RL_", "RL-", "PPO"]):
+                rl_models.append({"id": model_id, "name": model_name})
 
         return {
             "active": {
                 "xgb_model_id": active_xgb,
                 "rl_model_id": active_rl,
             },
-            "xgboost_models": [{"id": m["id"], "name": m.get("name", m["id"])} for m in xgb_models],
-            "rl_models": [{"id": m["id"], "name": m.get("name", m["id"])} for m in rl_models],
+            "xgboost_models": xgb_models,
+            "rl_models": rl_models,
         }
     except Exception as e:
         logger.error(f"[Pipeline] 모델 목록 조회 실패: {e}")
