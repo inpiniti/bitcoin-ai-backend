@@ -61,42 +61,43 @@ def _load_model():
 
             logger.info(f"[TimesFM] 모델 로드 중: {ModelClass.__name__} (첫 실행 시 HuggingFace 다운로드 발생)...")
 
-            # from_pretrained의 proxies 인자 오류를 피하기 위해 저수준 로드
+            # [Patch] proxies 인자 호환성 문제 해결을 위한 패치
+            # huggingface_hub와 timesfm 2.5 간의 시그니처 불일치로 인해 __init__에 proxies가 전달되는 문제 대응
+            if hasattr(ModelClass, '__init__'):
+                import functools
+                original_init = ModelClass.__init__
+                if not hasattr(original_init, '_is_proxies_patched'):
+                    @functools.wraps(original_init)
+                    def patched_init(self, *args, **kwargs):
+                        # proxies 인자가 있으면 제거
+                        kwargs.pop('proxies', None)
+                        return original_init(self, *args, **kwargs)
+                    patched_init._is_proxies_patched = True
+                    ModelClass.__init__ = patched_init
+                    logger.info(f"[TimesFM] {ModelClass.__name__}.__init__ patched to ignore 'proxies'")
+
+            # from_pretrained 로드 시도
             if hasattr(ModelClass, 'from_pretrained'):
                 try:
-                    # cache_dir을 명시해서 proxies 전달 우회 시도
-                    from huggingface_hub import snapshot_download
-                    import os
-                    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-                    model_dir = snapshot_download(
-                        "google/timesfm-2.5-200m-pytorch",
-                        cache_dir=cache_dir,
-                        local_files_only=False,
-                    )
-                    logger.info(f"[TimesFM] 모델 파일 다운로드 완료: {model_dir}")
-                    # 다운로드한 경로에서 직접 로드 (proxies=None 명시)
-                    _model = ModelClass.from_pretrained(model_dir, proxies=None)
+                    # 1. 표준 로드 시도 (패치된 __init__ 덕분에 proxies 관련 TypeError 발생 안 함)
+                    _model = ModelClass.from_pretrained("google/timesfm-2.5-200m-pytorch")
                 except Exception as e:
-                    logger.warning(f"[TimesFM] snapshot_download 로드 실패, proxies=None 로드 시도: {e}")
+                    logger.warning(f"[TimesFM] 기본 로드 실패, snapshot_download 시도: {e}")
                     try:
-                        # 두 번째 시도: proxies=None 명시
-                        _model = ModelClass.from_pretrained(
+                        # 2. 명시적 다운로드 후 로컬 로드
+                        from huggingface_hub import snapshot_download
+                        import os
+                        cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+                        model_dir = snapshot_download(
                             "google/timesfm-2.5-200m-pytorch",
-                            proxies=None,
+                            cache_dir=cache_dir,
+                            local_files_only=False,
                         )
-                    except TypeError as te:
-                        if 'proxies' in str(te):
-                            logger.warning(f"[TimesFM] proxies 인자 오류 감지, 오프라인 모드 시도")
-                            try:
-                                # 세 번째 시도: 오프라인 모드
-                                import os
-                                os.environ['HF_HUB_OFFLINE'] = 'true'
-                                _model = ModelClass.from_pretrained("google/timesfm-2.5-200m-pytorch")
-                            except Exception as offline_err:
-                                logger.warning(f"[TimesFM] 오프라인 모드도 실패: {offline_err}")
-                                raise ImportError("TimesFM_2p5_200M_torch을 로드할 수 없습니다 (proxies 호환성 문제)")
-                        else:
-                            raise
+                        logger.info(f"[TimesFM] 모델 파일 다운로드 완료: {model_dir}")
+                        _model = ModelClass.from_pretrained(model_dir)
+                    except Exception as e2:
+                        logger.error(f"[TimesFM] 모든 from_pretrained 시도 실패: {e2}")
+                        raise e2
             else:
                 # 구버전 API (TimesFm 클래스)
                 _model = ModelClass(
