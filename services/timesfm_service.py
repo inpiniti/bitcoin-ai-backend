@@ -166,8 +166,8 @@ def predict_direction(closes: list[float]) -> str | None:
 
         # 신버전 API (TimesFM_2p5_200M_torch.from_pretrained 방식)
         # forecast 결과는 [forecast_tensor, full_output_tensor] 형태로 반환됨
-        # TimesFM_2p5는 freq 인자를 받지 않음
-        forecast_results = model.forecast(inputs=[context])
+        # TimesFM_2p5는 horizon 인자를 필수로 받음 (1일 앞 예측)
+        forecast_results = model.forecast(inputs=[context], horizon=1)
         if isinstance(forecast_results, (list, tuple)):
             forecast_values = forecast_results[0]
             forecast_price = float(forecast_values[0, 0])

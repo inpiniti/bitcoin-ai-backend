@@ -184,7 +184,16 @@ async def predict(
     logger.info(f"[XGB:Predict] 모델 로드: {model_id}")
     model_record = await supabase_service.load_model(model_id)
     model_json = model_record["model_json"]
-    model_stage = model_record.get("stage", 6)  # 기존 모델은 기본 stage 6
+
+    # Stage 결정: feature_count 우선, 없으면 stage, 최후 기본값 6
+    expected_feature_count = model_record.get("feature_count")
+    if expected_feature_count:
+        # feature_count로부터 stage 역추론
+        feature_to_stage = {4: 4, 7: 6, 10: 7}  # 각 stage별 피처 개수 매핑
+        model_stage = feature_to_stage.get(expected_feature_count, 6)
+        logger.info(f"[XGB:Predict] feature_count={expected_feature_count}에서 stage={model_stage} 계산")
+    else:
+        model_stage = model_record.get("stage", 6)
 
     # bytearray로 직접 로드 (임시 파일 불필요)
     model_bytes = json.dumps(model_json).encode("utf-8")

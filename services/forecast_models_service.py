@@ -155,9 +155,10 @@ def _predict_moirai_sync(closes: list[float]) -> str | None:
             past_values = torch.cat([padding, past_values])
 
         past_values = past_values.unsqueeze(0).unsqueeze(-1)  # (1, 64, 1)
-        past_observed = torch.ones_like(past_values, dtype=torch.bool)
+        # past_observed는 (batch, time) shape = (1, 64)
+        past_observed = torch.ones((past_values.shape[0], past_values.shape[1]), dtype=torch.bool)
         # 패딩된 부분은 is_pad=True로 표시
-        past_is_pad = torch.zeros(past_values.shape[:-1], dtype=torch.bool)
+        past_is_pad = torch.zeros((past_values.shape[0], past_values.shape[1]), dtype=torch.bool)
         if pad_len > 0:
             past_is_pad[0, :pad_len] = True
 
