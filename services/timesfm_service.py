@@ -61,20 +61,35 @@ def _load_model():
 
             logger.info(f"[TimesFM] 모델 로드 중: {ModelClass.__name__} (첫 실행 시 HuggingFace 다운로드 발생)...")
 
-            # [Patch] proxies 인자 호환성 문제 해결을 위한 패치
-            # huggingface_hub와 timesfm 2.5 간의 시그니처 불일치로 인해 __init__에 proxies가 전달되는 문제 대응
+            # [Patch] huggingface_hub 호환성 문제 해결
+            # huggingface_hub와 timesfm 2.5 간의 시그니처 불일치로 인해 __init__에 원치 않는 인자들이 전달되는 문제 대응
             if hasattr(ModelClass, '__init__'):
                 import functools
+                import inspect
                 original_init = ModelClass.__init__
-                if not hasattr(original_init, '_is_proxies_patched'):
+                if not hasattr(original_init, '_is_huggingface_patched'):
+                    # TimesFM.__init__이 실제로 받는 파라미터 검사
+                    try:
+                        sig = inspect.signature(original_init)
+                        valid_params = set(sig.parameters.keys())
+                    except Exception:
+                        # 시그니처 검사 실패 시 알려진 불호환 인자 필터링
+                        valid_params = None
+
                     @functools.wraps(original_init)
                     def patched_init(self, *args, **kwargs):
-                        # proxies 인자가 있으면 제거
-                        kwargs.pop('proxies', None)
+                        if valid_params is not None:
+                            # 동적으로 TimesFM이 받지 않는 인자 제거
+                            kwargs = {k: v for k, v in kwargs.items()
+                                    if k in valid_params or 'kwargs' in str(sig.parameters.values())}
+                        else:
+                            # 폴백: 알려진 호환되지 않는 인자 제거
+                            kwargs.pop('proxies', None)
+                            kwargs.pop('resume_download', None)
                         return original_init(self, *args, **kwargs)
-                    patched_init._is_proxies_patched = True
+                    patched_init._is_huggingface_patched = True
                     ModelClass.__init__ = patched_init
-                    logger.info(f"[TimesFM] {ModelClass.__name__}.__init__ patched to ignore 'proxies'")
+                    logger.info(f"[TimesFM] {ModelClass.__name__}.__init__ patched for huggingface_hub compatibility")
 
             # from_pretrained 로드 시도
             if hasattr(ModelClass, 'from_pretrained'):
