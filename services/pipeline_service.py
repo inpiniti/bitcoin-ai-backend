@@ -28,9 +28,11 @@ _pipeline_runs = {}
 
 class PipelineRun:
     """파이프라인 실행 추적"""
-    def __init__(self, run_id: str, ticker: str = "AAPL"):
+    def __init__(self, run_id: str, ticker: str = "AAPL", xgb_model_id: str | None = None, rl_model_id: str | None = None):
         self.run_id = run_id
         self.ticker = ticker
+        self.xgb_model_id = xgb_model_id
+        self.rl_model_id = rl_model_id
         self.steps = {step: {"status": "pending", "result": None, "error": None, "timestamp": None}
                       for step in PIPELINE_STEPS}
         self.created_at = datetime.utcnow()
@@ -70,13 +72,13 @@ class PipelineRun:
             logger.info(f"[Pipeline:{self.run_id}] {step} → {status}")
 
 
-def create_run(ticker: str = "AAPL") -> PipelineRun:
+def create_run(ticker: str = "AAPL", xgb_model_id: str | None = None, rl_model_id: str | None = None) -> PipelineRun:
     """새로운 파이프라인 실행 생성"""
     import uuid
     run_id = str(uuid.uuid4())[:8]
-    run = PipelineRun(run_id, ticker)
+    run = PipelineRun(run_id, ticker, xgb_model_id, rl_model_id)
     _pipeline_runs[run_id] = run
-    logger.info(f"[Pipeline] New run: {run_id} ({ticker})")
+    logger.info(f"[Pipeline] New run: {run_id} ({ticker}, xgb={xgb_model_id}, rl={rl_model_id})")
     return run
 
 
@@ -153,7 +155,10 @@ async def execute_xgboost(run: PipelineRun) -> dict:
             from services.sp500_signal_service import load_active_model_ids
             from services.xgb_service import predict
 
-            xgb_model_id, _ = await load_active_model_ids()
+            # 파이프라인에서 지정한 모델 ID 또는 활성 모델 사용
+            xgb_model_id = run.xgb_model_id
+            if not xgb_model_id:
+                xgb_model_id, _ = await load_active_model_ids()
 
             if not xgb_model_id:
                 logger.warning("[Pipeline] XGBoost 모델 ID 없음, 더미 예측 사용")
@@ -213,7 +218,10 @@ async def execute_rl(run: PipelineRun) -> dict:
             from services.sp500_signal_service import load_active_model_ids
             from services.rl_service import predict_rl
 
-            _, rl_model_id = await load_active_model_ids()
+            # 파이프라인에서 지정한 모델 ID 또는 활성 모델 사용
+            rl_model_id = run.rl_model_id
+            if not rl_model_id:
+                _, rl_model_id = await load_active_model_ids()
 
             if rl_model_id:
                 rl_result = await predict_rl(

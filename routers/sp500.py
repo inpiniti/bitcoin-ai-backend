@@ -126,12 +126,16 @@ async def reset_models():
 @router.post(
     "/pipeline/start",
     summary="파이프라인 실행 시작",
-    description="새로운 파이프라인 실행을 생성합니다.",
+    description="새로운 파이프라인 실행을 생성합니다. 선택적으로 XGBoost와 RL 모델 ID를 지정할 수 있습니다.",
 )
-async def start_pipeline(ticker: str = "AAPL"):
+async def start_pipeline(
+    ticker: str = Query("AAPL", description="분석 대상 종목 (기본: AAPL)"),
+    xgb_model_id: str | None = Query(None, description="XGBoost 모델 ID (미지정 시 활성 모델 사용)"),
+    rl_model_id: str | None = Query(None, description="RL 모델 ID (미지정 시 활성 모델 사용)"),
+):
     from services import pipeline_service
-    run = pipeline_service.create_run(ticker)
-    return {"run_id": run.run_id, "status": "created"}
+    run = pipeline_service.create_run(ticker, xgb_model_id, rl_model_id)
+    return {"run_id": run.run_id, "status": "created", "xgb_model_id": xgb_model_id, "rl_model_id": rl_model_id}
 
 
 @router.get(
