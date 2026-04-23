@@ -169,6 +169,20 @@ async def predict(
     if len(input_data.shape) == 1:
         input_data = input_data.reshape(1, -1)
 
+    # 피처 개수 검증
+    expected_features = model_record.get("feature_count", -1)
+    actual_features = input_data.shape[1]
+    if expected_features > 0 and actual_features != expected_features:
+        logger.error(
+            f"[XGB:Predict] 피처 개수 불일치 (ticker={ticker}): "
+            f"모델이 기대하는 피처={expected_features}개, 실제 피처={actual_features}개. "
+            f"model_stage={model_stage}, 데이터={len(features)}행"
+        )
+        raise ValueError(
+            f"Feature count mismatch: expected {expected_features}, got {actual_features}. "
+            f"데이터 수집/전처리 과정에서 피처가 손실되었을 수 있습니다."
+        )
+
     dmatrix = xgb.DMatrix(input_data)
     probs   = booster.predict(dmatrix)
 

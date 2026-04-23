@@ -93,9 +93,11 @@ def _load_moirai():
 def _predict_chronos_sync(closes: list[float]) -> str | None:
     """Chronos-2 동기 예측 (executor에서 실행)."""
     if len(closes) < 32:
+        logger.debug(f"[Chronos] 데이터 부족: {len(closes)}개 (최소 32개 필요)")
         return None
     pipeline = _load_chronos()
     if pipeline is None:
+        logger.warning(f"[Chronos] 모델 로드 실패 또는 미시도 (attempted={_chronos_attempted})")
         return None
     try:
         import torch
@@ -114,24 +116,27 @@ def _predict_chronos_sync(closes: list[float]) -> str | None:
         forecast_price = float(quantile_forecasts[0, 0, 0])
         current_price = float(closes[-1])
         if current_price <= 0:
+            logger.warning(f"[Chronos] 현재가 유효하지 않음: {current_price}")
             return None
         return "up" if forecast_price > current_price else "down"
     except Exception as exc:
-        logger.exception(f"[Chronos] 예측 오류: {exc}")
-        return None
+        logger.exception(f"[Chronos] 예측 오류 (데이터: {len(closes)}개, shape={torch.tensor(closes[-64:]).shape if 'torch' in globals() else 'N/A'}): {exc}")
 
 
 def _predict_moirai_sync(closes: list[float]) -> str | None:
     """Moirai 동기 예측 (executor에서 실행)."""
     if len(closes) < 32:
+        logger.debug(f"[Moirai] 데이터 부족: {len(closes)}개 (최소 32개 필요)")
         return None
     model = _load_moirai()
     if model is None:
+        logger.warning(f"[Moirai] 모델 로드 실패 또는 미시도 (attempted={_moirai_attempted})")
         return None
     try:
         import torch
         current_price = float(closes[-1])
         if current_price <= 0:
+            logger.warning(f"[Moirai] 현재가 유효하지 않음: {current_price}")
             return None
 
         # Moirai context_len: 모델은 64 고정이지만, 입력 데이터 길이가 불일치하면 실패
@@ -159,7 +164,7 @@ def _predict_moirai_sync(closes: list[float]) -> str | None:
         forecast_price = float(future_values.median())
         return "up" if forecast_price > current_price else "down"
     except Exception as exc:
-        logger.exception(f"[Moirai] 예측 오류: {exc}")
+        logger.exception(f"[Moirai] 예측 오류 (데이터: {len(closes)}개): {exc}")
         return None
 
 

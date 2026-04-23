@@ -151,10 +151,12 @@ def predict_direction(closes: list[float]) -> str | None:
         None   - 예측 불가 (데이터 부족 또는 모델 로드 실패)
     """
     if len(closes) < 32:
+        logger.debug(f"[TimesFM] 데이터 부족: {len(closes)}개 (최소 32개 필요)")
         return None
 
     model = _load_model()
     if model is None:
+        logger.warning(f"[TimesFM] 모델 로드 실패 또는 미시도. 상태: {get_load_status()}")
         return None
 
     try:
@@ -173,10 +175,10 @@ def predict_direction(closes: list[float]) -> str | None:
             forecast_price = float(forecast_results[0][0])
 
         if current_price <= 0:
+            logger.warning(f"[TimesFM] 현재가 유효하지 않음: {current_price}")
             return None
 
         return "up" if forecast_price > current_price else "down"
 
     except Exception as exc:
-        logger.exception(f"[TimesFM] 예측 중 오류: {exc}")
-        return None
+        logger.exception(f"[TimesFM] 예측 중 오류 (데이터: {len(closes)}개): {exc}")

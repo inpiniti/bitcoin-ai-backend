@@ -8,6 +8,7 @@ XGBoost, RL, TimesFM, Chronos-2, Moirai 예측을 병렬로 실행합니다.
 """
 import asyncio
 import logging
+import traceback
 from typing import Optional
 
 logger = logging.getLogger("sp500_signal_service")
@@ -41,7 +42,7 @@ async def _get_xgb_prediction(ticker: str, model_id: str | None, closes: list[fl
             return round(prob, 3), model_id
         return None, None
     except Exception as e:
-        logger.warning(f"[Signal] XGBoost 예측 실패 ({ticker}): {e}")
+        logger.error(f"[Signal] XGBoost 예측 실패 ({ticker}): {str(e)}\n{traceback.format_exc()}")
         return None, None
 
 
@@ -55,7 +56,7 @@ async def _get_rl_prediction(ticker: str, model_id: str | None) -> tuple[str | N
         signal = result.get("latest_signal", "HOLD")
         return signal, model_id
     except Exception as e:
-        logger.warning(f"[Signal] RL 예측 실패 ({ticker}): {e}")
+        logger.error(f"[Signal] RL 예측 실패 ({ticker}): {str(e)}\n{traceback.format_exc()}")
         return None, None
 
 
@@ -66,7 +67,7 @@ async def _get_timesfm_prediction(closes: list[float]) -> str | None:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, timesfm_service.predict_direction, closes)
     except Exception as e:
-        logger.warning(f"[Signal] TimesFM 예측 실패: {e}")
+        logger.error(f"[Signal] TimesFM 예측 실패 (데이터: {len(closes)}개): {str(e)}\n{traceback.format_exc()}")
         return None
 
 
@@ -76,7 +77,7 @@ async def _get_chronos_prediction(closes: list[float]) -> str | None:
         from services.forecast_models_service import predict_direction_chronos
         return await predict_direction_chronos(closes)
     except Exception as e:
-        logger.warning(f"[Signal] Chronos 예측 실패: {e}")
+        logger.error(f"[Signal] Chronos 예측 실패 (데이터: {len(closes)}개): {str(e)}\n{traceback.format_exc()}")
         return None
 
 
@@ -86,7 +87,7 @@ async def _get_moirai_prediction(closes: list[float]) -> str | None:
         from services.forecast_models_service import predict_direction_moirai
         return await predict_direction_moirai(closes)
     except Exception as e:
-        logger.warning(f"[Signal] Moirai 예측 실패: {e}")
+        logger.error(f"[Signal] Moirai 예측 실패 (데이터: {len(closes)}개): {str(e)}\n{traceback.format_exc()}")
         return None
 
 
