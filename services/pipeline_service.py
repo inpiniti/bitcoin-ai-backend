@@ -166,8 +166,14 @@ async def execute_xgboost(run: PipelineRun) -> dict:
         # 모델의 feature_count를 읽어서 필요한 stage 결정
         model_record = await load_model(xgb_model_id)
         feature_count = model_record.get("feature_count")
-        model_stage = get_stage_from_feature_count(feature_count, default_stage=6)
-        logger.info(f"[Pipeline:{run.run_id}] 모델 feature_count={feature_count}, stage={model_stage}")
+        model_stage = model_record.get("stage", 6)  # feature_count 없으면 저장된 stage 사용
+
+        if feature_count:
+            # feature_count가 있으면 그것으로 stage 역추론
+            model_stage = get_stage_from_feature_count(feature_count, default_stage=model_stage)
+            logger.info(f"[Pipeline:{run.run_id}] 모델 feature_count={feature_count}에서 stage={model_stage} 역추론")
+        else:
+            logger.info(f"[Pipeline:{run.run_id}] 모델 feature_count 없음, 저장된 stage={model_stage} 사용")
 
         # 모델에 맞는 stage로 피처 추출
         features, actual_stage = await extract_features_for_prediction(
