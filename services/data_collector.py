@@ -523,8 +523,8 @@ async def collect_and_train_data(
             # 종목별 달성 가능한 stage로 학습 (신생 종목 자동 조정)
             ticker_stage = min(stage, get_max_achievable_stage(len(candles)))
             feats, labs = process_stock_data_for_ml(candles, ticker_stage)
-            # 피처 개수가 다른 종목 데이터는 혼합 불가 → stage 맞는 것만 사용
-            if feats and len(feats[0]) == stage + 1:  # consecutiveDays + stage개 lookback
+            # 피처 개수가 요청된 stage와 일치하는 데이터만 수집 (모든 샘플이 같은 feature count 필요)
+            if feats and len(feats[0]) == stage + 1:
                 all_features.extend(feats)
                 all_labels.extend(labs)
 
