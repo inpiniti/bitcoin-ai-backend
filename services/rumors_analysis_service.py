@@ -59,9 +59,9 @@ async def analyze_sentiment(rumors_data: dict) -> dict:
 
     Args:
         rumors_data: {
-            "reddit": [...],
-            "stocktwits": [...],
-            "twitter": [...]
+            "reddit": {"data": [...], "error": "..."},
+            "stocktwits": {"data": [...], "error": "..."},
+            "twitter": {"data": [...], "error": "..."}
         }
 
     Returns:
@@ -69,16 +69,27 @@ async def analyze_sentiment(rumors_data: dict) -> dict:
             "sentiment": "positive" | "negative" | "neutral",
             "confidence": 0.0~1.0,
             "reddit_sentiment": "...",
+            "reddit_error": "...",
             "stocktwits_sentiment": "...",
-            "twitter_sentiment": "..."
+            "stocktwits_error": "...",
+            "twitter_sentiment": "...",
+            "twitter_error": "..."
         }
     """
     logger.info("[Sentiment] 감정 분석 시작...")
 
     # 각 플랫폼별 감정 분석
-    def _analyze_platform(platform_data: list) -> tuple[str, float]:
-        if not platform_data:
-            return "neutral", 0.5
+    def _analyze_platform(platform_info: dict) -> tuple[str, float, str | None]:
+        """Returns: (sentiment, confidence, error)"""
+        if isinstance(platform_info, dict):
+            platform_data = platform_info.get("data", [])
+            platform_error = platform_info.get("error")
+        else:
+            platform_data = platform_info if isinstance(platform_info, list) else []
+            platform_error = None
+
+        if not platform_data or platform_error:
+            return "neutral", 0.5, platform_error
 
         sentiments = []
         confidences = []
@@ -100,30 +111,29 @@ async def analyze_sentiment(rumors_data: dict) -> dict:
                 confidences.append(confidence)
 
         if not sentiments:
-            return "neutral", 0.5
+            return "neutral", 0.5, platform_error
 
         # 다수결로 최종 감정 결정
         pos_count = sentiments.count("positive")
         neg_count = sentiments.count("negative")
         avg_confidence = sum(confidences) / len(confidences)
 
-        if pos_count > neg_count:
-            return "positive", avg_confidence
-        elif neg_count > pos_count:
-            return "negative", avg_confidence
-        else:
-            return "neutral", avg_confidence
+        sentiment = "positive" if pos_count > neg_count else "negative" if neg_count > pos_count else "neutral"
+        return sentiment, avg_confidence, None
 
-    reddit_sentiment, reddit_conf = _analyze_platform(rumors_data.get("reddit", []))
-    stocktwits_sentiment, stocktwits_conf = _analyze_platform(rumors_data.get("stocktwits", []))
-    twitter_sentiment, twitter_conf = _analyze_platform(rumors_data.get("twitter", []))
+    reddit_sentiment, reddit_conf, reddit_error = _analyze_platform(rumors_data.get("reddit", {}))
+    stocktwits_sentiment, stocktwits_conf, stocktwits_error = _analyze_platform(rumors_data.get("stocktwits", {}))
+    twitter_sentiment, twitter_conf, twitter_error = _analyze_platform(rumors_data.get("twitter", {}))
 
-    # 전체 감정 (가중평균)
+    # 전체 감정 (데이터가 있는 플랫폼만 고려)
     all_sentiments = []
     all_confidences = []
 
-    for sent, conf in [(reddit_sentiment, reddit_conf), (stocktwits_sentiment, stocktwits_conf), (twitter_sentiment, twitter_conf)]:
-        if sent != "neutral":
+    for sent, conf, err in [(reddit_sentiment, reddit_conf, reddit_error),
+                             (stocktwits_sentiment, stocktwits_conf, stocktwits_error),
+                             (twitter_sentiment, twitter_conf, twitter_error)]:
+        # 에러가 없는 플랫폼의 데이터만 사용
+        if err is None and sent != "neutral":
             all_sentiments.append(sent)
             all_confidences.append(conf)
 
@@ -140,8 +150,11 @@ async def analyze_sentiment(rumors_data: dict) -> dict:
         "sentiment": overall_sentiment,
         "confidence": round(overall_confidence, 3),
         "reddit_sentiment": reddit_sentiment,
+        "reddit_error": reddit_error,
         "stocktwits_sentiment": stocktwits_sentiment,
+        "stocktwits_error": stocktwits_error,
         "twitter_sentiment": twitter_sentiment,
+        "twitter_error": twitter_error,
     }
 
     logger.info(f"[Sentiment] 감정 분석 완료: {overall_sentiment} (신뢰도 {overall_confidence:.2f})")

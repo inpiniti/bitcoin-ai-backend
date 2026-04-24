@@ -8,8 +8,11 @@ import logging
 logger = logging.getLogger("rumors_service")
 
 
-async def _collect_reddit(ticker: str) -> list[dict]:
-    """Reddit에서 종목 관련 글 수집 (오늘 글만)"""
+async def _collect_reddit(ticker: str) -> tuple[list[dict], str | None]:
+    """
+    Reddit에서 종목 관련 글 수집 (오늘 글만).
+    Returns: (data, error_message)
+    """
     try:
         import os
         import praw
@@ -20,8 +23,9 @@ async def _collect_reddit(ticker: str) -> list[dict]:
         client_secret = os.getenv("REDDIT_CLIENT_SECRET")
 
         if not client_id or not client_secret:
-            logger.info(f"[Rumors:Reddit] 자격증명 없음 (REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET 환경변수 필요)")
-            return []
+            error_msg = "환경변수 필요: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET"
+            logger.info(f"[Rumors:Reddit] {error_msg}")
+            return [], error_msg
 
         # Reddit API 초기화
         try:
@@ -31,8 +35,9 @@ async def _collect_reddit(ticker: str) -> list[dict]:
                 user_agent="bitcoin-ai-backend/1.0"
             )
         except Exception as e:
-            logger.warning(f"[Rumors:Reddit] API 인증 실패: {e}")
-            return []
+            error_msg = f"Reddit API 인증 실패: {str(e)}"
+            logger.warning(f"[Rumors:Reddit] {error_msg}")
+            return [], error_msg
 
         # 오늘 시작 시간
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -61,17 +66,22 @@ async def _collect_reddit(ticker: str) -> list[dict]:
                 continue
 
         logger.info(f"[Rumors:Reddit] {ticker}: 오늘 글 {len(results)}개 수집")
-        return results
+        return results, None
     except ImportError:
-        logger.debug("[Rumors:Reddit] PRAW 라이브러리 없음 (pip install praw 필요)")
-        return []
+        error_msg = "라이브러리 필요: pip install praw"
+        logger.debug(f"[Rumors:Reddit] {error_msg}")
+        return [], error_msg
     except Exception as e:
-        logger.warning(f"[Rumors:Reddit] 수집 실패: {e}")
-        return []
+        error_msg = f"예상치 못한 오류: {str(e)}"
+        logger.warning(f"[Rumors:Reddit] {error_msg}")
+        return [], error_msg
 
 
-async def _collect_stocktwits(ticker: str) -> list[dict]:
-    """StockTwits에서 종목 관련 메시지 수집 (오늘 메시지만)"""
+async def _collect_stocktwits(ticker: str) -> tuple[list[dict], str | None]:
+    """
+    StockTwits에서 종목 관련 메시지 수집 (오늘 메시지만).
+    Returns: (data, error_message)
+    """
     try:
         import httpx
         from datetime import datetime, timezone, timedelta
@@ -147,10 +157,11 @@ async def _collect_stocktwits(ticker: str) -> list[dict]:
                     continue
 
             logger.info(f"[Rumors:StockTwits] {ticker}: 오늘 메시지 {len(results)}개 수집")
-            return results
+            return results, None
     except Exception as e:
-        logger.warning(f"[Rumors:StockTwits] 수집 실패: {e}")
-        return []
+        error_msg = f"StockTwits API 오류: {str(e)}"
+        logger.warning(f"[Rumors:StockTwits] {error_msg}")
+        return [], error_msg
 
 
 async def collect_rumors(ticker: str) -> dict:
@@ -162,31 +173,52 @@ async def collect_rumors(ticker: str) -> dict:
 
     Returns:
         {
-            "reddit": [...],        # Reddit API 자격증명 필요
-            "stocktwits": [...],    # 공개 API, 항상 작동
-            "twitter": [...]        # Twitter API v2 필요 (유료)
+            "reddit": {
+                "data": [...],
+                "error": "에러메시지 또는 null"
+            },
+            "stocktwits": {
+                "data": [...],
+                "error": "에러메시지 또는 null"
+            },
+            "twitter": {
+                "data": [],
+                "error": "에러메시지"
+            }
         }
 
     설정 방법:
-    - Reddit: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET 환경변수 필요
+    - Reddit: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET 환경변수 설정 필요
     - StockTwits: 자격증명 불필요 (공개 API)
     - Twitter: 유료 API 필요 (현재 미구현)
     """
     logger.info(f"[Rumors] {ticker} 오늘 소문 수집 시작...")
 
     # 병렬 수집
-    reddit_data = await _collect_reddit(ticker)
-    stocktwits_data = await _collect_stocktwits(ticker)
+    reddit_data, reddit_error = await _collect_reddit(ticker)
+    stocktwits_data, stocktwits_error = await _collect_stocktwits(ticker)
 
-    # Twitter는 API 제약이 있어서 일단 공백 (유료 API 필요, 현재 미구현)
-    twitter_data = []
+    # Twitter는 유료 API (현재 미구현)
+    twitter_error = "Twitter API v2는 유료 계정 필수 (Enterprise plan $100+/월)"
 
     result = {
-        "reddit": reddit_data,
-        "stocktwits": stocktwits_data,
-        "twitter": twitter_data,
+        "reddit": {
+            "data": reddit_data,
+            "error": reddit_error,
+            "count": len(reddit_data)
+        },
+        "stocktwits": {
+            "data": stocktwits_data,
+            "error": stocktwits_error,
+            "count": len(stocktwits_data)
+        },
+        "twitter": {
+            "data": [],
+            "error": twitter_error,
+            "count": 0
+        },
     }
 
-    total = sum(len(v) for v in result.values())
-    logger.info(f"[Rumors] {ticker} 오늘 소문 수집 완료: {total}개")
+    total = sum(r["count"] for r in result.values())
+    logger.info(f"[Rumors] {ticker} 오늘 소문 수집 완료: {total}개 (Reddit: {result['reddit']['error'] or '성공'}, StockTwits: {result['stocktwits']['error'] or '성공'}, Twitter: {twitter_error})")
     return result

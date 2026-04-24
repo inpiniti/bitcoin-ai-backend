@@ -378,16 +378,22 @@ async def execute_rumors(run: PipelineRun) -> dict:
         from services.rumors_service import collect_rumors
         rumors_data = await collect_rumors(run.ticker)
 
-        reddit_count = len(rumors_data.get("reddit", []))
-        stocktwits_count = len(rumors_data.get("stocktwits", []))
-        twitter_count = len(rumors_data.get("twitter", []))
+        reddit_count = len(rumors_data.get("reddit", {}).get("data", []))
+        reddit_error = rumors_data.get("reddit", {}).get("error")
+        stocktwits_count = len(rumors_data.get("stocktwits", {}).get("data", []))
+        stocktwits_error = rumors_data.get("stocktwits", {}).get("error")
+        twitter_count = len(rumors_data.get("twitter", {}).get("data", []))
+        twitter_error = rumors_data.get("twitter", {}).get("error")
 
         run.data["rumors"] = rumors_data
 
         result = {
             "reddit": reddit_count,
+            "reddit_error": reddit_error,
             "stocktwits": stocktwits_count,
+            "stocktwits_error": stocktwits_error,
             "twitter": twitter_count,
+            "twitter_error": twitter_error,
             "total": reddit_count + stocktwits_count + twitter_count
         }
         run.set_step_status("rumors", "completed", result)
