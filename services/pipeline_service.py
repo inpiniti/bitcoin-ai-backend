@@ -151,53 +151,36 @@ async def execute_xgboost(run: PipelineRun) -> dict:
     try:
         logger.info(f"[Pipeline:{run.run_id}] XGBoost 예측 중...")
 
-        try:
-            from services.sp500_signal_service import load_active_model_ids
-            from services.xgb_service import predict
+        from services.sp500_signal_service import load_active_model_ids
+        from services.xgb_service import predict
 
-            # 파이프라인에서 지정한 모델 ID 또는 활성 모델 사용
-            xgb_model_id = run.xgb_model_id
-            if not xgb_model_id:
-                xgb_model_id, _ = await load_active_model_ids()
+        # 파이프라인에서 지정한 모델 ID 또는 활성 모델 사용
+        xgb_model_id = run.xgb_model_id
+        if not xgb_model_id:
+            xgb_model_id, _ = await load_active_model_ids()
 
-            if not xgb_model_id:
-                logger.warning("[Pipeline] XGBoost 모델 ID 없음, 더미 예측 사용")
-                result = {
-                    "probability": 0.72,
-                    "prediction": 1,
-                    "confidence": 0.72
-                }
-            else:
-                xgb_result = await predict(
-                    model_id=xgb_model_id,
-                    features=None,
-                    dataset_id=None,
-                    ticker=run.ticker
-                )
-                predictions = xgb_result.get("predictions", [])
-                if predictions:
-                    latest = predictions[-1]
-                    prob = float(latest.get("probability", 0.5))
-                    pred = int(latest.get("prediction", 0))
-                    result = {
-                        "probability": round(prob, 3),
-                        "prediction": pred,
-                        "confidence": round(prob, 3),
-                        "signal": "BUY" if pred == 1 else "SELL"
-                    }
-                else:
-                    result = {
-                        "probability": 0.5,
-                        "prediction": 0,
-                        "confidence": 0.5
-                    }
-        except Exception as e:
-            logger.warning(f"[Pipeline] XGBoost 예측 오류: {e}, 더미 사용")
-            result = {
-                "probability": 0.55,
-                "prediction": 0,
-                "confidence": 0.55
-            }
+        if not xgb_model_id:
+            raise ValueError("활성 XGBoost 모델이 없습니다")
+
+        xgb_result = await predict(
+            model_id=xgb_model_id,
+            features=None,
+            dataset_id=None,
+            ticker=run.ticker
+        )
+        predictions = xgb_result.get("predictions", [])
+        if not predictions:
+            raise ValueError("XGBoost 예측 결과가 없습니다")
+
+        latest = predictions[-1]
+        prob = float(latest.get("probability", 0.5))
+        pred = int(latest.get("prediction", 0))
+        result = {
+            "probability": round(prob, 3),
+            "prediction": pred,
+            "confidence": round(prob, 3),
+            "signal": "BUY" if pred == 1 else "SELL"
+        }
 
         run.data["xgboost_result"] = result
         run.set_step_status("xgboost", "completed", result)
@@ -214,38 +197,31 @@ async def execute_rl(run: PipelineRun) -> dict:
     try:
         logger.info(f"[Pipeline:{run.run_id}] RL 모델 예측 중...")
 
-        try:
-            from services.sp500_signal_service import load_active_model_ids
-            from services.rl_service import predict_rl
+        from services.sp500_signal_service import load_active_model_ids
+        from services.rl_service import predict_rl
 
-            # 파이프라인에서 지정한 모델 ID 또는 활성 모델 사용
-            rl_model_id = run.rl_model_id
-            if not rl_model_id:
-                _, rl_model_id = await load_active_model_ids()
+        # 파이프라인에서 지정한 모델 ID 또는 활성 모델 사용
+        rl_model_id = run.rl_model_id
+        if not rl_model_id:
+            _, rl_model_id = await load_active_model_ids()
 
-            if rl_model_id:
-                rl_result = await predict_rl(
-                    model_id=rl_model_id,
-                    ticker=run.ticker
-                )
-                signals = rl_result.get("signals", [])
-                if signals:
-                    latest_signal = signals[-1]
-                    result = {
-                        "signal": latest_signal,
-                        "confidence": 0.65,
-                        "total_signals": len(signals)
-                    }
-                else:
-                    raise ValueError("RL 신호 없음")
-            else:
-                raise ValueError("RL 모델 ID 없음")
-        except Exception as e:
-            logger.warning(f"[Pipeline] RL 예측 오류: {e}, 더미 사용")
-            result = {
-                "signal": "BUY",
-                "confidence": 0.55
-            }
+        if not rl_model_id:
+            raise ValueError("활성 RL 모델이 없습니다")
+
+        rl_result = await predict_rl(
+            model_id=rl_model_id,
+            ticker=run.ticker
+        )
+        signals = rl_result.get("signals", [])
+        if not signals:
+            raise ValueError("RL 신호가 없습니다")
+
+        latest_signal = signals[-1]
+        result = {
+            "signal": latest_signal,
+            "confidence": 0.65,
+            "total_signals": len(signals)
+        }
 
         run.data["rl_result"] = result
         run.set_step_status("rl", "completed", result)
@@ -266,23 +242,16 @@ async def execute_timesfm(run: PipelineRun) -> dict:
 
         logger.info(f"[Pipeline:{run.run_id}] TimesFM 예측 중...")
 
-        try:
-            from services.timesfm_service import predict_direction
-            closes = [c["close"] for c in candles[-500:]]
-            direction = predict_direction(closes)
+        from services.timesfm_service import predict_direction
+        closes = [c["close"] for c in candles[-500:]]
+        direction = predict_direction(closes)
 
-            if direction is None:
-                raise ValueError("TimesFM 예측 실패")
-
-            confidence = 0.58
-        except Exception as e:
-            logger.warning(f"[Pipeline] TimesFM 오류: {e}, 더미 예측 사용")
-            direction = "up"
-            confidence = 0.50
+        if direction is None:
+            raise ValueError("TimesFM 예측 실패")
 
         result = {
             "direction": direction,
-            "confidence": round(float(confidence), 3)
+            "confidence": 0.58
         }
         run.data["timesfm_result"] = result
         run.set_step_status("timesfm", "completed", result)
@@ -303,23 +272,16 @@ async def execute_chronos(run: PipelineRun) -> dict:
 
         logger.info(f"[Pipeline:{run.run_id}] Chronos 예측 중...")
 
-        try:
-            from services.forecast_models_service import predict_direction_chronos
-            closes = [c["close"] for c in candles[-500:]]
-            direction = await predict_direction_chronos(closes)
+        from services.forecast_models_service import predict_direction_chronos
+        closes = [c["close"] for c in candles[-500:]]
+        direction = await predict_direction_chronos(closes)
 
-            if direction is None:
-                raise ValueError("Chronos 예측 실패")
-
-            confidence = 0.62
-        except Exception as e:
-            logger.warning(f"[Pipeline] Chronos 오류: {e}, 더미 예측 사용")
-            direction = "down"
-            confidence = 0.50
+        if direction is None:
+            raise ValueError("Chronos 예측 실패")
 
         result = {
             "direction": direction,
-            "confidence": round(float(confidence), 3)
+            "confidence": 0.62
         }
         run.data["chronos_result"] = result
         run.set_step_status("chronos", "completed", result)
@@ -340,23 +302,16 @@ async def execute_moirai(run: PipelineRun) -> dict:
 
         logger.info(f"[Pipeline:{run.run_id}] Moirai 예측 중...")
 
-        try:
-            from services.forecast_models_service import predict_direction_moirai
-            closes = [c["close"] for c in candles[-500:]]
-            direction = await predict_direction_moirai(closes)
+        from services.forecast_models_service import predict_direction_moirai
+        closes = [c["close"] for c in candles[-500:]]
+        direction = await predict_direction_moirai(closes)
 
-            if direction is None:
-                raise ValueError("Moirai 예측 실패")
-
-            confidence = 0.55
-        except Exception as e:
-            logger.warning(f"[Pipeline] Moirai 오류: {e}, 더미 예측 사용")
-            direction = "up"
-            confidence = 0.50
+        if direction is None:
+            raise ValueError("Moirai 예측 실패")
 
         result = {
             "direction": direction,
-            "confidence": round(float(confidence), 3)
+            "confidence": 0.55
         }
         run.data["moirai_result"] = result
         run.set_step_status("moirai", "completed", result)
@@ -373,23 +328,8 @@ async def execute_rumors(run: PipelineRun) -> dict:
     try:
         logger.info(f"[Pipeline:{run.run_id}] 소문 수집 중...")
 
-        rumors_data = {
-            "reddit": [],
-            "stocktwits": [],
-            "twitter": []
-        }
-
-        try:
-            from services.rumors_service import collect_rumors
-            rumors_data = await collect_rumors(run.ticker)
-        except (ImportError, ModuleNotFoundError):
-            logger.warning("[Pipeline] 소문 수집 서비스 불가능, 더미 데이터 사용")
-            # Dummy data for testing
-            rumors_data = {
-                "reddit": [{"text": "AAPL 강세", "score": 45}],
-                "stocktwits": [{"text": "좋은 실적 예상", "score": 120}],
-                "twitter": [{"text": "긍정적 뉴스", "score": 300}]
-            }
+        from services.rumors_service import collect_rumors
+        rumors_data = await collect_rumors(run.ticker)
 
         reddit_count = len(rumors_data.get("reddit", []))
         stocktwits_count = len(rumors_data.get("stocktwits", []))
@@ -421,37 +361,10 @@ async def execute_analyze_rumors(run: PipelineRun) -> dict:
 
         logger.info(f"[Pipeline:{run.run_id}] 소문 감정 분석 중...")
 
-        try:
-            from services.rumors_analysis_service import analyze_sentiment
-            sentiment_result = await analyze_sentiment(rumors_data)
-            sentiment = sentiment_result.get("sentiment", "neutral")
-            confidence = sentiment_result.get("confidence", 0.5)
-        except (ImportError, ModuleNotFoundError):
-            logger.warning("[Pipeline] 감정 분석 서비스 불가능, 휴리스틱 사용")
-            # Simple heuristic: count positive words
-            all_texts = " ".join([
-                r.get("text", "") for r in (
-                    rumors_data.get("reddit", []) +
-                    rumors_data.get("stocktwits", []) +
-                    rumors_data.get("twitter", [])
-                )
-            ]).lower()
-
-            positive_words = ["좋은", "강세", "긍정", "강함", "상승", "매수"]
-            negative_words = ["나쁜", "약세", "부정", "약함", "하락", "매도"]
-
-            positive_count = sum(1 for word in positive_words if word in all_texts)
-            negative_count = sum(1 for word in negative_words if word in all_texts)
-
-            if positive_count > negative_count:
-                sentiment = "bullish"
-                confidence = 0.60
-            elif negative_count > positive_count:
-                sentiment = "bearish"
-                confidence = 0.60
-            else:
-                sentiment = "neutral"
-                confidence = 0.50
+        from services.rumors_analysis_service import analyze_sentiment
+        sentiment_result = await analyze_sentiment(rumors_data)
+        sentiment = sentiment_result.get("sentiment", "neutral")
+        confidence = sentiment_result.get("confidence", 0.5)
 
         total_posts = (
             len(rumors_data.get("reddit", [])) +
