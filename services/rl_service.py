@@ -28,8 +28,14 @@ _ppo_cls = None
 def _get_ppo():
     global _ppo_cls
     if _ppo_cls is None:
-        from stable_baselines3 import PPO
-        _ppo_cls = PPO
+        try:
+            from stable_baselines3 import PPO
+            _ppo_cls = PPO
+        except ImportError as e:
+            if "numpy._core" in str(e):
+                logger.error(f"[RL] Numpy compatibility error: {e}. RL analysis unavailable.")
+                raise RuntimeError("RL 모듈을 로드할 수 없습니다. 시스템 관리자에게 문의하세요.") from e
+            raise
     return _ppo_cls
 
 

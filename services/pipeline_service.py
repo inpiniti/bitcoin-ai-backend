@@ -343,7 +343,13 @@ async def execute_moirai(run: PipelineRun) -> dict:
 
         logger.info(f"[Pipeline:{run.run_id}] Moirai 예측 중...")
 
-        from services.forecast_models_service import predict_direction_moirai
+        try:
+            from services.forecast_models_service import predict_direction_moirai
+        except ImportError as e:
+            error_msg = "Moirai 모듈이 설치되지 않았습니다. (uni2ts 의존성 문제)"
+            logger.warning(f"[Pipeline:{run.run_id}] {error_msg}: {e}")
+            raise ValueError(error_msg) from e
+
         closes = [c["close"] for c in candles[-500:]]
         direction = await predict_direction_moirai(closes)
 

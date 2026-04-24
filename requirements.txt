@@ -12,8 +12,8 @@ yt-dlp
 # ── Core ML Libraries (Versions pinned to avoid backtracking) ────
 torch>=2.0.0
 jax[cpu]>=0.4.0
-numpy>=2.0.0,<3.0.0
-pandas>=3.0.0
+numpy==1.26.4
+pandas>=2.0.0
 
 # ── TimesFM (Google) ─────────────────────────────
 timesfm @ git+https://github.com/google-research/timesfm.git
@@ -21,8 +21,9 @@ timesfm @ git+https://github.com/google-research/timesfm.git
 # ── Time-series Forecast Models ──────────────────
 # Amazon Chronos-2
 chronos-forecasting @ git+https://github.com/amazon-science/chronos-forecasting.git
-# Salesforce Moirai
-uni2ts @ git+https://github.com/SalesforceAIResearch/uni2ts.git
+# NOTE: Salesforce Moirai (uni2ts) requires numpy~=1.26.0 strictly,
+# causing conflicts. Commenting out to avoid dependency hell.
+# uni2ts @ git+https://github.com/SalesforceAIResearch/uni2ts.git
 einops
 
 # ── ML Algorithms & Tools ────────────────────────
