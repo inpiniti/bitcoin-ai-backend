@@ -11,7 +11,12 @@ _xgb = None
 _np = None
 
 # 각 stage별 기대 피처 개수 (feature_count → stage 역추론용)
-FEATURE_TO_STAGE = {4: 4, 7: 6, 10: 7}
+# Feature count = 1 (consecutive_days) + len(STAGE_LOOKBACKS[:stage])
+# So: stage 1 → 2 features, stage 2 → 3 features, ..., stage 11 → 12 features
+FEATURE_TO_STAGE = {
+    2: 1, 3: 2, 4: 3, 5: 4, 6: 5,
+    7: 6, 8: 7, 9: 8, 10: 9, 11: 10, 12: 11
+}
 
 def get_stage_from_feature_count(feature_count: int, default_stage: int = 6) -> int:
     """feature_count에서 stage를 역추론합니다."""

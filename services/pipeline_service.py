@@ -122,7 +122,7 @@ async def execute_preprocess(run: PipelineRun) -> dict:
 
         logger.info(f"[Pipeline:{run.run_id}] 데이터 전처리 중 ({run.ticker})...")
 
-        features, stage = await extract_features_for_prediction(run.ticker, days=2000, target_stage=6)
+        features, stage = await extract_features_for_prediction(run.ticker, days=2000, target_stage=7)
 
         if not features:
             raise ValueError("피처 추출 실패: 데이터 부족")
