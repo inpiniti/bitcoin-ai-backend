@@ -562,5 +562,5 @@ async def predict_rl(
         "latest_price":   latest.get("price", 0.0),
         "holding":        latest.get("holding", False),
         "holding_return": latest.get("holding_return", 0.0),
-        "predictions":    results[-60:],   # 최근 60일
+        "signals":        [r.get("signal", "HOLD") for r in results[-60:]],   # 최근 60일 신호
     }

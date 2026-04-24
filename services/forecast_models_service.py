@@ -125,9 +125,8 @@ def _predict_chronos_sync(closes: list[float]) -> str | None:
 
 def _predict_moirai_sync(closes: list[float]) -> str | None:
     """Moirai 동기 예측 (executor에서 실행)."""
-    if len(closes) < 32:
-        logger.debug(f"[Moirai] 데이터 부족: {len(closes)}개 (최소 32개 필요)")
-        return None
+    if len(closes) < 64:
+        logger.debug(f"[Moirai] 데이터 부족: {len(closes)}개 (모델은 64개 필요, padding으로 처리)")
     model = _load_moirai()
     if model is None:
         logger.warning(f"[Moirai] 모델 로드 실패 또는 미시도 (attempted={_moirai_attempted})")
@@ -139,28 +138,30 @@ def _predict_moirai_sync(closes: list[float]) -> str | None:
             logger.warning(f"[Moirai] 현재가 유효하지 않음: {current_price}")
             return None
 
-        # Moirai context_len: 모델은 64 고정이지만, 입력 데이터 길이가 불일치하면 실패
-        # → 정확히 64개 또는 그보다 적으면 padding, 많으면 최근 64개만 사용
-        context_len = min(64, len(closes))
-        past_values = torch.tensor(closes[-context_len:], dtype=torch.float32)
+        # Moirai는 정확히 64개의 context를 필요로 함
+        # 부족하면 첫 값으로 padding, 초과하면 최근 64개만 사용
+        context_len = len(closes)
+        if context_len > 64:
+            closes_for_pred = closes[-64:]
+        elif context_len == 64:
+            closes_for_pred = closes
+        else:
+            # padding: 첫 값을 반복해서 64개 만들기
+            pad_amount = 64 - context_len
+            closes_for_pred = [closes[0]] * pad_amount + closes
 
-        # Moirai가 기대하는 input shape 확인
-        # 일반적으로: (batch, time, features) = (1, 64, 1)
-        # 하지만 context_len < 64이면 (1, context_len, 1)
-        # → 모델이 strict하면 padding 필요
-        pad_len = 0
-        if context_len < 64:
-            pad_len = 64 - context_len
-            padding = torch.full((pad_len,), closes[0], dtype=torch.float32)
-            past_values = torch.cat([padding, past_values])
+        past_values = torch.tensor(closes_for_pred, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)  # (1, 64, 1)
 
-        past_values = past_values.unsqueeze(0).unsqueeze(-1)  # (1, 64, 1)
-        # past_observed는 (batch, time) shape = (1, 64)
+        # past_observed: (batch, time) = (1, 64) — 모두 True (observed)
         past_observed = torch.ones((past_values.shape[0], past_values.shape[1]), dtype=torch.bool)
-        # 패딩된 부분은 is_pad=True로 표시
+
+        # past_is_pad: padding된 부분 표시 (padding이 있는 경우만 True)
         past_is_pad = torch.zeros((past_values.shape[0], past_values.shape[1]), dtype=torch.bool)
-        if pad_len > 0:
-            past_is_pad[0, :pad_len] = True
+        if context_len < 64:
+            pad_amount = 64 - context_len
+            past_is_pad[0, :pad_amount] = True
+
+        logger.debug(f"[Moirai] 입력 shape: past_target={past_values.shape}, past_observed={past_observed.shape}, past_is_pad={past_is_pad.shape}")
 
         future_values, _, _ = model(
             past_target=past_values,

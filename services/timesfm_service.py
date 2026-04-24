@@ -129,6 +129,14 @@ def _load_model():
                     ),
                 )
 
+            # 모델이 compile 메서드를 가지고 있으면 호출 (일부 버전에서 필요)
+            if _model is not None and hasattr(_model, 'compile'):
+                try:
+                    _model.compile()
+                    logger.info("[TimesFM] 모델 compile() 완료")
+                except Exception as e:
+                    logger.warning(f"[TimesFM] 모델 compile() 실패 (선택적): {e}")
+
             logger.info("[TimesFM] 모델 로드 완료")
             _load_error = None
         except Exception as exc:
