@@ -10,10 +10,12 @@ httpx
 yt-dlp
 
 # ── Core ML Libraries (Versions pinned to avoid backtracking) ────
+# numpy 1.26.4는 uni2ts(~=1.26.0), timesfm(>=1.26.4), chronos(<3,>=1.21) 모두 만족
+# numpy 2.x 모델 pickle은 services/numpy_compat.py 에서 shim으로 처리
 torch>=2.0.0
 jax[cpu]>=0.4.0
 numpy==1.26.4
-pandas>=2.0.0
+pandas>=2.0.0,<3.0.0
 
 # ── TimesFM (Google) ─────────────────────────────
 timesfm @ git+https://github.com/google-research/timesfm.git
@@ -21,9 +23,8 @@ timesfm @ git+https://github.com/google-research/timesfm.git
 # ── Time-series Forecast Models ──────────────────
 # Amazon Chronos-2
 chronos-forecasting @ git+https://github.com/amazon-science/chronos-forecasting.git
-# NOTE: Salesforce Moirai (uni2ts) requires numpy~=1.26.0 strictly,
-# causing conflicts. Commenting out to avoid dependency hell.
-# uni2ts @ git+https://github.com/SalesforceAIResearch/uni2ts.git
+# Salesforce Moirai
+uni2ts @ git+https://github.com/SalesforceAIResearch/uni2ts.git
 einops
 
 # ── ML Algorithms & Tools ────────────────────────

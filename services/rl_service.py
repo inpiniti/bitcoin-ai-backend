@@ -12,6 +12,9 @@
     2. 종목 캔들 수집 → 피처 추출
     3. 날짜별 순서대로 PPO.predict() → BUY/HOLD/SELL 시퀀스 반환
 """
+# numpy 2.x로 저장된 모델을 numpy 1.x로 로드하기 위한 호환성 shim
+from services import numpy_compat  # noqa: F401
+
 import asyncio
 import base64
 import logging

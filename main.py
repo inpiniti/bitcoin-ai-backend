@@ -2,6 +2,9 @@
 bitcoin-ai-backend - FastAPI 기반 백엔드
 Motia(Node.js) 제거, 순수 Python + FastAPI + uvicorn 구성
 """
+# numpy 2.x pickle 호환성 shim (반드시 최상단 — 다른 import보다 먼저)
+from services import numpy_compat  # noqa: F401
+
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
