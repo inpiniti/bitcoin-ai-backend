@@ -174,35 +174,33 @@ async def execute_xgboost(run: PipelineRun) -> dict:
         else:
             logger.info(f"[Pipeline:{run.run_id}] 모델 feature_count 없음, 저장된 stage={model_stage} 사용")
 
-        # 이전 단계에서 추출된 피처 확인
-        preprocessed_data = run.data.get("features")
-        if preprocessed_data:
-            features = preprocessed_data["values"]
-            extracted_stage = preprocessed_data["stage"]
-            actual_feature_count = len(features[0]) if features and len(features) > 0 else 0
+        # 항상 모델에 맞는 stage로 피처를 추출합니다.
+        # (전처리 단계와 무관하게 XGBoost 모델에 정확히 맞는 feature_count를 보장)
+        logger.info(f"[Pipeline:{run.run_id}] 모델 요구 feature_count={expected_feature_count}, stage={model_stage}로 피처 추출 중...")
 
-            # 만약 모델이 요구하는 feature 개수와 다르면 다시 추출
-            if expected_feature_count and actual_feature_count != expected_feature_count:
-                logger.warning(
-                    f"[Pipeline:{run.run_id}] 피처 개수 불일치: "
-                    f"기존={actual_feature_count}개, 모델 필요={expected_feature_count}개. "
-                    f"stage={model_stage}로 재추출합니다."
-                )
-                features, extracted_stage = await extract_features_for_prediction(
-                    run.ticker,
-                    days=2000,
-                    target_stage=model_stage
-                )
-            logger.info(f"[Pipeline:{run.run_id}] 피처 사용: {len(features)}행, {len(features[0]) if features else 0}개 컬럼, stage={extracted_stage}")
-        else:
-            # 전처리 단계가 없으면 직접 추출
-            logger.warning(f"[Pipeline:{run.run_id}] 전처리된 피처 없음, stage={model_stage}로 직접 추출")
-            features, extracted_stage = await extract_features_for_prediction(
-                run.ticker,
-                days=2000,
-                target_stage=model_stage
+        features, extracted_stage = await extract_features_for_prediction(
+            run.ticker,
+            days=2000,
+            target_stage=model_stage
+        )
+
+        if not features:
+            raise ValueError(f"피처 추출 실패: {run.ticker} stage={model_stage}")
+
+        actual_feature_count = len(features[0]) if features and len(features) > 0 else 0
+        logger.info(f"[Pipeline:{run.run_id}] 피처 추출 완료: {len(features)}행, {actual_feature_count}개 컬럼, stage={extracted_stage}")
+
+        # 최종 검증
+        if expected_feature_count and actual_feature_count != expected_feature_count:
+            logger.error(
+                f"[Pipeline:{run.run_id}] 심각한 에러: 피처 개수 여전히 불일치. "
+                f"모델 기대={expected_feature_count}, 실제={actual_feature_count}. "
+                f"모델 재학습이 필요할 수 있습니다."
             )
-            logger.info(f"[Pipeline:{run.run_id}] 피처 추출 완료: {len(features)}행, stage={extracted_stage}")
+            raise ValueError(
+                f"Feature count mismatch (feature_to_stage 매핑 확인 필요): "
+                f"expected {expected_feature_count}, got {actual_feature_count}"
+            )
 
         # 예측 실행
         xgb_result = await predict(
