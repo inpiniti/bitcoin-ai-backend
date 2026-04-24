@@ -17,7 +17,9 @@ COPY requirements.txt ./
 
 # 5. Python 의존성 설치 (무거운 패키지 포함 - 캐시됨)
 # torch + timesfm 설치 시간이 오래 걸릴 수 있음
-RUN pip install --no-cache-dir -r requirements.txt
+# pip 업그레이드로 hash mismatch / 해결 알고리즘 개선 (pip 24 → 26)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
 
 # 6. Copy source code
 COPY . .
