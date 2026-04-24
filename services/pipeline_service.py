@@ -152,7 +152,8 @@ async def execute_xgboost(run: PipelineRun) -> dict:
         logger.info(f"[Pipeline:{run.run_id}] XGBoost 예측 중...")
 
         from services.sp500_signal_service import load_active_model_ids
-        from services.xgb_service import predict
+        from services.xgb_service import predict, extract_features_for_prediction, get_stage_from_feature_count
+        from services.supabase_service import load_model
 
         # 파이프라인에서 지정한 모델 ID 또는 활성 모델 사용
         xgb_model_id = run.xgb_model_id
@@ -162,11 +163,26 @@ async def execute_xgboost(run: PipelineRun) -> dict:
         if not xgb_model_id:
             raise ValueError("활성 XGBoost 모델이 없습니다")
 
+        # 모델의 feature_count를 읽어서 필요한 stage 결정
+        model_record = await load_model(xgb_model_id)
+        feature_count = model_record.get("feature_count")
+        model_stage = get_stage_from_feature_count(feature_count, default_stage=6)
+        logger.info(f"[Pipeline:{run.run_id}] 모델 feature_count={feature_count}, stage={model_stage}")
+
+        # 모델에 맞는 stage로 피처 추출
+        features, actual_stage = await extract_features_for_prediction(
+            run.ticker,
+            days=2000,
+            target_stage=model_stage
+        )
+        logger.info(f"[Pipeline:{run.run_id}] 피처 추출 완료: {len(features)}행, stage={actual_stage}")
+
+        # 예측 실행
         xgb_result = await predict(
             model_id=xgb_model_id,
-            features=None,
+            features=features,
             dataset_id=None,
-            ticker=run.ticker
+            ticker=None
         )
         predictions = xgb_result.get("predictions", [])
         if not predictions:

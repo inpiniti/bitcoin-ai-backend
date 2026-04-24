@@ -10,6 +10,13 @@ logger = logging.getLogger("xgb_service")
 _xgb = None
 _np = None
 
+# 각 stage별 기대 피처 개수 (feature_count → stage 역추론용)
+FEATURE_TO_STAGE = {4: 4, 7: 6, 10: 7}
+
+def get_stage_from_feature_count(feature_count: int, default_stage: int = 6) -> int:
+    """feature_count에서 stage를 역추론합니다."""
+    return FEATURE_TO_STAGE.get(feature_count, default_stage)
+
 
 def _get_deps():
     global _xgb, _np
@@ -188,9 +195,7 @@ async def predict(
     # Stage 결정: feature_count 우선, 없으면 stage, 최후 기본값 6
     expected_feature_count = model_record.get("feature_count")
     if expected_feature_count:
-        # feature_count로부터 stage 역추론
-        feature_to_stage = {4: 4, 7: 6, 10: 7}  # 각 stage별 피처 개수 매핑
-        model_stage = feature_to_stage.get(expected_feature_count, 6)
+        model_stage = get_stage_from_feature_count(expected_feature_count)
         logger.info(f"[XGB:Predict] feature_count={expected_feature_count}에서 stage={model_stage} 계산")
     else:
         model_stage = model_record.get("stage", 6)
