@@ -12,8 +12,8 @@ yt-dlp
 # ── Core ML Libraries (Versions pinned to avoid backtracking) ────
 torch>=2.0.0
 jax[cpu]>=0.4.0
-numpy==1.26.4
-pandas
+numpy>=2.0.0,<3.0.0
+pandas>=3.0.0
 
 # ── TimesFM (Google) ─────────────────────────────
 timesfm @ git+https://github.com/google-research/timesfm.git
