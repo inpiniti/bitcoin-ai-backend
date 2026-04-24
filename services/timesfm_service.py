@@ -129,13 +129,25 @@ def _load_model():
                     ),
                 )
 
-            # 모델이 compile 메서드를 가지고 있으면 호출 (일부 버전에서 필요)
+            # 모델 compile 필수 (ForecastConfig 필요)
             if _model is not None and hasattr(_model, 'compile'):
                 try:
-                    _model.compile()
-                    logger.info("[TimesFM] 모델 compile() 완료")
+                    # TimesFM이 제공하는 ForecastConfig 사용
+                    ForecastConfig = getattr(tfm_module, 'ForecastConfig', None)
+                    if ForecastConfig:
+                        _model.compile(
+                            ForecastConfig(
+                                max_context=1024,
+                                max_horizon=128,
+                                normalize_inputs=True,
+                            )
+                        )
+                        logger.info("[TimesFM] 모델 compile(ForecastConfig) 완료")
+                    else:
+                        logger.warning("[TimesFM] ForecastConfig를 찾을 수 없음, compile 스킵")
                 except Exception as e:
-                    logger.warning(f"[TimesFM] 모델 compile() 실패 (선택적): {e}")
+                    logger.error(f"[TimesFM] 모델 compile() 실패: {e}")
+                    raise
 
             logger.info("[TimesFM] 모델 로드 완료")
             _load_error = None
