@@ -139,10 +139,10 @@ def _load_model():
                             ForecastConfig(
                                 max_context=1024,
                                 max_horizon=128,
-                                normalize_inputs=True,
+                                normalize_inputs=False,  # 원본 스케일 유지 (정규화 불필요)
                             )
                         )
-                        logger.info("[TimesFM] 모델 compile(ForecastConfig) 완료")
+                        logger.info("[TimesFM] 모델 compile(ForecastConfig, normalize_inputs=False) 완료")
                     else:
                         logger.warning("[TimesFM] ForecastConfig를 찾을 수 없음, compile 스킵")
                 except Exception as e:
