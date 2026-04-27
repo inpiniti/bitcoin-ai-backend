@@ -139,10 +139,10 @@ def _load_model():
                             ForecastConfig(
                                 max_context=1024,
                                 max_horizon=128,
-                                normalize_inputs=False,  # 원본 스케일 유지 (정규화 불필요)
+                                normalize_inputs=True,  # forecast_service.py와 동일 설정 (모델이 자동 역정규화)
                             )
                         )
-                        logger.info("[TimesFM] 모델 compile(ForecastConfig, normalize_inputs=False) 완료")
+                        logger.info("[TimesFM] 모델 compile(ForecastConfig, normalize_inputs=True) 완료")
                     else:
                         logger.warning("[TimesFM] ForecastConfig를 찾을 수 없음, compile 스킵")
                 except Exception as e:
@@ -184,21 +184,20 @@ def predict_direction(closes: list[float]) -> str | None:
         context = np.array(closes[-512:], dtype=np.float32)
         current_price = float(closes[-1])
 
-        # 신버전 API (TimesFM_2p5_200M_torch.from_pretrained 방식)
-        # forecast 결과는 [forecast_tensor, full_output_tensor] 형태로 반환됨
-        # TimesFM_2p5는 horizon 인자를 필수로 받음 (1일 앞 예측)
-        forecast_results = model.forecast(inputs=[context], horizon=1)
-        if isinstance(forecast_results, (list, tuple)):
-            forecast_values = forecast_results[0]
-            forecast_price = float(forecast_values[0, 0])
-        else:
-            # 구버전 API: (point_forecast, quantile_forecast) 반환
-            forecast_price = float(forecast_results[0][0])
+        # forecast_service.py와 동일한 호출 방식
+        # (point_forecast, quantile_forecast) 또는 [forecast_tensor, ...] 형태 반환
+        point_forecast, _ = model.forecast(horizon=1, inputs=[context])
+        forecast_values = point_forecast[0].tolist() if hasattr(point_forecast[0], "tolist") else point_forecast[0]
+        forecast_price = float(forecast_values[0])
 
         if current_price <= 0:
             logger.warning(f"[TimesFM] 현재가 유효하지 않음: {current_price}")
             return None
 
+        logger.debug(
+            f"[TimesFM] forecast={forecast_price:.4f} vs current={current_price:.4f} "
+            f"→ {'up' if forecast_price > current_price else 'down'}"
+        )
         return "up" if forecast_price > current_price else "down"
 
     except Exception as exc:
