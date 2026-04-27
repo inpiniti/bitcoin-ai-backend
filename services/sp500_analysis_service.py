@@ -45,7 +45,8 @@ else:
     )
 
 RETRY_LIMIT = 3
-RETRY_DELAY = 3.0
+RETRY_DELAY = 5.0  # 초기 재시도 간격 (3초 → 5초)
+SECTOR_DELAY = 2.0  # 섹터 간 요청 간격 (초)
 CONCURRENCY = 1  # 동시 Gemini 호출 수 (429 에러 방지를 위해 1로 낮춤)
 
 
@@ -215,9 +216,10 @@ async def analyze_sector_with_retry(
         try:
             api_key = key_manager.next_key()
         except NoAvailableKeyError:
-            # 모든 키가 쿨다운 중일 경우 잠시 대기 후 재시도
-            logger.warning(f"[Analysis] 모든 키 소진. 10초 대기 후 재시도... ({sector})")
-            await asyncio.sleep(10)
+            # 모든 키가 쿨다운 중일 경우 더 길게 대기
+            wait_seconds = 15 + (attempt // 3) * 5  # 15초부터 5초씩 증가
+            logger.warning(f"[Analysis] 모든 키 소진. {wait_seconds}초 대기 후 재시도... ({sector})")
+            await asyncio.sleep(wait_seconds)
             continue
 
         try:
@@ -231,8 +233,10 @@ async def analyze_sector_with_retry(
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 key_manager.mark_rate_limited(api_key, cooldown_seconds=60)
-                logger.warning(f"[Analysis] 429 ({sector}): {api_key[:8]}... 재시도")
-                # 429가 발생하면 다음 키로 바로 시도 (또는 모든 키가 rate limited면 위에서 대기)
+                # 429 시 exponential backoff: 5초 → 10초 → 15초...
+                backoff_delay = RETRY_DELAY * (2 ** (attempt % 3))
+                logger.warning(f"[Analysis] 429 ({sector}): {api_key[:8]}... {backoff_delay}초 후 재시도")
+                await asyncio.sleep(backoff_delay)
                 continue
             logger.error(f"[Analysis] HTTP 오류 ({sector}): {e}")
             if attempt < max_attempts - 1:
@@ -287,18 +291,19 @@ async def run_sp500_analysis(
     sector_groups = group_by_sector(sp500_stocks)
     logger.info(f"[SP500] {len(sp500_stocks)}개 종목, {len(sector_groups)}개 섹터")
 
-    # Step 4: 섹터별 Gemini 분석 (병렬, Semaphore)
+    # Step 4: 섹터별 Gemini 분석 (순차, 요청 간격 포함)
     logger.info("[SP500] Step 4: Gemini 섹터별 분석 시작...")
     sem = asyncio.Semaphore(CONCURRENCY)
     all_results: list[StockImpactResult] = []
 
-    async def _bounded_analysis(sector: str, stocks: list[SP500Stock]):
+    async def _bounded_analysis(sector: str, stocks: list[SP500Stock], delay: float):
         async with sem:
+            await asyncio.sleep(delay)  # 섹터 간 요청 간격
             return await analyze_sector_with_retry(context, sector, stocks, key_manager)
 
     tasks = [
-        _bounded_analysis(sector, stocks)
-        for sector, stocks in sector_groups.items()
+        _bounded_analysis(sector, stocks, idx * SECTOR_DELAY)
+        for idx, (sector, stocks) in enumerate(sector_groups.items())
     ]
     sector_results = await asyncio.gather(*tasks)
 
