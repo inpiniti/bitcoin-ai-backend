@@ -194,11 +194,11 @@ def predict_direction(closes: list[float]) -> str | None:
             logger.warning(f"[TimesFM] 현재가 유효하지 않음: {current_price}")
             return None
 
-        logger.debug(
-            f"[TimesFM] forecast={forecast_price:.4f} vs current={current_price:.4f} "
-            f"→ {'up' if forecast_price > current_price else 'down'}"
+        direction = "up" if forecast_price > current_price else "down"
+        logger.info(
+            f"[TimesFM] forecast={forecast_price:.4f} vs current={current_price:.4f} → {direction}"
         )
-        return "up" if forecast_price > current_price else "down"
+        return direction
 
     except Exception as exc:
         logger.exception(f"[TimesFM] 예측 중 오류 (데이터: {len(closes)}개): {exc}")
