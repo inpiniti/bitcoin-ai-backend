@@ -41,7 +41,7 @@ if VERCEL_PROXY_URL:
 else:
     GEMINI_API_URL = (
         "https://generativelanguage.googleapis.com/v1beta/models"
-        "/gemini-2.0-flash:generateContent?key={api_key}"
+        "/gemini-3-flash-preview:generateContent?key={api_key}"
     )
 
 RETRY_LIMIT = 3
