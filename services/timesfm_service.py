@@ -184,19 +184,47 @@ def predict_direction(closes: list[float]) -> str | None:
         context = np.array(closes[-512:], dtype=np.float32)
         current_price = float(closes[-1])
 
+        # [DEBUG] 입력 데이터 상세 로깅
+        logger.info(
+            f"[TimesFM:Input] 데이터={len(context)}개, "
+            f"min={np.min(context):.2f}, max={np.max(context):.2f}, "
+            f"mean={np.mean(context):.2f}, std={np.std(context):.2f}, "
+            f"current={current_price:.4f}, dtype={context.dtype}"
+        )
+        if np.any(np.isnan(context)) or np.any(np.isinf(context)):
+            logger.warning(f"[TimesFM:Input] ⚠️ 입력에 NaN/Inf 포함: NaN={np.sum(np.isnan(context))}, Inf={np.sum(np.isinf(context))}")
+
         # forecast_service.py와 동일한 호출 방식
         # (point_forecast, quantile_forecast) 또는 [forecast_tensor, ...] 형태 반환
+        logger.info(f"[TimesFM:Forecast] 모델 호출 시작 (horizon=1)")
         point_forecast, _ = model.forecast(horizon=1, inputs=[context])
+
+        # [DEBUG] 모델 출력 상세 로깅
+        logger.info(
+            f"[TimesFM:Output] point_forecast 타입={type(point_forecast)}, "
+            f"shape={point_forecast.shape if hasattr(point_forecast, 'shape') else 'N/A'}, "
+            f"dtype={point_forecast.dtype if hasattr(point_forecast, 'dtype') else 'N/A'}"
+        )
+        logger.info(f"[TimesFM:Output] point_forecast[0]={point_forecast[0]}")
+
         forecast_values = point_forecast[0].tolist() if hasattr(point_forecast[0], "tolist") else point_forecast[0]
+        logger.info(f"[TimesFM:Output] forecast_values={forecast_values}, type={type(forecast_values)}")
+
         forecast_price = float(forecast_values[0])
+        logger.info(f"[TimesFM:Output] forecast_price={forecast_price} (NaN={np.isnan(forecast_price)}, Inf={np.isinf(forecast_price)})")
 
         if current_price <= 0:
             logger.warning(f"[TimesFM] 현재가 유효하지 않음: {current_price}")
             return None
 
+        # [DEBUG] 예측 불가 케이스 추가
+        if np.isnan(forecast_price) or np.isinf(forecast_price):
+            logger.error(f"[TimesFM] ❌ NaN/Inf 예측값 감지: {forecast_price}")
+            return None
+
         direction = "up" if forecast_price > current_price else "down"
         logger.info(
-            f"[TimesFM] forecast={forecast_price:.4f} vs current={current_price:.4f} → {direction}"
+            f"[TimesFM] ✓ forecast={forecast_price:.4f} vs current={current_price:.4f} → {direction}"
         )
         return direction
 
