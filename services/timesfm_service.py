@@ -95,7 +95,7 @@ def _load_model():
             if hasattr(ModelClass, 'from_pretrained'):
                 try:
                     # 1. 표준 로드 시도 (패치된 __init__ 덕분에 proxies 관련 TypeError 발생 안 함)
-                    _model = ModelClass.from_pretrained("google/timesfm-2.5-200m-transformers")
+                    _model = ModelClass.from_pretrained("google/timesfm-2.5-200m-pytorch")
                 except Exception as e:
                     logger.warning(f"[TimesFM] 기본 로드 실패, snapshot_download 시도: {e}")
                     try:
@@ -104,7 +104,7 @@ def _load_model():
                         import os
                         cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
                         model_dir = snapshot_download(
-                            "google/timesfm-2.5-200m-transformers",
+                            "google/timesfm-2.5-200m-pytorch",
                             cache_dir=cache_dir,
                             local_files_only=False,
                         )
@@ -117,7 +117,7 @@ def _load_model():
                 # 구버전 API (TimesFm 클래스)
                 _model = ModelClass(
                     hparams=tfm_module.TimesFmHparams(
-                        backend="transformers",
+                        backend="pytorch",
                         per_core_batch_size=32,
                         horizon_len=1,
                         num_layers=20,
@@ -125,7 +125,7 @@ def _load_model():
                         context_len=512,
                     ),
                     checkpoint=tfm_module.TimesFmCheckpoint(
-                        huggingface_repo_id="google/timesfm-2.5-200m-transformers",
+                        huggingface_repo_id="google/timesfm-2.5-200m-pytorch",
                     ),
                 )
 
@@ -139,7 +139,7 @@ def _load_model():
                             ForecastConfig(
                                 max_context=1024,
                                 max_horizon=128,
-                                normalize_inputs=False,  # NaN 문제 해결을 위해 False로 변경 (입력 데이터 자체가 정규화된 범위 내)
+                                normalize_inputs=True,  # 원래 설정대로 복구
                             )
                         )
                         logger.info("[TimesFM] 모델 compile(ForecastConfig, normalize_inputs=False) 완료")
