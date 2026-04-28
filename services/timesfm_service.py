@@ -95,7 +95,7 @@ def _load_model():
             if hasattr(ModelClass, 'from_pretrained'):
                 try:
                     # 1. 표준 로드 시도 (패치된 __init__ 덕분에 proxies 관련 TypeError 발생 안 함)
-                    _model = ModelClass.from_pretrained("google/timesfm-2.5-200m-pytorch")
+                    _model = ModelClass.from_pretrained("google/timesfm-2.5-200m-transformers")
                 except Exception as e:
                     logger.warning(f"[TimesFM] 기본 로드 실패, snapshot_download 시도: {e}")
                     try:
@@ -104,7 +104,7 @@ def _load_model():
                         import os
                         cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
                         model_dir = snapshot_download(
-                            "google/timesfm-2.5-200m-pytorch",
+                            "google/timesfm-2.5-200m-transformers",
                             cache_dir=cache_dir,
                             local_files_only=False,
                         )
@@ -117,7 +117,7 @@ def _load_model():
                 # 구버전 API (TimesFm 클래스)
                 _model = ModelClass(
                     hparams=tfm_module.TimesFmHparams(
-                        backend="pytorch",
+                        backend="transformers",
                         per_core_batch_size=32,
                         horizon_len=1,
                         num_layers=20,
@@ -125,7 +125,7 @@ def _load_model():
                         context_len=512,
                     ),
                     checkpoint=tfm_module.TimesFmCheckpoint(
-                        huggingface_repo_id="google/timesfm-2.5-200m-pytorch",
+                        huggingface_repo_id="google/timesfm-2.5-200m-transformers",
                     ),
                 )
 
