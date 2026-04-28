@@ -139,10 +139,10 @@ def _load_model():
                             ForecastConfig(
                                 max_context=1024,
                                 max_horizon=128,
-                                normalize_inputs=True,  # forecast_service.py와 동일 설정 (모델이 자동 역정규화)
+                                normalize_inputs=False,  # NaN 문제 해결을 위해 False로 변경 (입력 데이터 자체가 정규화된 범위 내)
                             )
                         )
-                        logger.info("[TimesFM] 모델 compile(ForecastConfig, normalize_inputs=True) 완료")
+                        logger.info("[TimesFM] 모델 compile(ForecastConfig, normalize_inputs=False) 완료")
                     else:
                         logger.warning("[TimesFM] ForecastConfig를 찾을 수 없음, compile 스킵")
                 except Exception as e:
@@ -193,6 +193,20 @@ def predict_direction(closes: list[float]) -> str | None:
         )
         if np.any(np.isnan(context)) or np.any(np.isinf(context)):
             logger.warning(f"[TimesFM:Input] ⚠️ 입력에 NaN/Inf 포함: NaN={np.sum(np.isnan(context))}, Inf={np.sum(np.isinf(context))}")
+            return None
+
+        # [VALIDATE] 입력 데이터 유효성 검증
+        if len(context) < 64:
+            logger.warning(f"[TimesFM:Input] ⚠️ 데이터 부족: {len(context)}개 (권장 64개+)")
+            return None
+
+        if np.std(context) == 0:
+            logger.warning(f"[TimesFM:Input] ⚠️ 표준편차=0 (모든 값이 동일): {context[0]}")
+            return None
+
+        if current_price <= 0:
+            logger.warning(f"[TimesFM] 현재가 유효하지 않음: {current_price}")
+            return None
 
         # forecast_service.py와 동일한 호출 방식
         # (point_forecast, quantile_forecast) 또는 [forecast_tensor, ...] 형태 반환
