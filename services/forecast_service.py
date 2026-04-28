@@ -4,44 +4,28 @@ TimesFM 예측 서비스
 """
 import logging
 from datetime import datetime, timedelta, timezone
+import numpy as np
 
 logger = logging.getLogger("forecast_service")
 
 # ── 싱글톤 ──────────────────────────────────────────────
 _model = None
-_torch = None
-_np = None
-_timesfm = None
-
-
-def _load_deps():
-    global _torch, _np, _timesfm
-    if _torch is None:
-        import torch as t
-        import numpy as n
-        import timesfm as tf
-        t.set_float32_matmul_precision("high")
-        _torch, _np, _timesfm = t, n, tf
-    return _torch, _np, _timesfm
 
 
 def get_model():
     global _model
-    _, _, timesfm = _load_deps()
-
     if _model is None:
-        logger.info("TimesFM 2.5 모델 로드 중...")
-        _model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
-            "google/timesfm-2.5-200m-pytorch"
-        )
-        _model.compile(
-            timesfm.ForecastConfig(
-                max_context=1024,
-                max_horizon=128,
-                normalize_inputs=True,
+        try:
+            from timesfm import TimesFM_2p5_200M_torch  # type: ignore
+            logger.info("TimesFM 2.5 모델 로드 중...")
+            _model = TimesFM_2p5_200M_torch.from_pretrained(
+                "google/timesfm-2.5-200m-pytorch",
+                force_download=False,
             )
-        )
-        logger.info("TimesFM 2.5 모델 로드 완료")
+            logger.info("TimesFM 2.5 모델 로드 완료")
+        except Exception as exc:
+            logger.exception(f"TimesFM 모델 로드 실패: {exc}")
+            _model = None
     return _model
 
 
@@ -49,8 +33,6 @@ def get_model():
 
 def run_forecast(symbol: str, interval: str, prices: list[float], last_date: str) -> dict:
     """가격 배열을 받아 TimesFM 예측 결과(report dict)를 반환합니다."""
-    _, np, _ = _load_deps()
-
     if not prices:
         raise ValueError("No price data provided")
 
@@ -60,8 +42,13 @@ def run_forecast(symbol: str, interval: str, prices: list[float], last_date: str
     input_data = np.array(prices, dtype=np.float32)
 
     model = get_model()
-    point_forecast, _ = model.forecast(horizon=horizon, inputs=[input_data])
-    forecast_values = point_forecast[0].tolist()
+    if model is None:
+        raise RuntimeError("TimesFM 모델을 로드할 수 없습니다")
+
+    # forecast_naive(horizon): 1-step ahead 예측
+    # 반환값 outputs[0] shape: (output_patch_len=128, horizon=?)
+    outputs = model.model.forecast_naive(horizon=horizon, inputs=[input_data])
+    forecast_values = [float(outputs[0][i, 0]) for i in range(min(horizon, outputs[0].shape[0]))]
 
     # 날짜 계산
     try:
@@ -73,7 +60,6 @@ def run_forecast(symbol: str, interval: str, prices: list[float], last_date: str
 
     predictions = []
     max_steps = 30 if interval == "day" else 24
-    interval_label = "일봉" if interval == "day" else "시봉"
 
     for i, val in enumerate(forecast_values[:max_steps]):
         forecast_date = base_date + time_unit * (i + 1)
@@ -84,6 +70,7 @@ def run_forecast(symbol: str, interval: str, prices: list[float], last_date: str
             "priceFormatted": f"${val:,.2f}",
         })
 
+    interval_label = "일봉" if interval == "day" else "시봉"
     report = {
         "title": f"{symbol} {interval_label} 가격 예측 보고서",
         "symbol": symbol,
