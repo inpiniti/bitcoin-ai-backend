@@ -28,8 +28,7 @@ def _load_model():
         from timesfm import TimesFM_2p5_200M_torch  # type: ignore
         logger.info("[TimesFM] 모델 로드 중 (첫 실행 시 HuggingFace 다운로드 발생)...")
         _model = TimesFM_2p5_200M_torch.from_pretrained(
-            "google/timesfm-2.5-200m-pytorch",
-            force_download=False,
+            "google/timesfm-2.5-200m-pytorch"
         )
         logger.info("[TimesFM] 모델 로드 완료")
     except Exception as exc:

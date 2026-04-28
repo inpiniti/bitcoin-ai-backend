@@ -46,7 +46,7 @@ else:
 
 RETRY_LIMIT = 3
 RETRY_DELAY = 5.0  # 초기 재시도 간격
-SECTOR_DELAY = 30.0  # 섹터 간 요청 간격 (초) - API 429 방지를 위해 충분한 간격 확보
+SECTOR_DELAY = 20.0  # 섹터 간 요청 간격 (초) - 속도와 429 방지의 균형
 CONCURRENCY = 1  # 동시 Gemini 호출 수
 
 
