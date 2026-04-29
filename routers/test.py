@@ -161,16 +161,10 @@ async def test_rumors():
         for stock in test_stocks:
             ticker = stock.ticker
             try:
-                logger.info(f"[Test] {ticker}: 소문 수집 및 분석 중...")
+                logger.info(f"[Test] {ticker}: 소문 수집 및 Gemini 분석 중...")
 
                 # 소문 수집
                 rumors_data = await collect_rumors(ticker)
-
-                # 감정 분석
-                sentiment_result = await analyze_sentiment(rumors_data)
-                signal = sentiment_result.get("signal", "HOLD")  # BUY / SELL / HOLD
-                confidence = sentiment_result.get("confidence", 0.5)
-                reason = sentiment_result.get("reason", "")
 
                 # 게시물 수 계산
                 total_posts = (
@@ -178,6 +172,36 @@ async def test_rumors():
                     len(rumors_data.get("stocktwits", {}).get("data", [])) +
                     len(rumors_data.get("twitter", {}).get("data", []))
                 )
+
+                # Gemini 분석 (API 키 필요)
+                from services.gemini_key_manager import get_key_manager
+                from services.rumors_gemini_analysis_service import analyze_rumors_with_gemini
+
+                key_mgr = get_key_manager()
+                api_key = key_mgr.get_key() if hasattr(key_mgr, 'get_key') else None
+
+                if api_key and total_posts > 0:
+                    # Gemini로 상세 분석
+                    gemini_result = await analyze_rumors_with_gemini(
+                        rumors_data=rumors_data,
+                        ticker=ticker,
+                        company_name=ticker,
+                        api_key=api_key,
+                    )
+                    if gemini_result:
+                        signal = gemini_result.get("signal", "HOLD")
+                        confidence = gemini_result.get("confidence", 0.5)
+                        reason = gemini_result.get("reason", "")
+                    else:
+                        # Gemini 분석 실패시 기본값
+                        signal = "HOLD"
+                        confidence = 0.5
+                        reason = f"{total_posts}개의 커뮤니티 게시물이 있으나 분석 실패"
+                else:
+                    # 게시물이 없으면 분석 불가
+                    signal = "HOLD"
+                    confidence = 0.5
+                    reason = f"24시간 내 커뮤니티 게시물 없음"
 
                 results.append({
                     "ticker": ticker,
