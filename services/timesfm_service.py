@@ -2,13 +2,15 @@
 Google TimesFM 주가 방향 예측 서비스
 
 TimesFM 2.5 200M PyTorch 모델을 사용해 다음날 주가 상승/하락 여부를 예측합니다.
-모델은 최초 호출 시 Hugging Face에서 다운로드하여 싱글턴으로 캐시합니다.
+모델은 최초 호출 시 Hugging Face에서 다운로드하여 싱글톤으로 캐시합니다.
 
 사용:
     from services import timesfm_service
     signal = timesfm_service.predict_direction(closes)  # "up" | "down" | None
 """
 import logging
+import functools
+import inspect
 import numpy as np
 
 logger = logging.getLogger("timesfm_service")
@@ -27,6 +29,30 @@ def _load_model():
     try:
         from timesfm import TimesFM_2p5_200M_torch  # type: ignore
         logger.info("[TimesFM] 모델 로드 중 (첫 실행 시 HuggingFace 다운로드 발생)...")
+
+        # [Patch] huggingface_hub 호환성 문제 해결
+        # huggingface_hub가 proxies 인자를 전달하는데 TimesFM이 받지 않는 문제 대응
+        original_init = TimesFM_2p5_200M_torch.__init__
+        if not hasattr(original_init, '_is_huggingface_patched'):
+            try:
+                sig = inspect.signature(original_init)
+                valid_params = set(sig.parameters.keys())
+            except Exception:
+                valid_params = None
+
+            @functools.wraps(original_init)
+            def patched_init(self, *args, **kwargs):
+                if valid_params is not None:
+                    kwargs = {k: v for k, v in kwargs.items()
+                            if k in valid_params or 'kwargs' in str(sig.parameters.values())}
+                else:
+                    kwargs.pop('proxies', None)
+                    kwargs.pop('resume_download', None)
+                return original_init(self, *args, **kwargs)
+            patched_init._is_huggingface_patched = True
+            TimesFM_2p5_200M_torch.__init__ = patched_init
+            logger.info("[TimesFM] __init__ patched for huggingface_hub compatibility")
+
         _model = TimesFM_2p5_200M_torch.from_pretrained(
             "google/timesfm-2.5-200m-pytorch"
         )
