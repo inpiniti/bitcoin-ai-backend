@@ -91,21 +91,24 @@ async def _get_moirai_prediction(closes: list[float]) -> str | None:
         return None
 
 
-async def _get_rumors_sentiment(ticker: str) -> tuple[str | None, float | None, int, str | None]:
-    """소문 감정 분석 (signal, confidence, post_count, reason)."""
+async def _get_rumors_sentiment(
+    ticker: str,
+    company_name: str,
+    api_key: str | None = None,
+) -> tuple[str | None, float | None, int, str | None]:
+    """
+    소문 Gemini 분석 (signal, confidence, post_count, reason).
+
+    Gemini를 사용하여 Reddit, StockTwits의 커뮤니티 감정을 분석합니다.
+    """
     try:
         from services.rumors_service import collect_rumors
-        from services.rumors_analysis_service import analyze_sentiment
+        from services.rumors_gemini_analysis_service import analyze_rumors_with_gemini
 
         rumors_data = await collect_rumors(ticker)
 
         if not rumors_data:
             return None, None, 0, None
-
-        sentiment_result = await analyze_sentiment(rumors_data)
-        signal = sentiment_result.get("signal", "HOLD")  # BUY / SELL / HOLD
-        confidence = sentiment_result.get("confidence", 0.5)
-        reason = sentiment_result.get("reason", "")
 
         # 총 게시물 수 계산
         total_posts = (
@@ -114,16 +117,39 @@ async def _get_rumors_sentiment(ticker: str) -> tuple[str | None, float | None, 
             len(rumors_data.get("twitter", {}).get("data", []))
         )
 
+        # Gemini API 키가 없으면 스킵
+        if not api_key:
+            logger.warning(f"[Signal] {ticker}: Gemini API 키 없음 → 소문 분석 스킵")
+            return None, None, total_posts, None
+
+        # Gemini로 분석
+        result = await analyze_rumors_with_gemini(
+            rumors_data=rumors_data,
+            ticker=ticker,
+            company_name=company_name,
+            api_key=api_key,
+        )
+
+        if not result:
+            return None, None, total_posts, None
+
+        signal = result.get("signal", "HOLD")  # BUY / SELL / HOLD
+        confidence = result.get("confidence", 0.5)
+        reason = result.get("reason", "")
+
         return signal, round(float(confidence), 3), total_posts, reason
+
     except Exception as e:
-        logger.error(f"[Signal] 소문 감정 분석 실패 ({ticker}): {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"[Signal] 소문 Gemini 분석 실패 ({ticker}): {str(e)}\n{traceback.format_exc()}")
         return None, None, 0, None
 
 
 async def _enrich_single_stock(
     ticker: str,
+    company_name: str,
     xgb_model_id: str | None,
     rl_model_id: str | None,
+    api_key: str | None = None,
 ) -> dict:
     """단일 종목에 대해 모든 모델 예측을 병렬 실행."""
     # 종가 데이터는 한 번만 수집 (모든 시계열 모델 공유)
@@ -153,7 +179,7 @@ async def _enrich_single_stock(
         _get_timesfm_prediction(closes),
         _get_chronos_prediction(closes),
         _get_moirai_prediction(closes),
-        _get_rumors_sentiment(ticker),
+        _get_rumors_sentiment(ticker, company_name, api_key),
         return_exceptions=False,
     )
 
@@ -181,38 +207,46 @@ async def _enrich_single_stock(
 
 
 async def enrich_stocks_with_models(
-    tickers: list[str],
+    stocks: list,  # StockImpactResult 객체 리스트
     xgb_model_id: str | None,
     rl_model_id: str | None,
+    api_key: str | None = None,
 ) -> dict[str, dict]:
     """
     대상 종목 리스트(bullish/bearish)에 모델 예측 신호를 추가합니다.
 
     Args:
-        tickers: 분석 대상 티커 리스트
+        stocks: StockImpactResult 객체 리스트 (ticker, name 포함)
         xgb_model_id: 사용할 XGBoost 모델 ID (None이면 스킵)
         rl_model_id: 사용할 강화학습 모델 ID (None이면 스킵)
+        api_key: Gemini API 키 (소문 분석용)
 
     Returns:
-        {ticker: {xgb_prob, rl_signal, timesfm_signal, chronos_signal, moirai_signal}}
+        {ticker: {xgb_prob, rl_signal, timesfm_signal, chronos_signal, moirai_signal, ...}}
     """
-    if not tickers:
+    if not stocks:
         return {}
 
     logger.info(
-        f"[Signal] ═══ 모델 신호 수집 시작: {len(tickers)}개 종목 "
+        f"[Signal] ═══ 모델 신호 수집 시작: {len(stocks)}개 종목 "
         f"(XGB={xgb_model_id}, RL={rl_model_id}) ═══"
     )
 
     sem = asyncio.Semaphore(SIGNAL_CONCURRENCY)
     results: dict[str, dict] = {}
 
-    async def _bounded(ticker: str):
+    async def _bounded(stock):
         async with sem:
-            result = await _enrich_single_stock(ticker, xgb_model_id, rl_model_id)
-            results[ticker] = result
+            result = await _enrich_single_stock(
+                ticker=stock.ticker,
+                company_name=stock.name,
+                xgb_model_id=xgb_model_id,
+                rl_model_id=rl_model_id,
+                api_key=api_key,
+            )
+            results[stock.ticker] = result
 
-    await asyncio.gather(*[_bounded(t) for t in tickers])
+    await asyncio.gather(*[_bounded(s) for s in stocks])
 
     logger.info(f"[Signal] ═══ 모델 신호 수집 완료: {len(results)}개 ═══")
     return results
