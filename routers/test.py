@@ -105,7 +105,7 @@ async def test_timesfm():
 
         return {
             "status": "success",
-            "total": len(test_stocks),
+            "total": len(test_tickers),
             "success_count": success_count,
             "fail_count": fail_count,
             "results": results
@@ -237,7 +237,7 @@ async def test_rumors():
 
         return {
             "status": "success",
-            "total": len(test_stocks),
+            "total": len(test_tickers),
             "success_count": success_count,
             "results": results
         }
