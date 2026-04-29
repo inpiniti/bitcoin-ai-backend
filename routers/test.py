@@ -37,19 +37,22 @@ async def test_timesfm():
 
         logger.info("[Test] TimesFM 테스트 시작...")
 
-        # Step 1: S&P500 종목 목록 조회 (처음 20개)
-        logger.info("[Test] S&P500 종목 조회...")
-        sp500_stocks = await fetch_sp500_list()
-        test_stocks = sp500_stocks[:20]
-        logger.info(f"[Test] {len(test_stocks)}개 종목 선택")
+        # 주요 종목들 (커뮤니티 화제가 많음)
+        logger.info("[Test] 주요 종목 선택...")
+        test_tickers = [
+            "AAPL", "MSFT", "NVDA", "TSLA", "AMD",
+            "GOOGL", "META", "AMZN", "NFLX", "QCOM",
+            "ADBE", "INTC", "CRM", "PYPL", "AVGO",
+            "AMAT", "LRCX", "CDNS", "MU", "SNPS",
+        ]
+        logger.info(f"[Test] {len(test_tickers)}개 종목 선택")
 
         # Step 2: 종목별 종가 데이터 수집 및 TimesFM 예측
         results = []
         success_count = 0
         fail_count = 0
 
-        for stock in test_stocks:
-            ticker = stock.ticker
+        for ticker in test_tickers:
             try:
                 # 종가 데이터 수집 (200일)
                 logger.info(f"[Test] {ticker}: 데이터 수집 중...")
@@ -141,25 +144,31 @@ async def test_rumors():
         }
     """
     try:
-        from services.sp500_list_service import fetch_sp500_list
         from services.rumors_service import collect_rumors
-        from services.rumors_analysis_service import analyze_sentiment
         import asyncio
 
         logger.info("[Test] 소문 분석 테스트 시작...")
 
-        # Step 1: S&P500 종목 목록 조회 (처음 10개)
-        logger.info("[Test] S&P500 종목 조회...")
-        sp500_stocks = await fetch_sp500_list()
-        test_stocks = sp500_stocks[:10]
-        logger.info(f"[Test] {len(test_stocks)}개 종목 선택")
+        # 커뮤니티 화제가 많은 주요 종목들 (테스트용)
+        test_tickers = [
+            ("AAPL", "Apple Inc."),
+            ("MSFT", "Microsoft Corporation"),
+            ("NVDA", "NVIDIA Corporation"),
+            ("TSLA", "Tesla Inc."),
+            ("AMD", "Advanced Micro Devices"),
+            ("GOOGL", "Alphabet Inc."),
+            ("META", "Meta Platforms"),
+            ("AMZN", "Amazon.com Inc."),
+            ("NFLX", "Netflix Inc."),
+            ("QCOM", "Qualcomm Inc."),
+        ]
+        logger.info(f"[Test] {len(test_tickers)}개 주요 종목 선택 (AAPL, MSFT, NVDA, TSLA, AMD 등)")
 
         # Step 2: 종목별 소문 수집 및 분석
         results = []
         success_count = 0
 
-        for stock in test_stocks:
-            ticker = stock.ticker
+        for ticker, company_name in test_tickers:
             try:
                 logger.info(f"[Test] {ticker}: 소문 수집 및 Gemini 분석 중...")
 
@@ -185,7 +194,7 @@ async def test_rumors():
                     gemini_result = await analyze_rumors_with_gemini(
                         rumors_data=rumors_data,
                         ticker=ticker,
-                        company_name=ticker,
+                        company_name=company_name,
                         api_key=api_key,
                     )
                     if gemini_result:
