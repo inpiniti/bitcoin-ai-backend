@@ -233,7 +233,7 @@ async def test_rumors():
                     "error": str(e)
                 })
 
-        logger.info(f"[Test] 완료: 성공={success_count}, 실패={len(test_stocks) - success_count}")
+        logger.info(f"[Test] 완료: 성공={success_count}, 실패={len(test_tickers) - success_count}")
 
         return {
             "status": "success",
