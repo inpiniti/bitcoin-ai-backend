@@ -5,9 +5,9 @@
 -- sp500_daily_impact 테이블에 소문 분석 결과 컬럼을 추가합니다.
 -- ============================================================
 
--- Reddit, StockTwits, Twitter 종합 감정 (positive / negative / neutral)
+-- 소문 신호 (BUY / SELL / HOLD)
 ALTER TABLE sp500_daily_impact
-  ADD COLUMN IF NOT EXISTS rumors_sentiment VARCHAR(10);
+  ADD COLUMN IF NOT EXISTS rumors_signal VARCHAR(4);
 
 -- 소문 감정 분석 신뢰도 (0.0~1.0)
 ALTER TABLE sp500_daily_impact
@@ -17,7 +17,11 @@ ALTER TABLE sp500_daily_impact
 ALTER TABLE sp500_daily_impact
   ADD COLUMN IF NOT EXISTS rumors_post_count INT DEFAULT 0;
 
+-- 소문 분석 이유/설명
+ALTER TABLE sp500_daily_impact
+  ADD COLUMN IF NOT EXISTS rumors_reason TEXT;
+
 -- 업데이트 로그용 인덱스
-CREATE INDEX IF NOT EXISTS idx_sp500_daily_rumors_sentiment
-  ON sp500_daily_impact(rumors_sentiment)
-  WHERE rumors_sentiment IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sp500_daily_rumors_signal
+  ON sp500_daily_impact(rumors_signal)
+  WHERE rumors_signal IS NOT NULL;

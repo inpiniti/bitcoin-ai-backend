@@ -130,8 +130,9 @@ async def test_rumors():
             "results": [
                 {
                     "ticker": "AAPL",
-                    "sentiment": "positive",
+                    "signal": "BUY",
                     "confidence": 0.72,
+                    "reason": "Reddit에서 강한 긍정적 감정 (72%). 주요 키워드: 상승, 매수, 호재",
                     "post_count": 25,
                     "error": null
                 },
@@ -167,8 +168,9 @@ async def test_rumors():
 
                 # 감정 분석
                 sentiment_result = await analyze_sentiment(rumors_data)
-                sentiment = sentiment_result.get("sentiment", "neutral")
+                signal = sentiment_result.get("signal", "HOLD")  # BUY / SELL / HOLD
                 confidence = sentiment_result.get("confidence", 0.5)
+                reason = sentiment_result.get("reason", "")
 
                 # 게시물 수 계산
                 total_posts = (
@@ -179,13 +181,14 @@ async def test_rumors():
 
                 results.append({
                     "ticker": ticker,
-                    "sentiment": sentiment,
+                    "signal": signal,
                     "confidence": round(float(confidence), 3),
+                    "reason": reason,
                     "post_count": total_posts,
                     "error": None
                 })
                 success_count += 1
-                logger.info(f"[Test] {ticker}: {sentiment} ({confidence:.2%}) - {total_posts}개 게시물 ✓")
+                logger.info(f"[Test] {ticker}: {signal} ({confidence:.2%}) - {total_posts}개 게시물 ✓")
 
             except Exception as e:
                 logger.exception(f"[Test] {ticker}: 예외 발생")

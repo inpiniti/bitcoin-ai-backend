@@ -69,9 +69,10 @@ class StockImpactResult:
     chronos_signal: Optional[str] = None    # up / down
     moirai_signal: Optional[str] = None     # up / down
     # 소문 분석 신호 (4-6, bullish 종목만 채워짐)
-    rumors_sentiment: Optional[str] = None  # positive / negative / neutral
+    rumors_signal: Optional[str] = None      # BUY / SELL / HOLD
     rumors_confidence: Optional[float] = None # 0.0 ~ 1.0
-    rumors_post_count: int = 0              # Reddit + StockTwits + Twitter 게시물 수
+    rumors_post_count: int = 0               # Reddit + StockTwits + Twitter 게시물 수
+    rumors_reason: Optional[str] = None      # 분석 이유/설명
 
     def to_dict(self, analysis_date: str, news_count: int) -> dict:
         d = {
@@ -93,9 +94,10 @@ class StockImpactResult:
         d["chronos_signal"] = self.chronos_signal
         d["moirai_signal"] = self.moirai_signal
         # 소문 분석 신호 포함
-        d["rumors_sentiment"] = self.rumors_sentiment
+        d["rumors_signal"] = self.rumors_signal
         d["rumors_confidence"] = self.rumors_confidence
         d["rumors_post_count"] = self.rumors_post_count
+        d["rumors_reason"] = self.rumors_reason
         return d
 
 
@@ -367,9 +369,10 @@ async def run_sp500_analysis(
             stock.timesfm_signal = sig.get("timesfm_signal")
             stock.chronos_signal = sig.get("chronos_signal")
             stock.moirai_signal = sig.get("moirai_signal")
-            stock.rumors_sentiment = sig.get("rumors_sentiment")
+            stock.rumors_signal = sig.get("rumors_sentiment")
             stock.rumors_confidence = sig.get("rumors_confidence")
             stock.rumors_post_count = sig.get("rumors_post_count", 0)
+            stock.rumors_reason = sig.get("rumors_reason")
 
     logger.info("[SP500] Step 4-1~4-5: 모델 신호 수집 완료")
 
