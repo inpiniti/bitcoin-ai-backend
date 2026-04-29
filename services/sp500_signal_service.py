@@ -91,6 +91,34 @@ async def _get_moirai_prediction(closes: list[float]) -> str | None:
         return None
 
 
+async def _get_rumors_sentiment(ticker: str) -> tuple[str | None, float | None, int]:
+    """소문 감정 분석 (positive / negative / neutral)."""
+    try:
+        from services.rumors_service import collect_rumors
+        from services.rumors_analysis_service import analyze_sentiment
+
+        rumors_data = await collect_rumors(ticker)
+
+        if not rumors_data:
+            return None, None, 0
+
+        sentiment_result = await analyze_sentiment(rumors_data)
+        sentiment = sentiment_result.get("sentiment", "neutral")
+        confidence = sentiment_result.get("confidence", 0.5)
+
+        # 총 게시물 수 계산
+        total_posts = (
+            len(rumors_data.get("reddit", {}).get("data", [])) +
+            len(rumors_data.get("stocktwits", {}).get("data", [])) +
+            len(rumors_data.get("twitter", {}).get("data", []))
+        )
+
+        return sentiment, round(float(confidence), 3), total_posts
+    except Exception as e:
+        logger.error(f"[Signal] 소문 감정 분석 실패 ({ticker}): {str(e)}\n{traceback.format_exc()}")
+        return None, None, 0
+
+
 async def _enrich_single_stock(
     ticker: str,
     xgb_model_id: str | None,
@@ -111,22 +139,27 @@ async def _enrich_single_stock(
             "timesfm_signal": None,
             "chronos_signal": None,
             "moirai_signal": None,
+            "rumors_sentiment": None,
+            "rumors_confidence": None,
+            "rumors_post_count": 0,
         }
 
-    # 모든 예측 병렬 실행
-    (xgb_prob, xgb_mid), (rl_signal, rl_mid), timesfm_sig, chronos_sig, moirai_sig = await asyncio.gather(
+    # 모든 예측 병렬 실행 (소문 분석 포함)
+    (xgb_prob, xgb_mid), (rl_signal, rl_mid), timesfm_sig, chronos_sig, moirai_sig, (rumors_sentiment, rumors_confidence, rumors_posts) = await asyncio.gather(
         _get_xgb_prediction(ticker, xgb_model_id, closes),
         _get_rl_prediction(ticker, rl_model_id),
         _get_timesfm_prediction(closes),
         _get_chronos_prediction(closes),
         _get_moirai_prediction(closes),
+        _get_rumors_sentiment(ticker),
         return_exceptions=False,
     )
 
     logger.info(
         f"[Signal] {ticker}: "
         f"XGB={xgb_prob}, RL={rl_signal}, "
-        f"TimesFM={timesfm_sig}, Chronos={chronos_sig}, Moirai={moirai_sig}"
+        f"TimesFM={timesfm_sig}, Chronos={chronos_sig}, Moirai={moirai_sig}, "
+        f"Rumors={rumors_sentiment}({rumors_confidence})"
     )
 
     return {
@@ -138,6 +171,9 @@ async def _enrich_single_stock(
         "timesfm_signal": timesfm_sig,
         "chronos_signal": chronos_sig,
         "moirai_signal": moirai_sig,
+        "rumors_sentiment": rumors_sentiment,
+        "rumors_confidence": rumors_confidence,
+        "rumors_post_count": rumors_posts,
     }
 
 

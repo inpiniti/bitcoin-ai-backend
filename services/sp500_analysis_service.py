@@ -68,6 +68,10 @@ class StockImpactResult:
     timesfm_signal: Optional[str] = None    # up / down
     chronos_signal: Optional[str] = None    # up / down
     moirai_signal: Optional[str] = None     # up / down
+    # 소문 분석 신호 (4-6, bullish 종목만 채워짐)
+    rumors_sentiment: Optional[str] = None  # positive / negative / neutral
+    rumors_confidence: Optional[float] = None # 0.0 ~ 1.0
+    rumors_post_count: int = 0              # Reddit + StockTwits + Twitter 게시물 수
 
     def to_dict(self, analysis_date: str, news_count: int) -> dict:
         d = {
@@ -88,6 +92,10 @@ class StockImpactResult:
         d["timesfm_signal"] = self.timesfm_signal
         d["chronos_signal"] = self.chronos_signal
         d["moirai_signal"] = self.moirai_signal
+        # 소문 분석 신호 포함
+        d["rumors_sentiment"] = self.rumors_sentiment
+        d["rumors_confidence"] = self.rumors_confidence
+        d["rumors_post_count"] = self.rumors_post_count
         return d
 
 
@@ -359,6 +367,9 @@ async def run_sp500_analysis(
             stock.timesfm_signal = sig.get("timesfm_signal")
             stock.chronos_signal = sig.get("chronos_signal")
             stock.moirai_signal = sig.get("moirai_signal")
+            stock.rumors_sentiment = sig.get("rumors_sentiment")
+            stock.rumors_confidence = sig.get("rumors_confidence")
+            stock.rumors_post_count = sig.get("rumors_post_count", 0)
 
     logger.info("[SP500] Step 4-1~4-5: 모델 신호 수집 완료")
 
