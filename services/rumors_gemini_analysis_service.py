@@ -105,7 +105,7 @@ Respond with ONLY valid JSON (no markdown code blocks):
   "ticker": "{ticker}",
   "signal": "BUY",
   "confidence": 0.65,
-  "reason": "Reddit와 StockTwits에서 AI 관련 호재에 대한 긍정적 반응이 우세. 다만 고평가 우려와 경쟁사 동향에 대한 의견도 있음. 게시물은 총 {len([x for x in context.split('\\n') if x.startswith('-')])}개로 관심도 적당한 수준."
+  "reason": "Reddit와 StockTwits에서 AI 관련 호재에 대한 긍정적 반응이 우세. 다만 고평가 우려와 경쟁사 동향에 대한 의견도 있음."
 }}
 
 IMPORTANT:
