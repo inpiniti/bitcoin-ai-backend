@@ -350,15 +350,11 @@ async def run_sp500_analysis(
     # 활성 XGBoost / RL 모델 ID 조회
     xgb_model_id, rl_model_id = await sp500_signal_service.load_active_model_ids()
 
-    # 종목별 모델 신호 병렬 수집 (Gemini API 키 포함)
-    key_mgr = get_key_manager()
-    api_key = key_mgr.get_key() if hasattr(key_mgr, 'get_key') else None
-
+    # 종목별 모델 신호 병렬 수집 (Vercel 프록시로 처리)
     signal_map = await sp500_signal_service.enrich_stocks_with_models(
         stocks=actionable_stocks,
         xgb_model_id=xgb_model_id,
         rl_model_id=rl_model_id,
-        api_key=api_key,
     )
 
     # 결과 객체에 신호 병합

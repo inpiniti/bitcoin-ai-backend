@@ -182,20 +182,23 @@ async def test_rumors():
                     len(rumors_data.get("twitter", {}).get("data", []))
                 )
 
-                # Gemini 분석 (API 키 필요)
-                from services.gemini_key_manager import get_key_manager
+                # Gemini 분석 (Vercel 프록시로 처리)
                 from services.rumors_gemini_analysis_service import analyze_rumors_with_gemini
 
-                key_mgr = get_key_manager()
-                api_key = key_mgr.get_key() if hasattr(key_mgr, 'get_key') else None
+                # 디버그 로그: rumors_data 구조 확인
+                logger.info(f"[Test] {ticker} 데이터 구조:")
+                logger.info(f"  - Reddit: {len(rumors_data.get('reddit', {}).get('data', []))}개")
+                logger.info(f"  - StockTwits: {len(rumors_data.get('stocktwits', {}).get('data', []))}개")
+                logger.info(f"  - Twitter: {len(rumors_data.get('twitter', {}).get('data', []))}개")
+                logger.info(f"  - 합계: {total_posts}개")
 
-                if api_key and total_posts > 0:
-                    # Gemini로 상세 분석
+                if total_posts > 0:
+                    # Gemini로 상세 분석 (Vercel 프록시 사용)
                     gemini_result = await analyze_rumors_with_gemini(
                         rumors_data=rumors_data,
                         ticker=ticker,
                         company_name=company_name,
-                        api_key=api_key,
+                        api_key=None,
                     )
                     if gemini_result:
                         signal = gemini_result.get("signal", "HOLD")

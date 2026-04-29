@@ -94,12 +94,11 @@ async def _get_moirai_prediction(closes: list[float]) -> str | None:
 async def _get_rumors_sentiment(
     ticker: str,
     company_name: str,
-    api_key: str | None = None,
 ) -> tuple[str | None, float | None, int, str | None]:
     """
     소문 Gemini 분석 (signal, confidence, post_count, reason).
 
-    Gemini를 사용하여 Reddit, StockTwits의 커뮤니티 감정을 분석합니다.
+    Vercel 프록시를 통해 Gemini가 Reddit, StockTwits의 커뮤니티 감정을 분석합니다.
     """
     try:
         from services.rumors_service import collect_rumors
@@ -117,17 +116,17 @@ async def _get_rumors_sentiment(
             len(rumors_data.get("twitter", {}).get("data", []))
         )
 
-        # Gemini API 키가 없으면 스킵
-        if not api_key:
-            logger.warning(f"[Signal] {ticker}: Gemini API 키 없음 → 소문 분석 스킵")
-            return None, None, total_posts, None
+        # 게시물이 없으면 분석 스킵
+        if not total_posts:
+            logger.info(f"[Signal] {ticker}: 게시물 없음 → 소문 분석 스킵")
+            return None, None, 0, None
 
-        # Gemini로 분석
+        # Gemini로 분석 (Vercel 프록시 사용, api_key=None)
         result = await analyze_rumors_with_gemini(
             rumors_data=rumors_data,
             ticker=ticker,
             company_name=company_name,
-            api_key=api_key,
+            api_key=None,
         )
 
         if not result:
@@ -149,7 +148,6 @@ async def _enrich_single_stock(
     company_name: str,
     xgb_model_id: str | None,
     rl_model_id: str | None,
-    api_key: str | None = None,
 ) -> dict:
     """단일 종목에 대해 모든 모델 예측을 병렬 실행."""
     # 종가 데이터는 한 번만 수집 (모든 시계열 모델 공유)
@@ -179,7 +177,7 @@ async def _enrich_single_stock(
         _get_timesfm_prediction(closes),
         _get_chronos_prediction(closes),
         _get_moirai_prediction(closes),
-        _get_rumors_sentiment(ticker, company_name, api_key),
+        _get_rumors_sentiment(ticker, company_name),
         return_exceptions=False,
     )
 
@@ -210,7 +208,6 @@ async def enrich_stocks_with_models(
     stocks: list,  # StockImpactResult 객체 리스트
     xgb_model_id: str | None,
     rl_model_id: str | None,
-    api_key: str | None = None,
 ) -> dict[str, dict]:
     """
     대상 종목 리스트(bullish/bearish)에 모델 예측 신호를 추가합니다.
@@ -219,7 +216,6 @@ async def enrich_stocks_with_models(
         stocks: StockImpactResult 객체 리스트 (ticker, name 포함)
         xgb_model_id: 사용할 XGBoost 모델 ID (None이면 스킵)
         rl_model_id: 사용할 강화학습 모델 ID (None이면 스킵)
-        api_key: Gemini API 키 (소문 분석용)
 
     Returns:
         {ticker: {xgb_prob, rl_signal, timesfm_signal, chronos_signal, moirai_signal, ...}}
@@ -242,7 +238,6 @@ async def enrich_stocks_with_models(
                 company_name=stock.name,
                 xgb_model_id=xgb_model_id,
                 rl_model_id=rl_model_id,
-                api_key=api_key,
             )
             results[stock.ticker] = result
 
