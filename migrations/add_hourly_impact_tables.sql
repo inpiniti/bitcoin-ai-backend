@@ -41,7 +41,6 @@ CREATE TABLE IF NOT EXISTS sp500_impact_hourly (
 
 -- 인덱스
 CREATE INDEX IF NOT EXISTS idx_sp500_impact_hourly_datetime ON sp500_impact_hourly(analysis_datetime DESC);
-CREATE INDEX IF NOT EXISTS idx_sp500_impact_hourly_date ON sp500_impact_hourly(DATE(analysis_datetime) DESC);
 CREATE INDEX IF NOT EXISTS idx_sp500_impact_hourly_ticker ON sp500_impact_hourly(ticker);
 CREATE INDEX IF NOT EXISTS idx_sp500_impact_hourly_sector ON sp500_impact_hourly(sector);
 CREATE INDEX IF NOT EXISTS idx_sp500_impact_hourly_direction ON sp500_impact_hourly(direction);
