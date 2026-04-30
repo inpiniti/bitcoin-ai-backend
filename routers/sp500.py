@@ -63,6 +63,50 @@ async def get_meta(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get(
+    "/impact-hourly",
+    summary="S&P 500 시간대별 영향도 조회",
+    description="특정 날짜의 시간대별 영향도를 조회합니다. 여러 시간에 분석한 결과를 시간별로 그룹화하여 반환합니다.",
+)
+async def get_impact_hourly(
+    date: str = Query(default=None, description="조회 날짜 (YYYY-MM-DD). 기본값: 오늘(UTC)"),
+    sector: str = Query(default=None, description="섹터 필터 (예: Technology)"),
+    direction: str = Query(default=None, description="방향 필터: bullish/bearish/neutral"),
+    limit: int = Query(default=600, ge=1, le=600),
+):
+    from services.supabase_service import get_sp500_impact_hourly_by_date
+    analysis_date = date or datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        result = await get_sp500_impact_hourly_by_date(
+            analysis_date=analysis_date,
+            sector=sector,
+            direction=direction,
+            limit=limit,
+        )
+        return {"status": "ok", "data": result}
+    except Exception as e:
+        logger.exception(f"[SP500] 시간대별 영향도 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/meta-hourly",
+    summary="S&P 500 시간대별 분석 메타 조회",
+    description="특정 날짜의 모든 시간대 분석 메타를 조회합니다.",
+)
+async def get_meta_hourly(
+    date: str = Query(default=None, description="조회 날짜 (YYYY-MM-DD). 기본값: 오늘(UTC)"),
+):
+    from services.supabase_service import get_sp500_hourly_analysis_meta_by_date
+    analysis_date = date or datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        metas = await get_sp500_hourly_analysis_meta_by_date(analysis_date)
+        return {"date": analysis_date, "status": "ok", "metas": metas}
+    except Exception as e:
+        logger.exception(f"[SP500] 시간대별 메타 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post(
     "/run",
     summary="S&P 500 영향도 분석 수동 실행",

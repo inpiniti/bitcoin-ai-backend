@@ -58,13 +58,17 @@ async def _scheduled_auto_trade():
 
 
 async def _scheduled_sp500_analysis():
-    """매일 06:00 KST 실행 - S&P 500 뉴스 영향도 분석"""
+    """매시간 정각 실행 - S&P 500 뉴스 영향도 분석
+
+    최근 1시간(hours=1)의 뉴스만 수집하여 분석하므로
+    매 시간 새로운 분석 결과가 생성되고 Supabase에 저장됩니다.
+    """
     from services.sp500_analysis_service import run_sp500_analysis
     from services.gemini_key_manager import get_key_manager
     try:
-        logger.info("[SP500] 스케줄 분석 시작")
+        logger.info("[SP500] 스케줄 분석 시작 (매시간)")
         key_mgr = get_key_manager()
-        result = await run_sp500_analysis(key_mgr, hours=24)
+        result = await run_sp500_analysis(key_mgr, hours=1)
         logger.info(f"[SP500] 스케줄 분석 완료: {result}")
     except Exception as e:
         logger.exception(f"[SP500] 스케줄 분석 실패: {e}")
@@ -133,15 +137,15 @@ async def lifespan(app: FastAPI):
 
 
 
-    # ── 뉴스 크롤러 스케줄 등록 (#63: 매시 정각) ──
-    # ── S&P 500 영향도 분석 스케줄 등록 (매일 06:00 KST, 미장 마감 후) ──
+    # ── S&P 500 영향도 분석 스케줄 등록 (매시간 정각) ──
+    # UTC 기준 매 시간 정각 실행 (hour=* 는 모든 시간)
     scheduler.add_job(
         _scheduled_sp500_analysis,
-        CronTrigger(hour=6, minute=0, timezone="Asia/Seoul"),
+        CronTrigger(minute=0, timezone="UTC"),  # 매시간 :00분
         id="sp500_analysis",
         replace_existing=True,
     )
-    logger.info("[Scheduler] S&P 500 영향도 분석 등록: 매일 06:00 KST")
+    logger.info("[Scheduler] S&P 500 영향도 분석 등록: 매시간 정각 (UTC 기준)")
 
 
 

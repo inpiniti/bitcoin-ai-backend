@@ -377,3 +377,135 @@ async def get_sp500_analysis_meta(analysis_date: str) -> dict | None:
         raise Exception(f"sp500_analysis_meta 조회 실패 ({resp.status_code}): {resp.text}")
     rows = resp.json()
     return rows[0] if rows else None
+
+
+# ─────────────────────────────────────────────
+# S&P 500 시간대별 영향도 분석 (sp500_impact_hourly / sp500_hourly_analysis_meta)
+# ─────────────────────────────────────────────
+
+async def upsert_sp500_impact_hourly(rows: list[dict]) -> int:
+    """
+    sp500_impact_hourly 테이블에 종목 영향도 upsert.
+    (analysis_datetime, ticker) unique 제약으로 중복 시 업데이트.
+
+    Returns:
+        처리된 건수
+    """
+    if not rows:
+        return 0
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/sp500_impact_hourly?on_conflict=analysis_datetime,ticker"
+    headers = {
+        **_headers(),
+        "Prefer": "resolution=merge-duplicates,return=representation",
+    }
+    BATCH_SIZE = 100
+    total = 0
+    async with httpx.AsyncClient(timeout=30) as client:
+        for i in range(0, len(rows), BATCH_SIZE):
+            batch = rows[i:i + BATCH_SIZE]
+            resp = await client.post(url, json=batch, headers=headers)
+            if resp.status_code >= 400:
+                logger.warning(
+                    f"sp500_impact_hourly upsert 실패 "
+                    f"(batch {i//BATCH_SIZE+1}, {resp.status_code}): {resp.text[:200]}"
+                )
+            else:
+                result = resp.json()
+                total += len(result) if isinstance(result, list) else 0
+    return total
+
+
+async def upsert_sp500_hourly_analysis_meta(data: dict) -> None:
+    """
+    sp500_hourly_analysis_meta 테이블에 분석 메타 upsert.
+    analysis_datetime unique 제약으로 중복 시 업데이트.
+    """
+    _check_config()
+    import json as _json
+    if "news_sources" in data and isinstance(data["news_sources"], list):
+        data["news_sources"] = _json.dumps(data["news_sources"])
+    url = f"{SUPABASE_URL}/rest/v1/sp500_hourly_analysis_meta?on_conflict=analysis_datetime"
+    headers = {**_headers(), "Prefer": "resolution=merge-duplicates"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=data, headers=headers)
+    if resp.status_code >= 400:
+        logger.warning(f"sp500_hourly_analysis_meta upsert 실패 ({resp.status_code}): {resp.text[:200]}")
+
+
+async def get_sp500_impact_hourly_by_date(
+    analysis_date: str,
+    sector: str | None = None,
+    direction: str | None = None,
+    limit: int = 600,
+) -> dict:
+    """
+    특정 날짜의 S&P 500 시간대별 영향도 조회.
+    같은 날짜의 모든 시간대 데이터를 시간별로 그룹화.
+
+    Returns:
+        {
+            "date": "2026-04-30",
+            "times": ["09:00", "10:00", "11:00", ...],
+            "by_time": {
+                "09:00": [stock1, stock2, ...],
+                "10:00": [stock1, stock2, ...],
+                ...
+            }
+        }
+    """
+    _check_config()
+    from datetime import datetime
+
+    # 해당 날짜의 모든 시간대 데이터 조회 (ISO 형식: 2026-04-30T00:00:00.000000+00:00)
+    filters = f"analysis_datetime=gte.{analysis_date}T00:00:00Z&analysis_datetime=lt.{analysis_date}T23:59:59.999999Z&order=analysis_datetime.asc,confidence.desc&limit={limit}"
+    if sector:
+        filters += f"&sector=eq.{sector}"
+    if direction:
+        filters += f"&direction=eq.{direction}"
+
+    url = f"{SUPABASE_URL}/rest/v1/sp500_impact_hourly?select=*&{filters}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+
+    if resp.status_code >= 400:
+        raise Exception(f"sp500_impact_hourly 조회 실패 ({resp.status_code}): {resp.text}")
+
+    rows = resp.json()
+
+    # 시간별로 그룹화
+    times_set = set()
+    by_time = {}
+    for row in rows:
+        # analysis_datetime에서 시간 추출 (예: "2026-04-30T09:00:00.000000+00:00" → "09:00")
+        dt_str = row.get("analysis_datetime", "")
+        if dt_str:
+            try:
+                # ISO 형식 파싱
+                dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                time_str = dt.strftime("%H:%M")
+                times_set.add(time_str)
+                if time_str not in by_time:
+                    by_time[time_str] = []
+                by_time[time_str].append(row)
+            except Exception as e:
+                logger.warning(f"시간 추출 실패: {dt_str} - {e}")
+
+    times = sorted(list(times_set))
+
+    return {
+        "date": analysis_date,
+        "times": times,
+        "by_time": by_time,
+    }
+
+
+async def get_sp500_hourly_analysis_meta_by_date(analysis_date: str) -> list[dict]:
+    """특정 날짜의 모든 시간대 분석 메타 조회 (시간 오름차순)"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/sp500_hourly_analysis_meta?analysis_datetime=gte.{analysis_date}T00:00:00Z&analysis_datetime=lt.{analysis_date}T23:59:59.999999Z&order=analysis_datetime.asc&select=*"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=_headers())
+    if resp.status_code >= 400:
+        raise Exception(f"sp500_hourly_analysis_meta 조회 실패 ({resp.status_code}): {resp.text}")
+    return resp.json()

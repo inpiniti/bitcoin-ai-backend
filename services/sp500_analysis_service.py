@@ -74,7 +74,7 @@ class StockImpactResult:
     rumors_post_count: int = 0               # Reddit + StockTwits + Twitter 게시물 수
     rumors_reason: Optional[str] = None      # 분석 이유/설명
 
-    def to_dict(self, analysis_date: str, news_count: int) -> dict:
+    def to_dict(self, analysis_date: str, news_count: int, analysis_datetime: str | None = None) -> dict:
         d = {
             "analysis_date": analysis_date,
             "ticker": self.ticker,
@@ -98,6 +98,9 @@ class StockImpactResult:
         d["rumors_confidence"] = self.rumors_confidence
         d["rumors_post_count"] = self.rumors_post_count
         d["rumors_reason"] = self.rumors_reason
+        # hourly 테이블용 analysis_datetime 추가
+        if analysis_datetime:
+            d["analysis_datetime"] = analysis_datetime
         return d
 
 
@@ -380,13 +383,19 @@ async def run_sp500_analysis(
     news_count = len(news_items)
 
     try:
-        # 종목별 영향도 저장
-        impact_rows = [r.to_dict(analysis_date, news_count) for r in all_results]
-        await supabase_service.upsert_sp500_daily_impact(impact_rows)
+        # ISO 형식의 현재 시각 (analysis_datetime 용, UTC)
+        analysis_datetime = datetime.now(timezone.utc).isoformat()
 
-        # 메타 데이터 저장
+        # 종목별 영향도 저장 (기존 daily 테이블 + 새 hourly 테이블 모두)
+        impact_rows_daily = [r.to_dict(analysis_date, news_count) for r in all_results]
+        impact_rows_hourly = [r.to_dict(analysis_date, news_count, analysis_datetime) for r in all_results]
+
+        await supabase_service.upsert_sp500_daily_impact(impact_rows_daily)
+        await supabase_service.upsert_sp500_impact_hourly(impact_rows_hourly)
+
+        # 메타 데이터 저장 (daily + hourly 모두)
         sources = list(set(item.source for item in news_items))
-        meta = {
+        meta_daily = {
             "analysis_date": analysis_date,
             "news_count": news_count,
             "news_sources": sources,
@@ -394,9 +403,19 @@ async def run_sp500_analysis(
             "bearish_count": bearish_count,
             "neutral_count": neutral_count,
         }
-        await supabase_service.upsert_sp500_analysis_meta(meta)
+        meta_hourly = {
+            "analysis_datetime": analysis_datetime,
+            "news_count": news_count,
+            "news_sources": sources,
+            "bullish_count": bullish_count,
+            "bearish_count": bearish_count,
+            "neutral_count": neutral_count,
+        }
 
-        logger.info(f"[SP500] Supabase 저장 완료: {len(impact_rows)}건")
+        await supabase_service.upsert_sp500_analysis_meta(meta_daily)
+        await supabase_service.upsert_sp500_hourly_analysis_meta(meta_hourly)
+
+        logger.info(f"[SP500] Supabase 저장 완료: {len(impact_rows_daily)}건 (daily + hourly)")
     except Exception as e:
         logger.exception(f"[SP500] Supabase 저장 실패: {e}")
 
