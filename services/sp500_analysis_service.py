@@ -103,6 +103,33 @@ class StockImpactResult:
             d["analysis_datetime"] = analysis_datetime
         return d
 
+    def to_dict_hourly(self, analysis_datetime: str, news_count: int) -> dict:
+        """Hourly 테이블용 dict (analysis_datetime만 포함)"""
+        d = {
+            "analysis_datetime": analysis_datetime,
+            "ticker": self.ticker,
+            "name": self.name,
+            "sector": self.sector,
+            "direction": self.direction,
+            "confidence": round(self.confidence, 2),
+            "reason": self.reason,
+            "news_count": news_count,
+        }
+        # 모델 신호 포함
+        d["xgb_prob"] = self.xgb_prob
+        d["xgb_model_id"] = self.xgb_model_id
+        d["rl_signal"] = self.rl_signal
+        d["rl_model_id"] = self.rl_model_id
+        d["timesfm_signal"] = self.timesfm_signal
+        d["chronos_signal"] = self.chronos_signal
+        d["moirai_signal"] = self.moirai_signal
+        # 소문 분석 신호 포함
+        d["rumors_signal"] = self.rumors_signal
+        d["rumors_confidence"] = self.rumors_confidence
+        d["rumors_post_count"] = self.rumors_post_count
+        d["rumors_reason"] = self.rumors_reason
+        return d
+
 
 @dataclass
 class SectorAnalysisResult:
@@ -388,7 +415,7 @@ async def run_sp500_analysis(
 
         # 종목별 영향도 저장 (기존 daily 테이블 + 새 hourly 테이블 모두)
         impact_rows_daily = [r.to_dict(analysis_date, news_count) for r in all_results]
-        impact_rows_hourly = [r.to_dict(analysis_date, news_count, analysis_datetime) for r in all_results]
+        impact_rows_hourly = [r.to_dict_hourly(analysis_datetime, news_count) for r in all_results]
 
         await supabase_service.upsert_sp500_daily_impact(impact_rows_daily)
         await supabase_service.upsert_sp500_impact_hourly(impact_rows_hourly)
