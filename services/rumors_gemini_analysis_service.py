@@ -92,25 +92,19 @@ def build_rumors_prompt(context: str, ticker: str, company_name: str) -> str:
 Based on the above community discussions, provide:
 - signal: "BUY" (bullish sentiment), "SELL" (bearish sentiment), or "HOLD" (neutral/mixed)
 - confidence: 0.0 to 1.0 (how confident you are based on community consensus)
-- reason: Detailed explanation in Korean about the community sentiment, key themes, and implications
-
-Consider:
-- Overall sentiment direction (positive/negative/mixed)
-- Post volume and engagement
-- Specific concerns or optimism being discussed
-- Key themes (valuation, competition, product, earnings, macro, etc.)
+- reason: Brief 1-sentence explanation in Korean
 
 Respond with ONLY valid JSON (no markdown code blocks):
 {{
   "ticker": "{ticker}",
   "signal": "BUY",
   "confidence": 0.65,
-  "reason": "Reddit와 StockTwits에서 AI 관련 호재에 대한 긍정적 반응이 우세. 다만 고평가 우려와 경쟁사 동향에 대한 의견도 있음."
+  "reason": "커뮤니티에서 AI 관련 호재에 강한 긍정적 반응"
 }}
 
 IMPORTANT:
 - JSON only, no other text
-- Reason must be in Korean
+- Reason must be in Korean and one sentence only
 - Base analysis on actual community discussions provided, not general knowledge"""
 
 
