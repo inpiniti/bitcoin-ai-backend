@@ -14,63 +14,77 @@ POTATOINVEST_API = "https://potatoinvest.com/api/dataroma/base"
 
 async def fetch_dataroma_portfolio():
     """
-    dataroma.com에서 직접 투자자 데이터 크롤링
+    dataroma.com 매니저 페이지에서 모든 투자자 크롤링
     """
     try:
         import re
         from bs4 import BeautifulSoup
 
-        logger.info("[Portfolio] Fetching from dataroma.com direct crawl...")
+        logger.info("[Portfolio] Fetching managers list from dataroma.com...")
 
-        # 알려진 투자자 목록
-        investor_map = {
-            'BRK': {'no': 1, 'name': 'Warren Buffett'},
-            'SOROS': {'no': 2, 'name': 'George Soros'},
-            'ICAHN': {'no': 3, 'name': 'Carl Icahn'},
-            'ACKMAN': {'no': 4, 'name': 'Bill Ackman'},
-            'LOEB': {'no': 5, 'name': 'Daniel Loeb'},
-            'DALIO': {'no': 6, 'name': 'Ray Dalio'},
-            'LYNCH': {'no': 7, 'name': 'Peter Lynch'},
-            'DRUCKENMILLER': {'no': 8, 'name': 'Stan Druckenmiller'},
-            'EINHORN': {'no': 9, 'name': 'David Einhorn'},
-            'SLOAN': {'no': 10, 'name': 'Allan Sloan'},
-        }
+        # 1. managers.php에서 모든 투자자 링크 추출
+        async with httpx.AsyncClient(timeout=30, verify=False) as client:
+            resp = await client.get(
+                "https://www.dataroma.com/m/managers.php",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
 
-        # 각 investor에서 포트폴리오 데이터 추출
+        if resp.status_code != 200:
+            logger.warning(f"[Portfolio] managers.php returned {resp.status_code}")
+            return None
+
+        # managers.php에서 모든 투자자 심볼과 이름 추출
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        investor_links = []
+
+        # 링크를 찾아서 symbol과 name 추출
+        for link in soup.find_all('a', href=re.compile(r'/m/holdings\.php\?m=')):
+            href = link.get('href', '')
+            name = link.get_text(strip=True)
+            match = re.search(r'\?m=([^&\s"]+)', href)
+            if match:
+                symbol = match.group(1)
+                investor_links.append({
+                    'symbol': symbol,
+                    'name': name
+                })
+
+        logger.info(f"[Portfolio] Found {len(investor_links)} investors on dataroma")
+
+        # 2. 각 investor에서 포트폴리오 데이터 추출
         investors_data = []
-        tickers = list(investor_map.keys())
-        logger.info(f"[Portfolio] Fetching portfolio data for {len(tickers)} known investors from dataroma")
 
-        for idx, ticker in enumerate(tickers):
+        for idx, investor_info in enumerate(investor_links):
             try:
+                symbol = investor_info['symbol']
+                name = investor_info['name']
+
                 async with httpx.AsyncClient(timeout=20, verify=False) as client:
                     resp = await client.get(
-                        f"https://www.dataroma.com/m/holdings.php?m={ticker}",
+                        f"https://www.dataroma.com/m/holdings.php?m={symbol}",
                         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
                     )
 
                 if resp.status_code != 200:
+                    logger.debug(f"[Portfolio] {name} ({symbol}) returned {resp.status_code}")
                     continue
 
-                # HTML에서 포트폴리오 추출 (table 형식)
+                # HTML에서 포트폴리오 추출
                 soup = BeautifulSoup(resp.text, 'html.parser')
-
-                # investor 이름 찾기
-                investor_name = investor_map.get(ticker, {}).get('name', ticker)
 
                 # 포트폴리오 데이터 추출 (테이블에서)
                 portfolio = []
-                table = soup.find('table')  # 클래스가 없을 수 있으므로 첫 테이블 사용
+                table = soup.find('table')
                 if table:
                     rows = table.find_all('tr')[1:]  # 헤더 제외
                     for row in rows[:100]:  # 최대 100개 종목
                         tds = row.find_all('td')
                         if len(tds) >= 3:
-                            # 첫 번째 td는 아이콘, 두 번째가 티커-이름, 세 번째가 비율
+                            # 첫 번째 td는 History 아이콘, 두 번째가 "TICKER - Company Name", 세 번째가 "% of Portfolio"
                             ticker_name = tds[1].get_text(strip=True) if len(tds) > 1 else ''
                             ratio_text = tds[2].get_text(strip=True) if len(tds) > 2 else ''
 
-                            # ticker_name은 "AAPL - Apple Inc." 형식일 수 있음
+                            # ticker_name은 "AAPL - Apple Inc." 형식
                             ticker_text = ticker_name.split('-')[0].strip() if ticker_name else ''
 
                             if ticker_text and ratio_text:
@@ -80,22 +94,22 @@ async def fetch_dataroma_portfolio():
                                         'code': ticker_text,
                                         'ratio': str(ratio_val)
                                     })
-                                except:
+                                except ValueError:
                                     pass
 
                 if portfolio:
                     investor = {
-                        'no': investor_map.get(ticker, {}).get('no', idx + 1),
-                        'name': investor_name,
+                        'no': idx + 1,
+                        'name': name,
                         'totalValue': '$N/A',
                         'totalValueNum': 0,
                         'portfolio': portfolio
                     }
                     investors_data.append(investor)
-                    logger.info(f"[Portfolio] {investor_name}: {len(portfolio)} holdings")
+                    logger.info(f"[Portfolio] {idx + 1}/{len(investor_links)} {name}: {len(portfolio)} holdings")
 
             except Exception as e:
-                logger.debug(f"[Portfolio] Error fetching {ticker}: {e}")
+                logger.debug(f"[Portfolio] Error fetching {investor_info.get('name', 'unknown')}: {e}")
                 continue
 
         if investors_data:
