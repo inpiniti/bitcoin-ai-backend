@@ -1,73 +1,42 @@
 """
 포트폴리오 데이터 생성 및 캐싱 서비스
-potatoinvest dataroma_portfolio 패턴을 Python으로 구현
+potatoinvest dataroma API에서 원본 데이터를 직접 조회
 """
 import logging
 from datetime import datetime
+import httpx
 import yfinance as yf
 
 logger = logging.getLogger("portfolio_service")
 
-# 샘플 유명 투자자 데이터
-SAMPLE_INVESTORS = [
-    {"no": 1, "name": "Warren Buffett", "totalValue": "$1,234,567,890", "totalValueNum": 1234567890},
-    {"no": 2, "name": "George Soros", "totalValue": "$987,654,321", "totalValueNum": 987654321},
-    {"no": 3, "name": "Carl Icahn", "totalValue": "$876,543,210", "totalValueNum": 876543210},
-    {"no": 4, "name": "Bill Ackman", "totalValue": "$765,432,100", "totalValueNum": 765432100},
-    {"no": 5, "name": "Daniel Loeb", "totalValue": "$654,321,000", "totalValueNum": 654321000},
-]
+POTATOINVEST_API = "https://potatoinvest.com/api/dataroma/base"
 
-# 투자자별 샘플 포트폴리오
-SAMPLE_PORTFOLIOS = {
-    "Warren Buffett": [
-        {"code": "AAPL", "ratio": "47.5"},
-        {"code": "BAM", "ratio": "15.2"},
-        {"code": "KO", "ratio": "10.8"},
-        {"code": "AXP", "ratio": "9.3"},
-        {"code": "JNJ", "ratio": "8.5"},
-        {"code": "MA", "ratio": "5.2"},
-        {"code": "V", "ratio": "3.5"},
-    ],
-    "George Soros": [
-        {"code": "SPY", "ratio": "25.0"},
-        {"code": "TLT", "ratio": "20.0"},
-        {"code": "GLD", "ratio": "15.0"},
-        {"code": "MSFT", "ratio": "12.0"},
-        {"code": "NVDA", "ratio": "10.0"},
-        {"code": "TSM", "ratio": "10.0"},
-        {"code": "TSLA", "ratio": "8.0"},
-    ],
-    "Carl Icahn": [
-        {"code": "TSLA", "ratio": "30.0"},
-        {"code": "UVV", "ratio": "20.0"},
-        {"code": "PHM", "ratio": "18.0"},
-        {"code": "IEP", "ratio": "15.0"},
-        {"code": "MGM", "ratio": "10.0"},
-        {"code": "APA", "ratio": "7.0"},
-    ],
-    "Bill Ackman": [
-        {"code": "UMG", "ratio": "35.0"},
-        {"code": "PSP", "ratio": "25.0"},
-        {"code": "GOOGL", "ratio": "20.0"},
-        {"code": "AMZN", "ratio": "12.0"},
-        {"code": "HLI", "ratio": "8.0"},
-    ],
-    "Daniel Loeb": [
-        {"code": "NVDA", "ratio": "25.0"},
-        {"code": "META", "ratio": "20.0"},
-        {"code": "GOOG", "ratio": "18.0"},
-        {"code": "ASML", "ratio": "15.0"},
-        {"code": "AMD", "ratio": "12.0"},
-        {"code": "PYPL", "ratio": "10.0"},
-    ],
-}
+
+async def fetch_dataroma_portfolio():
+    """
+    potatoinvest의 dataroma API에서 원본 포트폴리오 데이터 조회
+    이것이 진정한 데이터 소스 (dataroma.com 기반)
+    """
+    try:
+        logger.info("[Portfolio] Fetching from potatoinvest dataroma API...")
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(POTATOINVEST_API)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            logger.info(f"[Portfolio] Got {len(data.get('based_on_person', []))} investors from dataroma")
+            return data
+        else:
+            logger.warning(f"[Portfolio] dataroma API returned {resp.status_code}")
+            return None
+    except Exception as e:
+        logger.warning(f"[Portfolio] Failed to fetch from dataroma: {e}")
+        return None
 
 
 def build_stock_aggregation(investors_with_portfolio):
     """
     투자자별 포트폴리오 데이터를 집계하여 종목별 데이터로 변환
-    potatoinvest의 buildStockAggregation과 동일 로직
-    현재가와 거래소 정보 추가
     """
     stock_map = {}
 
@@ -77,7 +46,9 @@ def build_stock_aggregation(investors_with_portfolio):
             code = holding.get("code", "").upper()
             ratio_str = holding.get("ratio", "0")
             try:
-                ratio = float(ratio_str)
+                # ratio가 문자열 "12.5" 또는 "12.5%" 형태일 수 있음
+                ratio_val = str(ratio_str).replace("%", "")
+                ratio = float(ratio_val) if ratio_val else 0.0
             except (ValueError, TypeError):
                 ratio = 0.0
 
@@ -96,7 +67,7 @@ def build_stock_aggregation(investors_with_portfolio):
             stock_map[code]["person"].append({
                 "no": investor.get("no", 0),
                 "name": investor.get("name", "Unknown"),
-                "ratio": ratio_str,
+                "ratio": str(ratio),
             })
             stock_map[code]["person_count"] += 1
             stock_map[code]["sum_ratio"] += ratio
@@ -151,40 +122,89 @@ def build_stock_aggregation(investors_with_portfolio):
 async def generate_portfolio_base():
     """
     포트폴리오 기본 데이터 생성
-    투자자별(based_on_person) 및 종목별(based_on_stock) 데이터 반환
+    1차: potatoinvest dataroma API에서 원본 데이터 조회
+    2차: 조회 실패 시 샘플 데이터 사용
     """
     try:
-        # 1. 투자자별 포트폴리오 구성
-        investors_data = []
-        for investor in SAMPLE_INVESTORS:
-            portfolio = SAMPLE_PORTFOLIOS.get(investor["name"], [])
-            investor_with_portfolio = {
-                **investor,
-                "portfolio": portfolio,
+        # 1. potatoinvest에서 원본 데이터 조회
+        dataroma_data = await fetch_dataroma_portfolio()
+
+        if dataroma_data and dataroma_data.get("based_on_person"):
+            investors_data = dataroma_data.get("based_on_person", [])
+
+            # 2. 종목별 집계
+            stocks = build_stock_aggregation(investors_data)
+
+            # 3. 메타데이터
+            result = {
+                "based_on_person": investors_data,
+                "based_on_stock": stocks,
+                "meta": {
+                    "investors_count": len(investors_data),
+                    "stocks_count": len(stocks),
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                    "source": "dataroma",
+                },
             }
-            investors_data.append(investor_with_portfolio)
 
-        # 2. 종목별 집계
-        stocks = build_stock_aggregation(investors_data)
+            logger.info(f"[Portfolio] 생성 완료: 투자자 {len(investors_data)}명, 종목 {len(stocks)}개 (dataroma)")
+            return result
 
-        # 3. 메타데이터
-        result = {
-            "based_on_person": investors_data,
-            "based_on_stock": stocks,
-            "meta": {
-                "investors_count": len(investors_data),
-                "stocks_count": len(stocks),
-                "generated_at": datetime.utcnow().isoformat() + "Z",
-            },
-        }
+        else:
+            logger.warning("[Portfolio] dataroma API failed, using fallback sample data")
+            # 폴백: 샘플 데이터 사용
+            SAMPLE_INVESTORS = [
+                {"no": 1, "name": "Warren Buffett", "totalValue": "$1B+", "totalValueNum": 1000000000},
+                {"no": 2, "name": "George Soros", "totalValue": "$1B+", "totalValueNum": 1000000000},
+                {"no": 3, "name": "Carl Icahn", "totalValue": "$1B+", "totalValueNum": 1000000000},
+            ]
 
-        logger.info(f"[Portfolio] 생성 완료: 투자자 {len(investors_data)}명, 종목 {len(stocks)}개")
-        return result
+            SAMPLE_PORTFOLIOS = {
+                "Warren Buffett": [
+                    {"code": "AAPL", "ratio": "25.0"},
+                    {"code": "BAM", "ratio": "15.0"},
+                    {"code": "KO", "ratio": "10.0"},
+                ],
+                "George Soros": [
+                    {"code": "MSFT", "ratio": "20.0"},
+                    {"code": "NVDA", "ratio": "15.0"},
+                    {"code": "SPY", "ratio": "25.0"},
+                ],
+                "Carl Icahn": [
+                    {"code": "TSLA", "ratio": "30.0"},
+                    {"code": "UVV", "ratio": "20.0"},
+                ],
+            }
+
+            investors_data = []
+            for investor in SAMPLE_INVESTORS:
+                portfolio = SAMPLE_PORTFOLIOS.get(investor["name"], [])
+                investor_with_portfolio = {
+                    **investor,
+                    "portfolio": portfolio,
+                }
+                investors_data.append(investor_with_portfolio)
+
+            stocks = build_stock_aggregation(investors_data)
+
+            result = {
+                "based_on_person": investors_data,
+                "based_on_stock": stocks,
+                "meta": {
+                    "investors_count": len(investors_data),
+                    "stocks_count": len(stocks),
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                    "source": "sample",
+                },
+            }
+
+            logger.info(f"[Portfolio] 생성 완료: 투자자 {len(investors_data)}명, 종목 {len(stocks)}개 (sample fallback)")
+            return result
 
     except Exception as e:
         logger.error(f"[Portfolio] 생성 실패: {e}")
         return {
             "based_on_person": [],
             "based_on_stock": [],
-            "meta": {"error": str(e)},
+            "meta": {"error": str(e), "source": "error"},
         }
