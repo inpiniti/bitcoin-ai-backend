@@ -14,23 +14,101 @@ POTATOINVEST_API = "https://potatoinvest.com/api/dataroma/base"
 
 async def fetch_dataroma_portfolio():
     """
-    potatoinvest의 dataroma API에서 원본 포트폴리오 데이터 조회
-    이것이 진정한 데이터 소스 (dataroma.com 기반)
+    dataroma.com에서 직접 투자자 데이터 크롤링
     """
     try:
-        logger.info("[Portfolio] Fetching from potatoinvest dataroma API...")
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(POTATOINVEST_API)
+        import re
+        from bs4 import BeautifulSoup
 
-        if resp.status_code == 200:
-            data = resp.json()
-            logger.info(f"[Portfolio] Got {len(data.get('based_on_person', []))} investors from dataroma")
-            return data
-        else:
-            logger.warning(f"[Portfolio] dataroma API returned {resp.status_code}")
-            return None
+        logger.info("[Portfolio] Fetching from dataroma.com direct crawl...")
+
+        # 알려진 투자자 목록
+        investor_map = {
+            'BRK': {'no': 1, 'name': 'Warren Buffett'},
+            'SOROS': {'no': 2, 'name': 'George Soros'},
+            'ICAHN': {'no': 3, 'name': 'Carl Icahn'},
+            'ACKMAN': {'no': 4, 'name': 'Bill Ackman'},
+            'LOEB': {'no': 5, 'name': 'Daniel Loeb'},
+            'DALIO': {'no': 6, 'name': 'Ray Dalio'},
+            'LYNCH': {'no': 7, 'name': 'Peter Lynch'},
+            'DRUCKENMILLER': {'no': 8, 'name': 'Stan Druckenmiller'},
+            'EINHORN': {'no': 9, 'name': 'David Einhorn'},
+            'SLOAN': {'no': 10, 'name': 'Allan Sloan'},
+        }
+
+        # 각 investor에서 포트폴리오 데이터 추출
+        investors_data = []
+        tickers = list(investor_map.keys())
+        logger.info(f"[Portfolio] Fetching portfolio data for {len(tickers)} known investors from dataroma")
+
+        for idx, ticker in enumerate(tickers):
+            try:
+                async with httpx.AsyncClient(timeout=20, verify=False) as client:
+                    resp = await client.get(
+                        f"https://www.dataroma.com/m/holdings.php?m={ticker}",
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                    )
+
+                if resp.status_code != 200:
+                    continue
+
+                # HTML에서 포트폴리오 추출 (table 형식)
+                soup = BeautifulSoup(resp.text, 'html.parser')
+
+                # investor 이름 찾기
+                investor_name = investor_map.get(ticker, {}).get('name', ticker)
+
+                # 포트폴리오 데이터 추출 (테이블에서)
+                portfolio = []
+                table = soup.find('table')  # 클래스가 없을 수 있으므로 첫 테이블 사용
+                if table:
+                    rows = table.find_all('tr')[1:]  # 헤더 제외
+                    for row in rows[:100]:  # 최대 100개 종목
+                        tds = row.find_all('td')
+                        if len(tds) >= 3:
+                            # 첫 번째 td는 아이콘, 두 번째가 티커-이름, 세 번째가 비율
+                            ticker_name = tds[1].get_text(strip=True) if len(tds) > 1 else ''
+                            ratio_text = tds[2].get_text(strip=True) if len(tds) > 2 else ''
+
+                            # ticker_name은 "AAPL - Apple Inc." 형식일 수 있음
+                            ticker_text = ticker_name.split('-')[0].strip() if ticker_name else ''
+
+                            if ticker_text and ratio_text:
+                                try:
+                                    ratio_val = float(ratio_text.replace('%', '').strip())
+                                    portfolio.append({
+                                        'code': ticker_text,
+                                        'ratio': str(ratio_val)
+                                    })
+                                except:
+                                    pass
+
+                if portfolio:
+                    investor = {
+                        'no': investor_map.get(ticker, {}).get('no', idx + 1),
+                        'name': investor_name,
+                        'totalValue': '$N/A',
+                        'totalValueNum': 0,
+                        'portfolio': portfolio
+                    }
+                    investors_data.append(investor)
+                    logger.info(f"[Portfolio] {investor_name}: {len(portfolio)} holdings")
+
+            except Exception as e:
+                logger.debug(f"[Portfolio] Error fetching {ticker}: {e}")
+                continue
+
+        if investors_data:
+            logger.info(f"[Portfolio] Successfully crawled {len(investors_data)} investors from dataroma")
+            return {
+                'based_on_person': investors_data,
+                'based_on_stock': []  # build_stock_aggregation에서 계산됨
+            }
+
+        return None
+
     except Exception as e:
-        logger.warning(f"[Portfolio] Failed to fetch from dataroma: {e}")
+        logger.warning(f"[Portfolio] Direct dataroma crawl failed: {e}")
         return None
 
 
