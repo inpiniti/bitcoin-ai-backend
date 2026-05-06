@@ -11,7 +11,7 @@ logger = logging.getLogger("market_cap_service")
 # ── TradingView 크롤링 ────────────────────────────────────
 
 _TV_COLUMNS = [
-    "name", "description", "logoid", "market_cap_basic", "sector",
+    "name", "description", "logoid", "close", "exchange", "market_cap_basic", "sector",
     "gross_margin_ttm", "operating_margin_ttm", "pre_tax_margin_ttm",
     "net_margin_ttm", "free_cash_flow_margin_ttm",
     "return_on_assets_fq", "return_on_equity_fq", "return_on_invested_capital_fq",

@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 import httpx
 import yfinance as yf
+from .market_cap_service import crawl_tradingview
 
 logger = logging.getLogger("portfolio_service")
 
@@ -126,9 +127,10 @@ async def fetch_dataroma_portfolio():
         return None
 
 
-def build_stock_aggregation(investors_with_portfolio):
+def build_stock_aggregation(investors_with_portfolio, tv_data=None):
     """
     투자자별 포트폴리오 데이터를 집계하여 종목별 데이터로 변환
+    tv_data: TradingView에서 가져온 종목 데이터 (선택사항)
     """
     stock_map = {}
 
@@ -169,37 +171,56 @@ def build_stock_aggregation(investors_with_portfolio):
         if stock_data["person_count"] > 0:
             stock_data["avg_ratio"] = stock_data["sum_ratio"] / stock_data["person_count"]
 
-    # 현재가와 거래소 정보 수집 (각 종목별 개별 호출로 안정성 강화)
-    logger.info(f"[Portfolio] Fetching stock prices for {len(stock_map)} tickers from yfinance...")
-    for code in stock_map:
-        try:
-            ticker = yf.Ticker(code)
+    # TradingView 데이터로 가격 정보 채우기
+    if tv_data:
+        logger.info(f"[Portfolio] Looking up {len(stock_map)} tickers in TradingView data...")
+        tv_lookup = {item.get("name", "").upper(): item for item in tv_data}
 
-            # 현재가 추출
+        for code in stock_map:
+            tv_item = tv_lookup.get(code)
+            if tv_item:
+                # TradingView에서 close와 exchange 추출
+                close_val = tv_item.get("close")
+                if close_val and isinstance(close_val, (int, float)) and close_val > 0:
+                    stock_map[code]["close"] = float(close_val)
+
+                exchange_val = tv_item.get("exchange")
+                if exchange_val:
+                    stock_map[code]["exchange"] = str(exchange_val)
+
+                if stock_map[code]["close"]:
+                    logger.debug(f"[Portfolio] {code}: ${stock_map[code]['close']:.2f} ({stock_map[code]['exchange']})")
+
+    # TradingView에 없는 종목은 yfinance로 보충 (fallback)
+    missing_codes = [c for c in stock_map if not stock_map[c]["close"]]
+    if missing_codes:
+        logger.info(f"[Portfolio] Fetching {len(missing_codes)} missing tickers from yfinance...")
+        for code in missing_codes:
             try:
-                history = ticker.history(period="1d")
-                if not history.empty and 'Close' in history.columns:
-                    close_price = history['Close'].iloc[-1]
-                    if close_price and close_price > 0:
-                        stock_map[code]["close"] = float(close_price)
-            except Exception as e:
-                logger.debug(f"[Portfolio] Could not fetch price for {code}: {e}")
+                ticker = yf.Ticker(code)
 
-            # 거래소 정보 추출
-            try:
-                info = ticker.info
-                if info and isinstance(info, dict):
-                    exchange = info.get("exchange", "UNKNOWN")
-                    if exchange:
-                        stock_map[code]["exchange"] = exchange
-                        close_val = stock_map[code].get("close")
-                        if close_val and isinstance(close_val, (int, float)):
-                            logger.debug(f"[Portfolio] {code}: ${close_val:.2f} ({exchange})")
-            except Exception as e:
-                logger.debug(f"[Portfolio] Could not fetch exchange for {code}: {e}")
+                # 현재가 추출
+                try:
+                    history = ticker.history(period="1d")
+                    if not history.empty and 'Close' in history.columns:
+                        close_price = history['Close'].iloc[-1]
+                        if close_price and close_price > 0:
+                            stock_map[code]["close"] = float(close_price)
+                except Exception as e:
+                    logger.debug(f"[Portfolio] Could not fetch price for {code}: {e}")
 
-        except Exception as e:
-            logger.warning(f"[Portfolio] Error fetching data for {code}: {e}")
+                # 거래소 정보 추출
+                try:
+                    info = ticker.info
+                    if info and isinstance(info, dict):
+                        exchange = info.get("exchange", "UNKNOWN")
+                        if exchange:
+                            stock_map[code]["exchange"] = exchange
+                except Exception as e:
+                    logger.debug(f"[Portfolio] Could not fetch exchange for {code}: {e}")
+
+            except Exception as e:
+                logger.warning(f"[Portfolio] Error fetching data for {code}: {e}")
 
     # 인원 수 기준으로 정렬
     stocks = sorted(
@@ -214,18 +235,28 @@ def build_stock_aggregation(investors_with_portfolio):
 async def generate_portfolio_base():
     """
     포트폴리오 기본 데이터 생성
-    1차: potatoinvest dataroma API에서 원본 데이터 조회
-    2차: 조회 실패 시 샘플 데이터 사용
+    1차: dataroma에서 투자자 데이터 조회
+    2차: TradingView에서 가격/거래소 정보 조회
+    3차: 조회 실패 시 샘플 데이터 사용
     """
     try:
-        # 1. potatoinvest에서 원본 데이터 조회
+        # 0. TradingView 데이터 미리 로드 (캐시)
+        tv_data = None
+        try:
+            logger.info("[Portfolio] Fetching TradingView stock data...")
+            tv_data = await crawl_tradingview()
+            logger.info(f"[Portfolio] Loaded {len(tv_data)} stocks from TradingView")
+        except Exception as e:
+            logger.warning(f"[Portfolio] TradingView fetch failed: {e}, will use yfinance fallback")
+
+        # 1. dataroma에서 투자자 데이터 조회
         dataroma_data = await fetch_dataroma_portfolio()
 
         if dataroma_data and dataroma_data.get("based_on_person"):
             investors_data = dataroma_data.get("based_on_person", [])
 
-            # 2. 종목별 집계
-            stocks = build_stock_aggregation(investors_data)
+            # 2. 종목별 집계 (TradingView 데이터 활용)
+            stocks = build_stock_aggregation(investors_data, tv_data)
 
             # 3. 메타데이터
             result = {
@@ -277,7 +308,7 @@ async def generate_portfolio_base():
                 }
                 investors_data.append(investor_with_portfolio)
 
-            stocks = build_stock_aggregation(investors_data)
+            stocks = build_stock_aggregation(investors_data, tv_data)
 
             result = {
                 "based_on_person": investors_data,
