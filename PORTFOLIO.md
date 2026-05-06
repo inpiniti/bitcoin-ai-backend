@@ -38,6 +38,18 @@ graph LR
     API[API Request] --> Scan[TradingView 5,000+ Items] --> ML[Real-time GB Training] --> Logic[Value Inference]
 ```
 
+### [Flow 2.1: 포트폴리오 가격 조회 (Portfolio Pricing)]
+유명 투자자 80명의 보유 종목에 대해 **TradingView의 실시간 가격 데이터**를 우선으로 활용합니다.
+- **데이터 원천**: `Dataroma (투자자 포트폴리오)` + `TradingView (가격/거래소)`
+- **폴백 전략**: TradingView에 없는 종목은 yfinance 활용
+```mermaid
+graph LR
+    Dataroma["Dataroma (80 Investors)"] --> Crawl["Crawl Holdings (1,400+ Stocks)"]
+    TV["TradingView Scanner (5,000+ Stocks)"] --> Crawl
+    Crawl --> Aggregate["Stock Aggregation<br/>(Multi-investor View)"]
+    Aggregate --> API["API Response"]
+```
+
 ### [Flow 3: 고래 수급 및 이탈 탐지 (Whale Tracking)]
 가격 뒤에 숨겨진 자금의 흐름을 분석하여 세력의 매집과 이탈 징후를 포착합니다.
 - **분석 알고리즘**: `VWAP & OBV Divergence Analysis`
