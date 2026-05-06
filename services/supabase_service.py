@@ -509,3 +509,100 @@ async def get_sp500_hourly_analysis_meta_by_date(analysis_date: str) -> list[dic
     if resp.status_code >= 400:
         raise Exception(f"sp500_hourly_analysis_meta 조회 실패 ({resp.status_code}): {resp.text}")
     return resp.json()
+
+
+# ─────────── 포트폴리오 조회 함수 ───────────
+
+
+async def get_portfolio_data(
+    person_id: int | None = None,
+    stock: str | None = None,
+    limit: int = 500,
+) -> dict:
+    """
+    포트폴리오 전체 데이터 조회
+    Returns: {"based_on_person": [...], "based_on_stock": [...]}
+    """
+    _check_config()
+    try:
+        # portfolio_investors 테이블 조회
+        query = f"{SUPABASE_URL}/rest/v1/portfolio_investors?select=*&limit={limit}"
+        if person_id:
+            query += f"&id=eq.{person_id}"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(query, headers=_headers())
+
+        if resp.status_code >= 400:
+            logger.warning(f"포트폴리오 조회 실패: {resp.status_code}, 기본값 반환")
+            return {"based_on_person": [], "based_on_stock": []}
+
+        based_on_person = resp.json()
+
+        # portfolio_holdings 테이블 조회
+        query = f"{SUPABASE_URL}/rest/v1/portfolio_holdings?select=*&limit={limit}"
+        if stock:
+            query += f"&ticker=ilike.{stock}"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(query, headers=_headers())
+
+        if resp.status_code >= 400:
+            logger.warning(f"보유 종목 조회 실패: {resp.status_code}")
+            based_on_stock = []
+        else:
+            based_on_stock = resp.json()
+
+        return {
+            "based_on_person": based_on_person,
+            "based_on_stock": based_on_stock,
+        }
+    except Exception as e:
+        logger.error(f"포트폴리오 데이터 조회 실패: {e}")
+        return {"based_on_person": [], "based_on_stock": []}
+
+
+async def get_portfolio_by_person(
+    person_id: int | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """투자자별 포트폴리오 조회"""
+    _check_config()
+    try:
+        query = f"{SUPABASE_URL}/rest/v1/portfolio_investors?select=*&limit={limit}"
+        if person_id:
+            query += f"&id=eq.{person_id}"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(query, headers=_headers())
+
+        if resp.status_code >= 400:
+            logger.warning(f"투자자 조회 실패: {resp.status_code}")
+            return []
+
+        return resp.json()
+    except Exception as e:
+        logger.error(f"투자자 포트폴리오 조회 실패: {e}")
+        return []
+
+
+async def get_portfolio_by_stock(
+    stock: str,
+    limit: int = 100,
+) -> list[dict]:
+    """종목별 보유 투자자 조회"""
+    _check_config()
+    try:
+        query = f"{SUPABASE_URL}/rest/v1/portfolio_holdings?select=*&ticker=ilike.{stock}&limit={limit}"
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(query, headers=_headers())
+
+        if resp.status_code >= 400:
+            logger.warning(f"종목 조회 실패: {resp.status_code}")
+            return []
+
+        return resp.json()
+    except Exception as e:
+        logger.error(f"종목 포트폴리오 조회 실패: {e}")
+        return []
