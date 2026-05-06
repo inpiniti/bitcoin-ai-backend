@@ -33,7 +33,10 @@ _TV_COLUMNS = [
 
 
 async def crawl_tradingview() -> list[dict]:
-    """TradingView Scanner에서 미국주식 데이터를 가져옵니다."""
+    """TradingView Scanner에서 미국주식 데이터를 가져옵니다 (NASDAQ, NYSE, OTC 포함)."""
+    result = []
+
+    # 1. NASDAQ, NYSE 데이터
     payload = {
         "columns": _TV_COLUMNS,
         "ignore_unknown_fields": False,
@@ -55,18 +58,52 @@ async def crawl_tradingview() -> list[dict]:
             headers={"Content-Type": "application/json"},
         )
 
-    if resp.status_code != 200:
-        raise ValueError(f"TradingView Scan 에러: {resp.status_code}")
+    if resp.status_code == 200:
+        data = resp.json()
+        for item in data.get("data", []):
+            obj = {}
+            for i, col in enumerate(_TV_COLUMNS):
+                obj[col] = item["d"][i]
+            result.append(obj)
+        logger.info(f"[MarketCap] TradingView NASDAQ/NYSE: {len(result)}개 항목")
+    else:
+        logger.warning(f"[MarketCap] TradingView NASDAQ/NYSE Scan 에러: {resp.status_code}")
 
-    data = resp.json()
-    result = []
-    for item in data.get("data", []):
-        obj = {}
-        for i, col in enumerate(_TV_COLUMNS):
-            obj[col] = item["d"][i]
-        result.append(obj)
+    # 2. OTC 마켓 데이터 (추가 커버리지)
+    try:
+        payload_otc = {
+            "columns": _TV_COLUMNS,
+            "ignore_unknown_fields": False,
+            "options": {"lang": "en"},
+            "range": [0, 5000],
+            "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
+            "markets": ["otc"],
+            "filter": [
+                {"left": "type", "operation": "equal", "right": "stock"},
+            ],
+        }
 
-    logger.info(f"[MarketCap] TradingView: {len(result)}개 항목 수집")
+        async with httpx.AsyncClient(timeout=60, verify=False) as client:
+            resp_otc = await client.post(
+                "https://scanner.tradingview.com/america/scan",
+                json=payload_otc,
+                headers={"Content-Type": "application/json"},
+            )
+
+        if resp_otc.status_code == 200:
+            data_otc = resp_otc.json()
+            otc_count = 0
+            for item in data_otc.get("data", []):
+                obj = {}
+                for i, col in enumerate(_TV_COLUMNS):
+                    obj[col] = item["d"][i]
+                result.append(obj)
+                otc_count += 1
+            logger.info(f"[MarketCap] TradingView OTC: {otc_count}개 항목 추가")
+    except Exception as e:
+        logger.debug(f"[MarketCap] OTC 쿼리 실패 (계속): {e}")
+
+    logger.info(f"[MarketCap] TradingView 총: {len(result)}개 항목 수집")
     return result
 
 

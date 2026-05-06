@@ -192,10 +192,16 @@ def build_stock_aggregation(investors_with_portfolio, tv_data=None):
                     logger.debug(f"[Portfolio] {code}: ${stock_map[code]['close']:.2f} ({stock_map[code]['exchange']})")
 
     # TradingView에 없는 종목은 yfinance로 보충 (fallback)
+    # 하지만 warrants, 명백히 invalid한 티커는 스킵
     missing_codes = [c for c in stock_map if not stock_map[c]["close"]]
-    if missing_codes:
-        logger.info(f"[Portfolio] Fetching {len(missing_codes)} missing tickers from yfinance...")
-        for code in missing_codes:
+
+    # 워런트(.WS), 옵션 등 스킵할 패턴
+    skip_patterns = ['.WS', '.WT', '.U', '.RTS', '.CA', '.MX']
+    valid_missing = [c for c in missing_codes if not any(pat in c.upper() for pat in skip_patterns)]
+
+    if valid_missing:
+        logger.info(f"[Portfolio] Fetching {len(valid_missing)} missing tickers from yfinance (skipped {len(missing_codes) - len(valid_missing)} warrants/options)...")
+        for code in valid_missing:
             try:
                 ticker = yf.Ticker(code)
 
@@ -220,7 +226,9 @@ def build_stock_aggregation(investors_with_portfolio, tv_data=None):
                     logger.debug(f"[Portfolio] Could not fetch exchange for {code}: {e}")
 
             except Exception as e:
-                logger.warning(f"[Portfolio] Error fetching data for {code}: {e}")
+                logger.debug(f"[Portfolio] yfinance 조회 실패 {code}: {e}")
+    else:
+        logger.info(f"[Portfolio] 모든 {len(stock_map)} 종목이 TradingView에서 조회됨 (yfinance 폴백 불필요)")
 
     # 인원 수 기준으로 정렬
     stocks = sorted(
