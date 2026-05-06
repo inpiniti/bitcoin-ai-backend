@@ -4,6 +4,7 @@ potatoinvest dataroma_portfolio 패턴을 Python으로 구현
 """
 import logging
 from datetime import datetime
+import yfinance as yf
 
 logger = logging.getLogger("portfolio_service")
 
@@ -66,6 +67,7 @@ def build_stock_aggregation(investors_with_portfolio):
     """
     투자자별 포트폴리오 데이터를 집계하여 종목별 데이터로 변환
     potatoinvest의 buildStockAggregation과 동일 로직
+    현재가와 거래소 정보 추가
     """
     stock_map = {}
 
@@ -86,6 +88,8 @@ def build_stock_aggregation(investors_with_portfolio):
                     "person_count": 0,
                     "sum_ratio": 0.0,
                     "avg_ratio": None,
+                    "close": None,
+                    "exchange": None,
                 }
 
             # 투자자 정보 추가
@@ -101,6 +105,35 @@ def build_stock_aggregation(investors_with_portfolio):
     for stock_code, stock_data in stock_map.items():
         if stock_data["person_count"] > 0:
             stock_data["avg_ratio"] = stock_data["sum_ratio"] / stock_data["person_count"]
+
+    # 현재가와 거래소 정보 추수집 (일괄 처리로 성능 최적화)
+    try:
+        logger.info("[Portfolio] Fetching stock prices from yfinance...")
+        ticker_list = list(stock_map.keys())
+        if ticker_list:
+            # yfinance에서 모든 종목 정보를 한번에 가져오기
+            tickers = yf.Tickers(" ".join(ticker_list))
+
+            for code in stock_map:
+                try:
+                    ticker_obj = tickers.tickers.get(code)
+                    if ticker_obj:
+                        # 현재가 추출
+                        history = ticker_obj.history(period="1d")
+                        if not history.empty:
+                            close_price = history['Close'].iloc[-1]
+                            stock_map[code]["close"] = float(close_price)
+
+                        # 거래소 정보 추출
+                        info = ticker_obj.info
+                        if info:
+                            exchange = info.get("exchange", "UNKNOWN")
+                            stock_map[code]["exchange"] = exchange
+                            logger.debug(f"[Portfolio] {code}: ${stock_map[code]['close']:.2f} ({exchange})")
+                except Exception as e:
+                    logger.warning(f"[Portfolio] Failed to fetch {code} data: {e}")
+    except Exception as e:
+        logger.warning(f"[Portfolio] Failed to fetch stock prices: {e}")
 
     # 인원 수 기준으로 정렬
     stocks = sorted(
