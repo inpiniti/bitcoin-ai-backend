@@ -106,34 +106,37 @@ def build_stock_aggregation(investors_with_portfolio):
         if stock_data["person_count"] > 0:
             stock_data["avg_ratio"] = stock_data["sum_ratio"] / stock_data["person_count"]
 
-    # 현재가와 거래소 정보 추수집 (일괄 처리로 성능 최적화)
-    try:
-        logger.info("[Portfolio] Fetching stock prices from yfinance...")
-        ticker_list = list(stock_map.keys())
-        if ticker_list:
-            # yfinance에서 모든 종목 정보를 한번에 가져오기
-            tickers = yf.Tickers(" ".join(ticker_list))
+    # 현재가와 거래소 정보 수집 (각 종목별 개별 호출로 안정성 강화)
+    logger.info(f"[Portfolio] Fetching stock prices for {len(stock_map)} tickers from yfinance...")
+    for code in stock_map:
+        try:
+            ticker = yf.Ticker(code)
 
-            for code in stock_map:
-                try:
-                    ticker_obj = tickers.tickers.get(code)
-                    if ticker_obj:
-                        # 현재가 추출
-                        history = ticker_obj.history(period="1d")
-                        if not history.empty:
-                            close_price = history['Close'].iloc[-1]
-                            stock_map[code]["close"] = float(close_price)
+            # 현재가 추출
+            try:
+                history = ticker.history(period="1d")
+                if not history.empty and 'Close' in history.columns:
+                    close_price = history['Close'].iloc[-1]
+                    if close_price and close_price > 0:
+                        stock_map[code]["close"] = float(close_price)
+            except Exception as e:
+                logger.debug(f"[Portfolio] Could not fetch price for {code}: {e}")
 
-                        # 거래소 정보 추출
-                        info = ticker_obj.info
-                        if info:
-                            exchange = info.get("exchange", "UNKNOWN")
-                            stock_map[code]["exchange"] = exchange
-                            logger.debug(f"[Portfolio] {code}: ${stock_map[code]['close']:.2f} ({exchange})")
-                except Exception as e:
-                    logger.warning(f"[Portfolio] Failed to fetch {code} data: {e}")
-    except Exception as e:
-        logger.warning(f"[Portfolio] Failed to fetch stock prices: {e}")
+            # 거래소 정보 추출
+            try:
+                info = ticker.info
+                if info and isinstance(info, dict):
+                    exchange = info.get("exchange", "UNKNOWN")
+                    if exchange:
+                        stock_map[code]["exchange"] = exchange
+                        close_val = stock_map[code].get("close")
+                        if close_val and isinstance(close_val, (int, float)):
+                            logger.debug(f"[Portfolio] {code}: ${close_val:.2f} ({exchange})")
+            except Exception as e:
+                logger.debug(f"[Portfolio] Could not fetch exchange for {code}: {e}")
+
+        except Exception as e:
+            logger.warning(f"[Portfolio] Error fetching data for {code}: {e}")
 
     # 인원 수 기준으로 정렬
     stocks = sorted(
