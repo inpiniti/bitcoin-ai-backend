@@ -9,9 +9,6 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-
 from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test
 
 logging.basicConfig(
@@ -23,90 +20,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger("main")
 
-scheduler = AsyncIOScheduler()
 
-# ── 미장 기준 상대 시간 매핑 (ET 기준, DST 자동 처리) ──
-# 미국 정규장: 09:30 ~ 16:00 ET
-MARKET_TIME_MAP: dict[str, tuple[int, int]] = {
-    "market_open":      (9,  30),  # 장 시작
-    "market_open_30m":  (10,  0),  # 장 시작 30분 후
-    "market_open_1h":   (10, 30),  # 장 시작 1시간 후
-    "market_close_2h":  (14,  0),  # 장 마감 2시간 전
-    "market_close_1h":  (15,  0),  # 장 마감 1시간 전 (기본값)
-    "market_close_30m": (15, 30),  # 장 마감 30분 전
-    "market_close":     (16,  0),  # 장 마감
-}
-
-
-def _parse_market_time(time_key: str) -> tuple[int, int]:
-    """미장 기준 상대 시간 키 → (hour, minute) ET 변환. 알 수 없는 키는 기본값 15:00 반환."""
-    return MARKET_TIME_MAP.get(time_key, (15, 0))
-
-
-async def _scheduled_auto_trade():
-    """스케줄러가 호출하는 자동매매 진입점"""
-    from services.auto_trade_service import run_auto_trade_dl
-    try:
-        logger.info("[Scheduler] 자동매매 시작")
-        result = await run_auto_trade_dl(is_test=False)
-        logger.info(f"[Scheduler] 자동매매 완료: {result}")
-    except Exception as e:
-        logger.exception(f"[Scheduler] 자동매매 실패: {e}")
-
-
-
-
-
-async def _scheduled_sp500_analysis():
-    """매시간 정각 실행 - S&P 500 뉴스 영향도 분석
-
-    최근 1시간(hours=1)의 뉴스만 수집하여 분석하므로
-    매 시간 새로운 분석 결과가 생성되고 Supabase에 저장됩니다.
-    """
-    from services.sp500_analysis_service import run_sp500_analysis
-    from services.gemini_key_manager import get_key_manager
-    try:
-        logger.info("[SP500] 스케줄 분석 시작 (매시간)")
-        key_mgr = get_key_manager()
-        result = await run_sp500_analysis(key_mgr, hours=1)
-        logger.info(f"[SP500] 스케줄 분석 완료: {result}")
-    except Exception as e:
-        logger.exception(f"[SP500] 스케줄 분석 실패: {e}")
-
-
-
-
-
-async def reschedule_from_settings() -> dict:
-    """
-    Supabase automation_settings의 활성 설정에서 execution_time을 읽어
-    APScheduler 잡을 재등록합니다. 라우터에서도 호출 가능합니다.
-    """
-    from services.supabase_service import load_automation_settings_active
-
-    time_key = "market_close_1h"
-    try:
-        cfg = await load_automation_settings_active()
-        if cfg and cfg.get("execution_time"):
-            time_key = cfg["execution_time"]
-    except Exception as e:
-        logger.warning(f"[Scheduler] 설정 로드 실패, 기본값 사용: {e}")
-
-    hour, minute = _parse_market_time(time_key)
-    scheduler.add_job(
-        _scheduled_auto_trade,
-        CronTrigger(
-            hour=hour,
-            minute=minute,
-            day_of_week="mon-fri",
-            timezone="America/New_York",  # DST 자동 처리
-        ),
-        id="auto_trade_dl",
-        replace_existing=True,
-    )
-    msg = f"평일 {hour:02d}:{minute:02d} ET ({time_key})"
-    logger.info(f"[Scheduler] 스케줄 등록 완료: {msg}")
-    return {"time_key": time_key, "hour": hour, "minute": minute, "schedule": msg}
 
 
 @asynccontextmanager
@@ -128,31 +42,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"TimesFM 자동매매 사전 로드 실패 (자동매매 실행 시 로드): {e}")
 
-    # ── 자동매매 스케줄러 시작 ──────────────────────
-    # Supabase 설정에서 실행 시간 읽기 → 동적 스케줄 등록
-    # America/New_York 타임존으로 DST(EDT/EST) 자동 처리
-    scheduler.start()
-    result = await reschedule_from_settings()
-    logger.info(f"[Scheduler] 자동매매 스케줄러 시작: {result['schedule']}")
-
-
-
-    # ── S&P 500 영향도 분석 스케줄 등록 (매시간 정각) ──
-    # UTC 기준 매 시간 정각 실행 (hour=* 는 모든 시간)
-    scheduler.add_job(
-        _scheduled_sp500_analysis,
-        CronTrigger(minute=0, timezone="UTC"),  # 매시간 :00분
-        id="sp500_analysis",
-        replace_existing=True,
-    )
-    logger.info("[Scheduler] S&P 500 영향도 분석 등록: 매시간 정각 (UTC 기준)")
-
-
-
     yield
 
     # ── 종료 ────────────────────────────────────────
-    scheduler.shutdown()
     logger.info("서버 종료")
 
 
@@ -173,16 +65,10 @@ app = FastAPI(
 | `POST /v1/xgb/train` | XGBoost 매수/매도 분류 모델 학습 |
 | `POST /v1/xgb/predict` | 학습된 XGBoost 모델로 매수/매도 확률 예측 |
 | `POST /v1/market-cap` | AI 기반 적정 시가총액 추정 |
-| `POST /auto-trade/run` | 자동매매 실행 (APScheduler 평일 15:00 ET 자동 호출) |
+| `POST /auto-trade/run` | 자동매매 실행 (수동 실행) |
 | `POST /auto-trade/run-test` | 자동매매 테스트 실행 (실제 주문 없음) |
 | `GET /auto-trade/settings` | 현재 활성 자동매매 설정 확인 |
 | `GET /auto-trade/logs` | 자동매매 실행 로그 조회 |
-
-### 자동매매 스케줄
-- **실행 시각**: Supabase `automation_settings.execution_time` 기반 동적 설정 (기본: 평일 15:00 ET)
-- **DST 처리**: `America/New_York` 타임존으로 썸머타임 자동 처리
-- **설정 저장소**: Supabase `automation_settings` 테이블
-- **로그 저장소**: Supabase `auto_trade_dl_logs` 테이블
 """,
     lifespan=lifespan,
 )

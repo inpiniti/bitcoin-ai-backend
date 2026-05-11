@@ -134,27 +134,6 @@ async def get_active_settings():
     return {"active": True, "settings": cfg}
 
 
-@router.post(
-    "/reschedule",
-    summary="자동매매 스케줄 재설정",
-    description="""
-Supabase `automation_settings`의 활성 설정에서 `execution_time`을 읽어 스케줄을 재등록합니다.
-
-클라이언트에서 설정을 변경한 직후 호출하면 서버 재시작 없이 즉시 반영됩니다.
-""",
-)
-async def reschedule_auto_trade(
-    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret"),
-):
-    _verify_cron(x_cron_secret)
-    try:
-        from main import reschedule_from_settings
-        result = await reschedule_from_settings()
-        return {"status": "ok", **result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get(
     "/top-tickers",
     summary="매수 후보 TOP10 로그 조회",

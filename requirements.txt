@@ -42,6 +42,3 @@ joblib
 yfinance
 lxml
 google-generativeai
-
-# ── Scheduler ────────────────────────────────────
-apscheduler

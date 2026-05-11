@@ -563,16 +563,6 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         except Exception as e:
             logger.warning(f"[TopTickers] 저장 실패 (매매 결과에는 영향 없음): {e}")
 
-        # ── 12. 카카오 리포트 전송 ────────────────────
-        try:
-            from services.kakao_service import send_trade_report, build_trade_report_parts
-            report_parts = build_trade_report_parts(summary, mode)
-            sent = await send_trade_report(cfg, report_parts)
-            if sent:
-                log("[Kakao] 매매 리포트 전송 완료")
-        except Exception as e:
-            logger.warning(f"[Kakao] 리포트 전송 실패 (매매 결과에는 영향 없음): {e}")
-
         return summary
 
     except Exception as e:
