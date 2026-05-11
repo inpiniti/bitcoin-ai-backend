@@ -224,29 +224,32 @@ async def handle_price_detection(
     # 2. 등락율 계산
     price_rate = ((current_price - base_price) / base_price * 100) if base_price > 0 else 0
 
+    common = {
+        'ticker': ticker,
+        'market': market,
+        'price': current_price,
+        'base_price_before': base_price,
+        'price_rate': price_rate,
+        'current_quantity': quantity,
+    }
+
     # 3. gap% 이상 올랐을 때 (수량 = floor(올린율 / gap))
     if price_rate >= gap:
         sell_quantity = int(price_rate / gap)
         if quantity > 0 and sell_quantity > 0:
-            # 계산된 수량만큼 팔기 (보유량을 초과할 수 없음)
             actual_sell_qty = min(sell_quantity, quantity)
             await on_order_execute({
-                'ticker': ticker,
-                'market': market,
+                **common,
                 'side': 'sell',
                 'quantity': actual_sell_qty,
-                'price': current_price,
-                'action': 'sell_and_update'
+                'action': 'sell_and_update',
             })
         else:
-            # 판매할 수량이 없으면 기준가만 업데이트
             await on_order_execute({
-                'ticker': ticker,
-                'market': market,
+                **common,
                 'side': 'none',
                 'quantity': 0,
-                'price': current_price,
-                'action': 'update_base_price'
+                'action': 'update_base_price',
             })
 
     # 4. gap% 이상 내렸을 때 (수량 = floor(내린율 / gap))
@@ -256,20 +259,15 @@ async def handle_price_detection(
 
         if buy_quantity > 0:
             await on_order_execute({
-                'ticker': ticker,
-                'market': market,
+                **common,
                 'side': 'buy',
                 'quantity': buy_quantity,
-                'price': current_price,
-                'action': 'buy_and_update'
+                'action': 'buy_and_update',
             })
         else:
-            # 기준가만 업데이트
             await on_order_execute({
-                'ticker': ticker,
-                'market': market,
+                **common,
                 'side': 'none',
                 'quantity': 0,
-                'price': current_price,
-                'action': 'update_base_price'
+                'action': 'update_base_price',
             })

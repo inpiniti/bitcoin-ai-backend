@@ -67,6 +67,9 @@ async def _start_realtime_detection(approval_key: str):
         logger.info("No active realtime trades to monitor")
         return
 
+    # ticker → trade 캐시 (매매 후 DB에서 최신값으로 갱신)
+    active_trades_dict = {t['ticker'].upper(): t for t in active_trades}
+
     logger.info(f"Starting realtime detection for {len(active_trades)} trades")
 
     # 2. WebSocket 매니저 초기화
@@ -93,20 +96,32 @@ async def _start_realtime_detection(approval_key: str):
         # 4. 메시지 수신 및 처리
         async def on_price_update(data):
             try:
-                # 수신한 ticker 조회
                 ticker = data.get('SYMB', '').upper()
                 rate = float(data.get('RATE', 0))
                 mtyp = data.get('MTYP', '1')
                 current_price = float(data.get('LAST', 0))
 
-                # 해당 종목의 설정 찾기
-                trade = next(
-                    (t for t in active_trades if t['ticker'].upper() == ticker),
-                    None
-                )
-
+                trade = active_trades_dict.get(ticker)
                 if not trade:
                     return
+
+                async def _on_execute(order_data):
+                    await execute_realtime_order(
+                        trade_id=trade['id'],
+                        order_data=order_data,
+                        supabase_client=supabase,
+                    )
+                    # 매매/업데이트 직후 DB 최신값으로 캐시 갱신
+                    try:
+                        latest = supabase.table('realtime_trading') \
+                            .select('*') \
+                            .eq('id', trade['id']) \
+                            .single() \
+                            .execute()
+                        if getattr(latest, 'data', None):
+                            active_trades_dict[ticker] = latest.data
+                    except Exception as e:
+                        logger.error(f"Error refreshing trade cache for {ticker}: {e}")
 
                 await handle_price_detection(
                     ticker=ticker,
@@ -118,10 +133,7 @@ async def _start_realtime_detection(approval_key: str):
                     rate=rate,
                     mtyp=mtyp,
                     supabase_client=supabase,
-                    on_order_execute=lambda order_data: execute_realtime_order(
-                        trade_id=trade['id'],
-                        order_data=order_data
-                    )
+                    on_order_execute=_on_execute,
                 )
             except Exception as e:
                 logger.error(f"Error handling price update: {e}")

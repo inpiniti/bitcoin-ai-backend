@@ -576,66 +576,142 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         raise
 
 
-async def execute_realtime_order(trade_id: str, order_data: dict):
+def _parse_account_no(account_no: str) -> tuple[str, str]:
+    """계좌번호 → (CANO 8자, ACNT_PRDT_CD 2자) 분리"""
+    clean = (account_no or "").replace("-", "").replace(" ", "")
+    if len(clean) < 10:
+        raise ValueError(f"계좌번호 형식 오류: {account_no}")
+    return clean[:8], clean[8:10]
+
+
+async def execute_realtime_order(trade_id: str, order_data: dict, supabase_client):
     """
-    실시간 감지된 주문 실행
-    trade_id: realtime_trading 테이블의 ID
-    order_data: {
-        'ticker': str,
-        'market': str,
-        'side': 'buy'|'sell'|'none',
-        'quantity': int,
-        'price': float,
-        'action': 'buy_and_update'|'sell_and_update'|'update_base_price'
+    실시간 감지 주문 실행 + base_price/quantity 갱신 + 주문 이력 기록.
+
+    Args:
+        trade_id: realtime_trading.id
+        order_data: handle_price_detection에서 전달되는 dict
+        supabase_client: routers/realtime.py에서 만든 sync supabase 클라이언트
+    """
+    supabase = supabase_client
+
+    ticker = order_data.get('ticker')
+    market = order_data.get('market', 'NAS')
+    side = order_data.get('side')
+    qty = int(order_data.get('quantity', 0) or 0)
+    price = float(order_data.get('price', 0) or 0)
+    action = order_data.get('action')
+    base_price_before = order_data.get('base_price_before')
+    price_rate = order_data.get('price_rate')
+    current_quantity = int(order_data.get('current_quantity', 0) or 0)
+
+    order_log = {
+        'trade_id': trade_id,
+        'ticker': ticker,
+        'market': market,
+        'side': side,
+        'action': action,
+        'quantity': qty,
+        'price': price,
+        'base_price_before': base_price_before,
+        'base_price_after': price,
+        'price_rate': price_rate,
+        'success': False,
+        'order_no': None,
+        'error_message': None,
     }
-    """
-    from services.supabase_service import supabase
+
+    def _update_base_only(reason: str | None = None):
+        try:
+            supabase.table('realtime_trading').update({
+                'base_price': price,
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            }).eq('id', trade_id).execute()
+        except Exception as e:
+            logger.error(f"[Realtime] base_price 업데이트 실패: {e}")
+        if reason:
+            order_log['error_message'] = reason
+
+    def _record_order():
+        try:
+            supabase.table('realtime_orders').insert(order_log).execute()
+        except Exception as e:
+            logger.error(f"[Realtime] 주문 이력 기록 실패: {e}")
 
     try:
-        action = order_data.get('action')
-
-        # 1. 기준가만 업데이트하는 경우
+        # 1) 기준가만 업데이트
         if action == 'update_base_price':
-            await supabase.table('realtime_trading').update({
-                'base_price': order_data['price'],
-                'updated_at': datetime.now(timezone.utc).isoformat()
-            }).eq('id', trade_id).execute()
-            logger.info(f"[Realtime] {order_data['ticker']} 기준가 업데이트: {order_data['price']}")
+            _update_base_only()
+            order_log['success'] = True
+            logger.info(f"[Realtime] {ticker} 기준가만 업데이트: {price}")
+            _record_order()
             return
 
-        # 2. 매수/매도 주문 실행
-        if action in ('buy_and_update', 'sell_and_update'):
-            side = order_data['side']
-            quantity = order_data['quantity']
-            price = order_data['price']
-            ticker = order_data['ticker']
+        # 2) 자격증명 조회
+        cred_res = supabase.table('kis_credentials') \
+            .select('*') \
+            .order('updated_at', desc=True) \
+            .limit(1) \
+            .execute()
+        cred_rows = getattr(cred_res, 'data', None) or []
+        cred = cred_rows[0] if cred_rows else None
 
-            # 주문 실행
-            try:
-                kis_resp = await kis_service.order_stock(
-                    side=side,
-                    ticker=ticker,
-                    quantity=quantity,
-                    price=price
-                )
-                logger.info(
-                    f"[Realtime] {side.upper()} 주문 실행: {ticker} {quantity}주 @ {price}"
-                )
+        if not cred:
+            logger.warning(f"[Realtime] {ticker} KIS 자격증명 없음 - 기준가만 업데이트")
+            _update_base_only('KIS 자격증명 없음')
+            _record_order()
+            return
 
-                # 주문 성공 시 기준가 업데이트
-                await supabase.table('realtime_trading').update({
-                    'base_price': price,
-                    'quantity': quantity if side == 'buy' else 0,
-                    'updated_at': datetime.now(timezone.utc).isoformat()
-                }).eq('id', trade_id).execute()
+        try:
+            cano, prdt = _parse_account_no(cred.get('account_no'))
+        except Exception as e:
+            logger.warning(f"[Realtime] 계좌번호 파싱 실패: {e}")
+            _update_base_only(f'계좌번호 파싱 실패: {e}')
+            _record_order()
+            return
 
-            except Exception as e:
-                # 주문 실패 시 기준가만 업데이트
-                logger.warning(f"[Realtime] {side.upper()} 주문 실패: {e}, 기준가 업데이트만 진행")
-                await supabase.table('realtime_trading').update({
-                    'base_price': price,
-                    'updated_at': datetime.now(timezone.utc).isoformat()
-                }).eq('id', trade_id).execute()
+        # 3) 주문 실행
+        appkey = cred.get('appkey')
+        appsecret = cred.get('appsecret')
+
+        if side == 'buy':
+            result = await kis_service.buy_overseas_stock(
+                appkey, appsecret, cano, prdt,
+                ticker, qty, price, market,
+            )
+        elif side == 'sell':
+            result = await kis_service.sell_overseas_stock(
+                appkey, appsecret, cano, prdt,
+                ticker, qty, price, market,
+            )
+        else:
+            result = {'success': False, 'error': f'알 수 없는 side: {side}'}
+
+        # 4) 결과 처리
+        if result.get('success'):
+            new_qty = current_quantity + qty if side == 'buy' else max(0, current_quantity - qty)
+            supabase.table('realtime_trading').update({
+                'base_price': price,
+                'quantity': new_qty,
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            }).eq('id', trade_id).execute()
+            order_log['success'] = True
+            order_log['order_no'] = result.get('order_no')
+            logger.info(
+                f"[Realtime] {side.upper()} 성공: {ticker} {qty}주 @ {price} "
+                f"(보유 {current_quantity} → {new_qty})"
+            )
+        else:
+            err = result.get('error', '주문 실패')
+            logger.warning(f"[Realtime] {side.upper()} 실패: {err} → 기준가만 업데이트")
+            _update_base_only(err)
 
     except Exception as e:
-        logger.error(f"[Realtime] 실시간 주문 처리 오류: {e}")
+        logger.error(f"[Realtime] 실시간 주문 처리 예외: {e}")
+        order_log['error_message'] = f"예외: {e}"
+        try:
+            _update_base_only()
+        except Exception:
+            pass
+    finally:
+        _record_order()
