@@ -48,9 +48,10 @@ class KISWebSocketManager:
         if not self.is_connected:
             raise RuntimeError("WebSocket is not connected")
 
-        # tr_key 생성: D + market + ticker
-        # 예: DNASAAPL, DNYSTSLA
-        tr_key = f"D{market}{ticker.upper()}"
+        # tr_key 생성: D + market + ticker (BRK-B → BRK/B)
+        # 예: DNASAAPL, DNASBRK/B
+        kis_ticker = ticker.upper().replace("-", "/")
+        tr_key = f"D{market}{kis_ticker}"
 
         header = {
             'approval_key': self.approval_key,
@@ -77,7 +78,8 @@ class KISWebSocketManager:
         if not self.is_connected:
             raise RuntimeError("WebSocket is not connected")
 
-        tr_key = f"D{market}{ticker.upper()}"
+        kis_ticker = ticker.upper().replace("-", "/")
+        tr_key = f"D{market}{kis_ticker}"
 
         header = {
             'approval_key': self.approval_key,

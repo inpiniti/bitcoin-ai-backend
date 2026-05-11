@@ -21,6 +21,11 @@ def _normalize_order_price(price: float) -> float:
     return round(float(price), 2)
 
 
+def to_kis_ticker(ticker: str) -> str:
+    """KIS API용 ticker 변환: BRK-B → BRK/B (해외주식 알파벳 클래스 종목)."""
+    return str(ticker or "").strip().upper().replace("-", "/")
+
+
 def parse_account(kis_account: str) -> tuple[str, str]:
     """
     automation_settings.kis_account 를 account_no(8자리) + account_code(2자리) 로 분리.
@@ -105,7 +110,7 @@ async def get_overseas_balance(appkey: str, appsecret: str, account_no: str, acc
 async def get_current_price(appkey: str, appsecret: str, exchange: str, symbol: str) -> dict:
     """해외주식 현재가 조회"""
     token = await get_access_token(appkey, appsecret)
-    params = {"AUTH": "", "EXCD": exchange, "SYMB": symbol}
+    params = {"AUTH": "", "EXCD": exchange, "SYMB": to_kis_ticker(symbol)}
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
             f"{KIS_BASE_URL}/uapi/overseas-price/v1/quotations/price-detail",
@@ -143,7 +148,7 @@ async def _order_overseas_stock(
         "CANO": account_no,
         "ACNT_PRDT_CD": account_code,
         "OVRS_EXCG_CD": exchange_map.get(exchange, "NASD"),
-        "PDNO": symbol,
+        "PDNO": to_kis_ticker(symbol),
         "ORD_QTY": str(qty),
         "OVRS_ORD_UNPR": f"{normalized_price:.2f}",
         "ORD_SVR_DVSN_CD": "0",

@@ -94,7 +94,11 @@ async def _detection_loop(approval_key: str):
         logger.info("[Realtime] 활성 종목 없음 - 감지 시작 안 함")
         return
 
-    active_trades_dict = {t["ticker"].upper(): t for t in active_trades}
+    # 매칭 키: BRK-B / BRK/B 모두 동일하게 비교되도록 - / 제거
+    def _norm(t):
+        return str(t or "").upper().replace("-", "").replace("/", "")
+
+    active_trades_dict = {_norm(t["ticker"]): t for t in active_trades}
     logger.info(f"[Realtime] 감지 시작: {len(active_trades)}개 종목")
 
     manager = KISWebSocketManager(
@@ -119,14 +123,15 @@ async def _detection_loop(approval_key: str):
 
         async def on_price_update(data):
             try:
-                ticker = (data.get("SYMB") or "").upper()
+                symb = (data.get("SYMB") or "").upper()
                 rate = float(data.get("RATE") or 0)
                 mtyp = data.get("MTYP") or "1"
                 current_price = float(data.get("LAST") or 0)
 
-                trade = active_trades_dict.get(ticker)
+                trade = active_trades_dict.get(_norm(symb))
                 if not trade:
                     return
+                ticker = trade["ticker"]  # DB 원본 (BRK-B 등) 사용
 
                 async def _on_execute(order_data):
                     await execute_realtime_order(
@@ -142,7 +147,7 @@ async def _detection_loop(approval_key: str):
                             .single() \
                             .execute()
                         if getattr(latest, "data", None):
-                            active_trades_dict[ticker] = latest.data
+                            active_trades_dict[_norm(symb)] = latest.data
                     except Exception as e:
                         logger.error(f"[Realtime] {ticker} 캐시 갱신 실패: {e}")
 
