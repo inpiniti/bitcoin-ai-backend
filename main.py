@@ -42,9 +42,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"TimesFM 자동매매 사전 로드 실패 (자동매매 실행 시 로드): {e}")
 
+    # ── 실시간 매매 감지 자동 시작 ────────────────────
+    try:
+        from routers.realtime import start_detection_internal
+        result = await start_detection_internal()
+        logger.info(f"실시간 감지 자동 시작: {result}")
+    except Exception as e:
+        logger.warning(f"실시간 감지 자동 시작 실패: {e}")
+
     yield
 
-    # ── 종료 ────────────────────────────────────────
+    # ── 실시간 매매 감지 종료 ────────────────────────
+    try:
+        from routers.realtime import stop_detection_internal
+        await stop_detection_internal()
+        logger.info("실시간 감지 종료 완료")
+    except Exception as e:
+        logger.warning(f"실시간 감지 종료 실패: {e}")
+
     logger.info("서버 종료")
 
 
