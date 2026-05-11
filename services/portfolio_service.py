@@ -85,14 +85,17 @@ async def fetch_dataroma_portfolio():
                             ticker_name = tds[1].get_text(strip=True) if len(tds) > 1 else ''
                             ratio_text = tds[2].get_text(strip=True) if len(tds) > 2 else ''
 
-                            # ticker_name은 "AAPL - Apple Inc." 형식
-                            ticker_text = ticker_name.split('-')[0].strip() if ticker_name else ''
+                            # ticker_name은 "AAPL - Apple Inc." 형식 → ticker / 종목명 분리
+                            parts = ticker_name.split('-', 1) if ticker_name else []
+                            ticker_text = parts[0].strip() if parts else ''
+                            company_name = parts[1].strip() if len(parts) > 1 else ''
 
                             if ticker_text and ratio_text:
                                 try:
                                     ratio_val = float(ratio_text.replace('%', '').strip())
                                     portfolio.append({
                                         'code': ticker_text,
+                                        'name': company_name,
                                         'ratio': str(ratio_val)
                                     })
                                 except ValueError:
@@ -138,6 +141,7 @@ def build_stock_aggregation(investors_with_portfolio, tv_data=None):
         portfolio = investor.get("portfolio", [])
         for holding in portfolio:
             code = holding.get("code", "").upper()
+            company_name = holding.get("name", "") or ""
             ratio_str = holding.get("ratio", "0")
             try:
                 # ratio가 문자열 "12.5" 또는 "12.5%" 형태일 수 있음
@@ -149,6 +153,7 @@ def build_stock_aggregation(investors_with_portfolio, tv_data=None):
             if code not in stock_map:
                 stock_map[code] = {
                     "stock": code,
+                    "name": company_name,
                     "person": [],
                     "person_count": 0,
                     "sum_ratio": 0.0,
@@ -156,6 +161,9 @@ def build_stock_aggregation(investors_with_portfolio, tv_data=None):
                     "close": None,
                     "exchange": None,
                 }
+            # 종목명이 비어있으면 첫 번째 보유 투자자의 이름으로 채움
+            elif not stock_map[code].get("name") and company_name:
+                stock_map[code]["name"] = company_name
 
             # 투자자 정보 추가
             stock_map[code]["person"].append({
