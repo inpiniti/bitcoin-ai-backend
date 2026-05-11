@@ -36,10 +36,14 @@ def is_detection_running() -> bool:
 # 내부 헬퍼
 # ─────────────────────────────────────────────
 def _get_supabase_env() -> tuple[str | None, str | None]:
-    return (
-        os.getenv("SUPABASE_URL"),
-        os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY"),
+    # services/supabase_service.py와 동일한 우선순위
+    url = os.environ.get("VITE_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = (
+        os.environ.get("VITE_SUPABASE_ANON_KEY")
+        or os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("SUPABASE_KEY")
     )
+    return url, key
 
 
 async def _fetch_latest_approval_key() -> str | None:
