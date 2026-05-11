@@ -5,6 +5,8 @@
 fastapi
 uvicorn[standard]
 httpx
+websockets
+aiohttp
 
 # ── YouTube MP3 ───────────────────────────────────
 yt-dlp

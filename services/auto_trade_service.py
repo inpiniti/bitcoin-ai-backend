@@ -574,3 +574,68 @@ async def _run_single_cfg(cfg: dict, is_test: bool = False) -> dict:
         except Exception:
             pass
         raise
+
+
+async def execute_realtime_order(trade_id: str, order_data: dict):
+    """
+    실시간 감지된 주문 실행
+    trade_id: realtime_trading 테이블의 ID
+    order_data: {
+        'ticker': str,
+        'market': str,
+        'side': 'buy'|'sell'|'none',
+        'quantity': int,
+        'price': float,
+        'action': 'buy_and_update'|'sell_and_update'|'update_base_price'
+    }
+    """
+    from services.supabase_service import supabase
+
+    try:
+        action = order_data.get('action')
+
+        # 1. 기준가만 업데이트하는 경우
+        if action == 'update_base_price':
+            await supabase.table('realtime_trading').update({
+                'base_price': order_data['price'],
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            }).eq('id', trade_id).execute()
+            logger.info(f"[Realtime] {order_data['ticker']} 기준가 업데이트: {order_data['price']}")
+            return
+
+        # 2. 매수/매도 주문 실행
+        if action in ('buy_and_update', 'sell_and_update'):
+            side = order_data['side']
+            quantity = order_data['quantity']
+            price = order_data['price']
+            ticker = order_data['ticker']
+
+            # 주문 실행
+            try:
+                kis_resp = await kis_service.order_stock(
+                    side=side,
+                    ticker=ticker,
+                    quantity=quantity,
+                    price=price
+                )
+                logger.info(
+                    f"[Realtime] {side.upper()} 주문 실행: {ticker} {quantity}주 @ {price}"
+                )
+
+                # 주문 성공 시 기준가 업데이트
+                await supabase.table('realtime_trading').update({
+                    'base_price': price,
+                    'quantity': quantity if side == 'buy' else 0,
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }).eq('id', trade_id).execute()
+
+            except Exception as e:
+                # 주문 실패 시 기준가만 업데이트
+                logger.warning(f"[Realtime] {side.upper()} 주문 실패: {e}, 기준가 업데이트만 진행")
+                await supabase.table('realtime_trading').update({
+                    'base_price': price,
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }).eq('id', trade_id).execute()
+
+    except Exception as e:
+        logger.error(f"[Realtime] 실시간 주문 처리 오류: {e}")

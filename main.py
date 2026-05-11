@@ -9,7 +9,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test, realtime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,6 +91,7 @@ app.include_router(youtube.router)
 app.include_router(rl.router)
 app.include_router(sp500.router)
 app.include_router(portfolio.router)
+app.include_router(realtime.router)
 app.include_router(test.router)
 
 
