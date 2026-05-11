@@ -94,9 +94,9 @@ async def _detection_loop(approval_key: str):
         logger.info("[Realtime] 활성 종목 없음 - 감지 시작 안 함")
         return
 
-    # 매칭 키: BRK-B / BRK/B 모두 동일하게 비교되도록 - / 제거
+    # 매칭 키: BRK.B / BRK-B / BRK/B / BRKB 모두 동일하게 비교되도록 정규화
     def _norm(t):
-        return str(t or "").upper().replace("-", "").replace("/", "")
+        return str(t or "").upper().replace(".", "").replace("-", "").replace("/", "")
 
     active_trades_dict = {_norm(t["ticker"]): t for t in active_trades}
     logger.info(f"[Realtime] 감지 시작: {len(active_trades)}개 종목")

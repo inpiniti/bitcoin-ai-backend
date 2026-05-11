@@ -22,8 +22,11 @@ def _normalize_order_price(price: float) -> float:
 
 
 def to_kis_ticker(ticker: str) -> str:
-    """KIS API용 ticker 변환: BRK-B → BRK/B (해외주식 알파벳 클래스 종목)."""
-    return str(ticker or "").strip().upper().replace("-", "/")
+    """KIS API용 ticker 변환 (웹 bitcoin-simulation/kisWebSocket.js와 동일):
+       - 점(.) → 슬래시(/) : BRK.B → BRK/B
+       - 하이픈(-) → 제거   : BRK-B → BRKB
+    """
+    return str(ticker or "").strip().upper().replace(".", "/").replace("-", "")
 
 
 def parse_account(kis_account: str) -> tuple[str, str]:
