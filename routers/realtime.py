@@ -99,7 +99,8 @@ async def _detection_loop(approval_key: str):
         return str(t or "").upper().replace(".", "").replace("-", "").replace("/", "")
 
     active_trades_dict = {_norm(t["ticker"]): t for t in active_trades}
-    logger.info(f"[Realtime] 감지 시작: {len(active_trades)}개 종목")
+    tickers_str = ", ".join([t["ticker"] for t in active_trades])
+    logger.info(f"[Realtime] 감지 시작: {len(active_trades)}개 종목 ({tickers_str})")
 
     manager = KISWebSocketManager(
         approval_key=approval_key,
@@ -127,11 +128,13 @@ async def _detection_loop(approval_key: str):
                 rate = float(data.get("RATE") or 0)
                 mtyp = data.get("MTYP") or "1"
                 current_price = float(data.get("LAST") or 0)
+                khms = data.get("KHMS") or ""
 
                 trade = active_trades_dict.get(_norm(symb))
                 if not trade:
                     return
                 ticker = trade["ticker"]  # DB 원본 (BRK-B 등) 사용
+                logger.info(f"[Realtime] 가격 수신 - {ticker}: {current_price} ({khms})")
 
                 async def _on_execute(order_data):
                     await execute_realtime_order(

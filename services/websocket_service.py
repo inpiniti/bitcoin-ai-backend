@@ -102,21 +102,37 @@ class KISWebSocketManager:
         await self.ws.send(message)
         logger.info(f"Unsubscribed from {ticker} ({market})")
 
-    async def listen(self, on_price_update: Callable):
-        """실시간 메시지 수신 및 처리"""
+    async def listen(self, on_price_update: Callable, max_retries: int = 5):
+        """실시간 메시지 수신 및 처리 (자동 재연결 기능)"""
         if not self.is_connected:
             raise RuntimeError("WebSocket is not connected")
 
-        try:
-            async for message in self.ws:
-                await self._handle_message(message, on_price_update)
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("WebSocket connection closed")
-            self.is_connected = False
-        except Exception as e:
-            logger.error(f"Error listening to WebSocket: {e}")
-            self.is_connected = False
-            raise
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                async for message in self.ws:
+                    await self._handle_message(message, on_price_update)
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning(f"WebSocket connection closed (retry {retry_count + 1}/{max_retries})")
+                self.is_connected = False
+                retry_count += 1
+
+                if retry_count < max_retries:
+                    wait_time = min(2 ** retry_count, 60)  # exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s
+                    logger.info(f"WebSocket will reconnect in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    try:
+                        await self.connect()
+                        logger.info("WebSocket reconnected successfully")
+                    except Exception as e:
+                        logger.error(f"WebSocket reconnection failed: {e}")
+                else:
+                    logger.error(f"WebSocket max retries ({max_retries}) exceeded")
+                    raise
+            except Exception as e:
+                logger.error(f"Error listening to WebSocket: {e}")
+                self.is_connected = False
+                raise
 
     async def _handle_message(self, message: str, on_price_update: Callable):
         """메시지 처리"""
@@ -153,6 +169,7 @@ class KISWebSocketManager:
                         'STRN': fields[24],     # 체결강도
                         'MTYP': fields[25] if len(fields) > 25 else '1',  # 시장구분
                     }
+                    logger.debug(f"[WebSocket] 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']})")
                     await on_price_update(data)
         except Exception as e:
             logger.error(f"Error handling message: {e}")
