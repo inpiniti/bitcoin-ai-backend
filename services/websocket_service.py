@@ -135,42 +135,58 @@ class KISWebSocketManager:
                 raise
 
     async def _handle_message(self, message: str, on_price_update: Callable):
-        """메시지 처리"""
+        """메시지 처리 (KIS WebSocket 형식: 0|HDFSCNT0|001|RSYM^SYMB^...)"""
         try:
-            # 메시지는 '^'로 구분된 필드들의 문자열
             if isinstance(message, str):
-                fields = message.split('^')
-                if len(fields) >= 25:
-                    data = {
-                        'RSYM': fields[0],      # 실시간종목코드
-                        'SYMB': fields[1],      # 종목코드
-                        'ZDIV': fields[2],      # 수수점자리수
-                        'TYMD': fields[3],      # 현지영업일자
-                        'XYMD': fields[4],      # 현지일자
-                        'XHMS': fields[5],      # 현지시간
-                        'KYMD': fields[6],      # 한국일자
-                        'KHMS': fields[7],      # 한국시간
-                        'OPEN': fields[8],      # 시가
-                        'HIGH': fields[9],      # 고가
-                        'LOW': fields[10],      # 저가
-                        'LAST': fields[11],     # 현재가
-                        'SIGN': fields[12],     # 대비구분
-                        'DIFF': fields[13],     # 전일대비
-                        'RATE': fields[14],     # 등락율
-                        'PBID': fields[15],     # 매수호가
-                        'PASK': fields[16],     # 매도호가
-                        'VBID': fields[17],     # 매수잔량
-                        'VASK': fields[18],     # 매도잔량
-                        'EVOL': fields[19],     # 체결량
-                        'TVOL': fields[20],     # 거래량
-                        'TAMT': fields[21],     # 거래대금
-                        'BIVL': fields[22],     # 매도체결량
-                        'ASVL': fields[23],     # 매수체결량
-                        'STRN': fields[24],     # 체결강도
-                        'MTYP': fields[25] if len(fields) > 25 else '1',  # 시장구분
-                    }
-                    logger.debug(f"[WebSocket] 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']})")
-                    await on_price_update(data)
+                # JSON 응답(구독 등록 성공 등)은 스킵
+                if message.startswith('{'):
+                    return
+
+                # 메시지를 |로 먼저 분리 (헤더와 데이터 분리)
+                parts = message.split('|')
+                if len(parts) < 4:
+                    return
+
+                tr_id = parts[1]
+                if tr_id != 'HDFSCNT0':
+                    return
+
+                # 실제 데이터는 parts[3]부터 ^로 구분
+                data_str = parts[3]
+                fields = data_str.split('^')
+                if len(fields) < 25:
+                    return
+
+                data = {
+                    'RSYM': fields[0],      # 실시간종목코드
+                    'SYMB': fields[1],      # 종목코드
+                    'ZDIV': fields[2],      # 수수점자리수
+                    'TYMD': fields[3],      # 현지영업일자
+                    'XYMD': fields[4],      # 현지일자
+                    'XHMS': fields[5],      # 현지시간
+                    'KYMD': fields[6],      # 한국일자
+                    'KHMS': fields[7],      # 한국시간
+                    'OPEN': fields[8],      # 시가
+                    'HIGH': fields[9],      # 고가
+                    'LOW': fields[10],      # 저가
+                    'LAST': fields[11],     # 현재가
+                    'SIGN': fields[12],     # 대비구분
+                    'DIFF': fields[13],     # 전일대비
+                    'RATE': fields[14],     # 등락율
+                    'PBID': fields[15],     # 매수호가
+                    'PASK': fields[16],     # 매도호가
+                    'VBID': fields[17],     # 매수잔량
+                    'VASK': fields[18],     # 매도잔량
+                    'EVOL': fields[19],     # 체결량
+                    'TVOL': fields[20],     # 거래량
+                    'TAMT': fields[21],     # 거래대금
+                    'BIVL': fields[22],     # 매도체결량
+                    'ASVL': fields[23],     # 매수체결량
+                    'STRN': fields[24],     # 체결강도
+                    'MTYP': fields[25] if len(fields) > 25 else '1',  # 시장구분
+                }
+                logger.info(f"[WebSocket] 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']})")
+                await on_price_update(data)
         except Exception as e:
             logger.error(f"Error handling message: {e}")
 
