@@ -185,7 +185,8 @@ class KISWebSocketManager:
                     'STRN': fields[24],     # 체결강도
                     'MTYP': fields[25] if len(fields) > 25 else '1',  # 시장구분
                 }
-                logger.info(f"[WebSocket] 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']})")
+                mtyp_label = {'1': '장중', '2': '장전', '3': '장후'}.get(data['MTYP'], f"MTYP={data['MTYP']}")
+                logger.info(f"[WebSocket] 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']}, {mtyp_label})")
                 await on_price_update(data)
         except Exception as e:
             logger.error(f"Error handling message: {e}")
@@ -251,10 +252,12 @@ async def handle_price_detection(
     supabase_client,
     on_order_execute: Callable
 ):
-    """가격 변동 감지 및 자동 매매 실행"""
+    """가격 변동 감지 및 자동 매매 실행 (장중에만 매매)"""
 
-    # 1. 장중이 아니면 무시
+    # 1. 장중이 아니면 매매 스킵 (수신/표시는 호출자에서 이미 처리됨)
     if not is_market_hours(mtyp):
+        mtyp_label = {'2': '장전', '3': '장후'}.get(mtyp, f"MTYP={mtyp}")
+        logger.debug(f"[Realtime] {ticker} 매매 스킵 ({mtyp_label})")
         return
 
     # 2. 등락율 계산
