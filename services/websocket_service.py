@@ -21,13 +21,14 @@ class KISWebSocketManager:
         self.is_connected = False
         self.supabase = create_client(supabase_url, supabase_key)
         self.price_callbacks: Dict[str, List[Callable]] = {}
+        # 재연결 시 자동 재구독을 위해 활성 구독 추적: {(ticker, market)}
+        self._active_subscriptions: set[tuple[str, str]] = set()
 
     async def connect(self):
         """WebSocket 연결"""
         try:
             self.ws = await websockets.connect(
-                'ws://ops.koreainvestment.com:21000',
-                subprotocols=['livedata']
+                'ws://ops.koreainvestment.com:21000'
             )
             self.is_connected = True
             logger.info(f"WebSocket connected for user {self.user_id}")
@@ -61,9 +62,12 @@ class KISWebSocketManager:
             'content-type': 'utf-8'
         }
 
+        # KIS 사양: body.input.{tr_id, tr_key} (웹 kisWebSocket.js와 동일)
         body = {
-            'tr_id': 'HDFSCNT0',
-            'tr_key': tr_key
+            'input': {
+                'tr_id': 'HDFSCNT0',
+                'tr_key': tr_key,
+            }
         }
 
         message = json.dumps({
@@ -72,7 +76,8 @@ class KISWebSocketManager:
         })
 
         await self.ws.send(message)
-        logger.info(f"Subscribed to {ticker} ({market})")
+        self._active_subscriptions.add((ticker, market))
+        logger.info(f"Subscribed to {ticker} ({market}) tr_key={tr_key}")
 
     async def unsubscribe_from_stock(self, ticker: str, market: str = 'NAS'):
         """종목 실시간 가격 구독 해제"""
@@ -90,8 +95,10 @@ class KISWebSocketManager:
         }
 
         body = {
-            'tr_id': 'HDFSCNT0',
-            'tr_key': tr_key
+            'input': {
+                'tr_id': 'HDFSCNT0',
+                'tr_key': tr_key,
+            }
         }
 
         message = json.dumps({
@@ -100,7 +107,20 @@ class KISWebSocketManager:
         })
 
         await self.ws.send(message)
+        self._active_subscriptions.discard((ticker, market))
         logger.info(f"Unsubscribed from {ticker} ({market})")
+
+    async def _resubscribe_all(self):
+        """재연결 후 활성 구독을 모두 다시 등록"""
+        if not self._active_subscriptions:
+            return
+        logger.info(f"Resubscribing {len(self._active_subscriptions)} stocks after reconnect")
+        for ticker, market in list(self._active_subscriptions):
+            try:
+                # subscribe_to_stock가 set에 이미 추가하므로 그대로 호출 가능
+                await self.subscribe_to_stock(ticker, market)
+            except Exception as e:
+                logger.error(f"Resubscribe failed for {ticker} ({market}): {e}")
 
     async def listen(self, on_price_update: Callable, max_retries: int = 5):
         """실시간 메시지 수신 및 처리 (자동 재연결 기능)"""
@@ -124,6 +144,9 @@ class KISWebSocketManager:
                     try:
                         await self.connect()
                         logger.info("WebSocket reconnected successfully")
+                        # KIS는 재연결 시 구독이 풀리므로 다시 등록
+                        await self._resubscribe_all()
+                        retry_count = 0  # 성공 시 재시도 카운터 리셋
                     except Exception as e:
                         logger.error(f"WebSocket reconnection failed: {e}")
                 else:
@@ -138,8 +161,21 @@ class KISWebSocketManager:
         """메시지 처리 (KIS WebSocket 형식: 0|HDFSCNT0|001|RSYM^SYMB^...)"""
         try:
             if isinstance(message, str):
-                # JSON 응답(구독 등록 성공 등)은 스킵
+                # JSON 응답(구독 등록 성공/실패, PINGPONG 등)은 데이터가 아님 — 내용만 로그로 남기고 종료
                 if message.startswith('{'):
+                    try:
+                        resp = json.loads(message)
+                        tr_id = (resp.get('header') or {}).get('tr_id', '')
+                        body = resp.get('body') or {}
+                        msg_cd = body.get('msg_cd', '')
+                        msg1 = body.get('msg1', '')
+                        # PINGPONG은 너무 많이 와서 debug로
+                        if tr_id == 'PINGPONG':
+                            logger.debug(f"[WebSocket] PINGPONG")
+                        else:
+                            logger.info(f"[WebSocket] KIS 응답 tr_id={tr_id} msg_cd={msg_cd} msg1={msg1}")
+                    except Exception:
+                        logger.info(f"[WebSocket] JSON 응답 파싱 실패: {message[:200]}")
                     return
 
                 # 메시지를 |로 먼저 분리 (헤더와 데이터 분리)
