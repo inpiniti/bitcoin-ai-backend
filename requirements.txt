@@ -8,6 +8,7 @@ httpx
 websockets
 aiohttp
 supabase
+apscheduler
 
 # ── YouTube MP3 ───────────────────────────────────
 yt-dlp
