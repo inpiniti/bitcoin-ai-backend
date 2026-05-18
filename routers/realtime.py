@@ -3,6 +3,7 @@
 - /realtime/start-detection : 감지 시작 (이미 실행 중이면 noop)
 - /realtime/stop-detection  : 감지 중지
 - /realtime/detection-status : 상태 조회
+- /realtime/ws : 앱 클라이언트용 WebSocket (KIS 가격 중계)
 서버 시작 시 main.py의 lifespan에서 start_detection_internal()을 호출해 자동 시작.
 """
 import asyncio
@@ -10,11 +11,44 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/realtime", tags=["realtime"])
+
+
+# ─────────────────────────────────────────────
+# 앱 클라이언트 WebSocket 브로드캐스터
+# ─────────────────────────────────────────────
+class _AppBroadcaster:
+    def __init__(self):
+        self._connections: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self._connections.append(ws)
+        logger.info(f"[AppWS] 앱 연결 (총 {len(self._connections)}개)")
+
+    def disconnect(self, ws: WebSocket):
+        try:
+            self._connections.remove(ws)
+        except ValueError:
+            pass
+        logger.info(f"[AppWS] 앱 연결 해제 (총 {len(self._connections)}개)")
+
+    async def broadcast(self, data: dict):
+        dead = []
+        for ws in list(self._connections):
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+
+_app_broadcaster = _AppBroadcaster()
 
 
 # ─────────────────────────────────────────────
@@ -135,6 +169,15 @@ async def _detection_loop(approval_key: str):
                     return
                 ticker = trade["ticker"]  # DB 원본 (BRK-B 등) 사용
                 logger.info(f"[Realtime] 가격 수신 - {ticker}: {current_price} ({khms})")
+
+                # 앱 클라이언트에 가격 데이터 중계
+                await _app_broadcaster.broadcast({
+                    "ticker": ticker,
+                    "price": current_price,
+                    "rate": rate,
+                    "mtyp": mtyp,
+                    "khms": khms,
+                })
 
                 async def _on_execute(order_data):
                     await execute_realtime_order(
@@ -259,3 +302,16 @@ async def detection_status():
         "running": is_detection_running(),
         "started_at": _detection_state.get("started_at"),
     }
+
+
+@router.websocket("/ws")
+async def app_websocket(websocket: WebSocket):
+    """앱 클라이언트용 WebSocket — 백엔드가 KIS에서 수신한 가격 데이터를 중계"""
+    await _app_broadcaster.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # 클라이언트 disconnect 감지
+    except WebSocketDisconnect:
+        _app_broadcaster.disconnect(websocket)
+    except Exception:
+        _app_broadcaster.disconnect(websocket)

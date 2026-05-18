@@ -255,8 +255,8 @@ async def issue_websocket_key(appkey: str, appsecret: str) -> Optional[str]:
 
 
 def is_market_hours(mtyp: str) -> bool:
-    """장중 여부 확인 (MTYP: 1:장중, 2:장전, 3:장후)"""
-    return mtyp == '1'
+    """장전/장중 여부 확인 (MTYP: 1:장중, 2:장전, 3:장후)"""
+    return mtyp in ('1', '2')
 
 
 def parse_price(value: str) -> float:
@@ -290,9 +290,9 @@ async def handle_price_detection(
 ):
     """가격 변동 감지 및 자동 매매 실행 (장중에만 매매)"""
 
-    # 1. 장중이 아니면 매매 스킵 (수신/표시는 호출자에서 이미 처리됨)
+    # 1. 장전/장중이 아니면 매매 스킵 (수신/표시는 호출자에서 이미 처리됨)
     if not is_market_hours(mtyp):
-        mtyp_label = {'2': '장전', '3': '장후'}.get(mtyp, f"MTYP={mtyp}")
+        mtyp_label = {'3': '장후'}.get(mtyp, f"MTYP={mtyp}")
         logger.debug(f"[Realtime] {ticker} 매매 스킵 ({mtyp_label})")
         return
 
