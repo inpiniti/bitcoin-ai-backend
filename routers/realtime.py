@@ -204,6 +204,7 @@ async def _detection_loop(approval_key: str):
                     base_price=float(trade["base_price"]),
                     gap=float(trade.get("gap", 1)),
                     quantity=int(trade.get("quantity", 0)),
+                    gap_qty=int(trade.get("gap_qty", 1) or 1),
                     rate=rate,
                     mtyp=mtyp,
                     supabase_client=supabase,

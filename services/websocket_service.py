@@ -283,12 +283,20 @@ async def handle_price_detection(
     base_price: float,
     gap: float,
     quantity: int,
+    gap_qty: int,
     rate: float,
     mtyp: str,
     supabase_client,
     on_order_execute: Callable
 ):
-    """가격 변동 감지 및 자동 매매 실행 (장중에만 매매)"""
+    """가격 변동 감지 및 자동 매매 실행 (장중에만 매매)
+
+    gap_qty: 갭 도달 시 매수/매도할 수량 (설정값)
+    quantity: 현재 보유 수량 (매매 후 자동 갱신됨)
+
+    - 가격이 gap% 이상 오르면 gap_qty만큼 매도 (단, 보유수량 부족 시 보유수량만큼만)
+    - 가격이 gap% 이상 내리면 gap_qty만큼 매수
+    """
 
     # 1. 장전/장중이 아니면 매매 스킵 (수신/표시는 호출자에서 이미 처리됨)
     if not is_market_hours(mtyp):
@@ -308,11 +316,12 @@ async def handle_price_detection(
         'current_quantity': quantity,
     }
 
-    # 3. gap% 이상 올랐을 때 (수량 = floor(올린율 / gap))
+    gap_qty = max(int(gap_qty or 0), 0)
+
+    # 3. gap% 이상 올랐을 때 → gap_qty만큼 매도 (보유 부족 시 보유량만큼만)
     if price_rate >= gap:
-        sell_quantity = int(price_rate / gap)
-        if quantity > 0 and sell_quantity > 0:
-            actual_sell_qty = min(sell_quantity, quantity)
+        actual_sell_qty = min(gap_qty, quantity)
+        if actual_sell_qty > 0:
             await on_order_execute({
                 **common,
                 'side': 'sell',
@@ -327,16 +336,13 @@ async def handle_price_detection(
                 'action': 'update_base_price',
             })
 
-    # 4. gap% 이상 내렸을 때 (수량 = floor(내린율 / gap))
+    # 4. gap% 이상 내렸을 때 → gap_qty만큼 매수
     elif price_rate <= -gap:
-        price_drop_rate = abs(price_rate)
-        buy_quantity = int(price_drop_rate / gap)
-
-        if buy_quantity > 0:
+        if gap_qty > 0:
             await on_order_execute({
                 **common,
                 'side': 'buy',
-                'quantity': buy_quantity,
+                'quantity': gap_qty,
                 'action': 'buy_and_update',
             })
         else:
