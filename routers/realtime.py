@@ -55,9 +55,10 @@ _app_broadcaster = _AppBroadcaster()
 # 전역 상태 (단일 인스턴스 가정)
 # ─────────────────────────────────────────────
 _detection_state = {
-    "task": None,       # asyncio.Task
-    "manager": None,    # KISWebSocketManager
+    "task": None,         # asyncio.Task
+    "manager": None,      # KISWebSocketManager
     "started_at": None,
+    "reload_event": None, # asyncio.Event — set 시 즉시 동기화
 }
 
 
@@ -143,6 +144,8 @@ async def _detection_loop(approval_key: str):
         supabase_key=key,
     )
     _detection_state["manager"] = manager
+    reload_event = asyncio.Event()
+    _detection_state["reload_event"] = reload_event
 
     try:
         await manager.connect()
@@ -164,8 +167,12 @@ async def _detection_loop(approval_key: str):
                 current_price = float(data.get("LAST") or 0)
                 khms = data.get("KHMS") or ""
 
-                trade = active_trades_dict.get(_norm(symb))
+                norm_symb = _norm(symb)
+                trade = active_trades_dict.get(norm_symb)
                 if not trade:
+                    return
+                # 추가 방어: is_active=false인 경우 매매 스킵 (동기화 직전 race condition 대비)
+                if trade.get("is_active") is False:
                     return
                 ticker = trade["ticker"]  # DB 원본 (BRK-B 등) 사용
                 logger.info(f"[Realtime] 가격 수신 - {ticker}: {current_price} ({khms})")
@@ -190,12 +197,25 @@ async def _detection_loop(approval_key: str):
                         latest = supabase.table("realtime_trading") \
                             .select("*") \
                             .eq("id", trade["id"]) \
-                            .single() \
                             .execute()
-                        if getattr(latest, "data", None):
-                            active_trades_dict[_norm(symb)] = latest.data
+                        rows = getattr(latest, "data", None) or []
+                        if rows and rows[0].get("is_active"):
+                            active_trades_dict[norm_symb] = rows[0]
+                        else:
+                            # row가 삭제됐거나 비활성화 → 캐시에서 제거 + 구독 해제
+                            # (무한 매수 방지)
+                            active_trades_dict.pop(norm_symb, None)
+                            try:
+                                await manager.unsubscribe_from_stock(
+                                    ticker=ticker,
+                                    market=trade.get("market", "NAS"),
+                                )
+                                logger.info(f"[Realtime] {ticker} 캐시/구독 정리 (행 없음 또는 비활성)")
+                            except Exception as ue:
+                                logger.warning(f"[Realtime] {ticker} 구독 해제 실패: {ue}")
                     except Exception as e:
-                        logger.error(f"[Realtime] {ticker} 캐시 갱신 실패: {e}")
+                        logger.error(f"[Realtime] {ticker} 캐시 갱신 실패 → 안전상 캐시 제거: {e}")
+                        active_trades_dict.pop(norm_symb, None)
 
                 await handle_price_detection(
                     ticker=ticker,
@@ -213,7 +233,84 @@ async def _detection_loop(approval_key: str):
             except Exception as e:
                 logger.error(f"[Realtime] 가격 처리 오류: {e}")
 
-        await manager.listen(on_price_update)
+        async def _reconcile_subscriptions():
+            """주기적(or reload_event 트리거 시) DB 활성 trade를 재조회해 메모리/구독 동기화"""
+            sync_interval = 15  # 초
+            while True:
+                try:
+                    try:
+                        await asyncio.wait_for(reload_event.wait(), timeout=sync_interval)
+                        reload_event.clear()
+                        logger.info("[Realtime] reload 트리거 → 즉시 동기화")
+                    except asyncio.TimeoutError:
+                        pass
+
+                    try:
+                        res = supabase.table("realtime_trading").select("*").eq("is_active", True).execute()
+                    except Exception as e:
+                        logger.error(f"[Realtime] 동기화 - DB 조회 실패: {e}")
+                        continue
+
+                    fresh = res.data or []
+                    fresh_dict = {_norm(t["ticker"]): t for t in fresh}
+
+                    # 신규 추가된 종목 → 구독
+                    for norm_key, t in fresh_dict.items():
+                        if norm_key not in active_trades_dict:
+                            try:
+                                await manager.subscribe_to_stock(
+                                    ticker=t["ticker"],
+                                    market=t.get("market", "NAS"),
+                                )
+                                logger.info(f"[Realtime] 신규 종목 구독: {t['ticker']}")
+                            except Exception as e:
+                                logger.error(f"[Realtime] {t['ticker']} 신규 구독 실패: {e}")
+
+                    # 제거/비활성된 종목 → 구독 해제
+                    for norm_key, t in list(active_trades_dict.items()):
+                        if norm_key not in fresh_dict:
+                            try:
+                                await manager.unsubscribe_from_stock(
+                                    ticker=t["ticker"],
+                                    market=t.get("market", "NAS"),
+                                )
+                                logger.info(f"[Realtime] 제거 종목 구독 해제: {t['ticker']}")
+                            except Exception as e:
+                                logger.error(f"[Realtime] {t['ticker']} 구독 해제 실패: {e}")
+
+                    # 캐시 교체 (gap_qty/gap/base_price 등 최신값 반영)
+                    active_trades_dict.clear()
+                    active_trades_dict.update(fresh_dict)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[Realtime] 동기화 루프 오류: {e}")
+
+        listen_task = asyncio.create_task(manager.listen(on_price_update))
+        reconcile_task = asyncio.create_task(_reconcile_subscriptions())
+        try:
+            done, pending = await asyncio.wait(
+                [listen_task, reconcile_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for p in pending:
+                p.cancel()
+                try:
+                    await p
+                except (asyncio.CancelledError, Exception):
+                    pass
+            for d in done:
+                exc = d.exception()
+                if exc:
+                    raise exc
+        finally:
+            for t in (listen_task, reconcile_task):
+                if not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
     except asyncio.CancelledError:
         logger.info("[Realtime] 감지 task 취소됨")
@@ -226,6 +323,7 @@ async def _detection_loop(approval_key: str):
         except Exception:
             pass
         _detection_state["manager"] = None
+        _detection_state["reload_event"] = None
 
 
 # ─────────────────────────────────────────────
@@ -271,6 +369,7 @@ async def stop_detection_internal() -> dict:
     _detection_state["task"] = None
     _detection_state["manager"] = None
     _detection_state["started_at"] = None
+    _detection_state["reload_event"] = None
     return {"status": "stopped"}
 
 
@@ -303,6 +402,25 @@ async def detection_status():
         "running": is_detection_running(),
         "started_at": _detection_state.get("started_at"),
     }
+
+
+@router.post(
+    "/reload-config",
+    summary="실시간 설정 즉시 재동기화",
+    description=(
+        "DB의 realtime_trading 변경사항(추가/삭제/비활성화/gap_qty 변경 등)을 "
+        "메모리 캐시 및 KIS WebSocket 구독에 즉시 반영합니다. "
+        "감지가 실행 중이 아니면 noop. 미호출 시에도 15초 주기로 자동 동기화됩니다."
+    ),
+)
+async def reload_config():
+    if not is_detection_running():
+        return {"status": "not_running"}
+    ev = _detection_state.get("reload_event")
+    if ev is None:
+        return {"status": "no_reload_event"}
+    ev.set()
+    return {"status": "triggered"}
 
 
 @router.websocket("/ws")

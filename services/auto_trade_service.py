@@ -36,6 +36,26 @@ logger = logging.getLogger("auto_trade_service")
 
 CHUNK_SIZE = 5
 
+# 실시간 주문 실패 시 같은 종목에 대한 재시도를 일정 시간 차단 (로그 폭주 방지)
+# 키: trade_id, 값: 마지막 실패 시각(UTC)
+_realtime_failure_cooldown: dict[str, datetime] = {}
+_REALTIME_FAILURE_COOLDOWN_SECONDS = 60
+
+# 미체결 방지: 1호가만큼 호가창을 넘겨 주문 (US 주식 호가단위 $0.01)
+# 매수: 현재가 + 1호가 → 최선매도 잠식하여 즉시 체결
+# 매도: 현재가 - 1호가 → 최선매수 잠식하여 즉시 체결
+_US_TICK_SIZE = 0.01
+
+
+def _adjust_order_price(side: str, current_price: float) -> float:
+    if current_price <= 0:
+        return current_price
+    if side == 'buy':
+        return round(current_price + _US_TICK_SIZE, 2)
+    if side == 'sell':
+        return round(max(current_price - _US_TICK_SIZE, _US_TICK_SIZE), 2)
+    return round(current_price, 2)
+
 
 def _calc_rebalance_qty(total_qty: int, ratio: float = 0.10) -> int:
     """Rebalance sell quantity (at least 1 share when position exists)."""
@@ -599,11 +619,31 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
     market = order_data.get('market', 'NAS')
     side = order_data.get('side')
     qty = int(order_data.get('quantity', 0) or 0)
-    price = float(order_data.get('price', 0) or 0)
+    current_price = float(order_data.get('price', 0) or 0)
     action = order_data.get('action')
     base_price_before = order_data.get('base_price_before')
     price_rate = order_data.get('price_rate')
     current_quantity = int(order_data.get('current_quantity', 0) or 0)
+
+    # 실주문 시엔 1호가 공격적으로 조정해 즉시 체결 유도 (미체결 방지).
+    # update_base_price 액션처럼 주문이 안 나가는 경우엔 그냥 현재가를 base_price로 갱신.
+    if side in ('buy', 'sell'):
+        price = _adjust_order_price(side, current_price)
+    else:
+        price = current_price
+
+    # 실주문 액션(매수/매도)에 한해 실패 쿨다운 적용 — 'update_base_price'는 정상 케이스라 제외
+    is_order_action = action in ('buy_and_update', 'sell_and_update')
+    if is_order_action:
+        last_fail = _realtime_failure_cooldown.get(trade_id)
+        if last_fail:
+            elapsed = (datetime.now(timezone.utc) - last_fail).total_seconds()
+            if elapsed < _REALTIME_FAILURE_COOLDOWN_SECONDS:
+                logger.debug(
+                    f"[Realtime] {ticker} 실패 쿨다운 중 ({elapsed:.0f}s/"
+                    f"{_REALTIME_FAILURE_COOLDOWN_SECONDS}s) — 스킵 (base_price 유지)"
+                )
+                return
 
     order_log = {
         'trade_id': trade_id,
@@ -614,7 +654,8 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         'quantity': qty,
         'price': price,
         'base_price_before': base_price_before,
-        'base_price_after': price,
+        # 기본은 변동 없음 — 성공/정상 base 갱신 시에만 price로 덮어씀
+        'base_price_after': base_price_before,
         'price_rate': price_rate,
         'success': False,
         'order_no': None,
@@ -627,10 +668,17 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
                 'base_price': price,
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }).eq('id', trade_id).execute()
+            order_log['base_price_after'] = price
         except Exception as e:
             logger.error(f"[Realtime] base_price 업데이트 실패: {e}")
         if reason:
             order_log['error_message'] = reason
+
+    def _mark_failure(reason: str):
+        """주문 실패 처리: base_price는 유지(매매 미체결이므로), 쿨다운 등록, 사유만 기록."""
+        order_log['error_message'] = reason
+        # base_price_after는 base_price_before 그대로 둔다 (변동 없음)
+        _realtime_failure_cooldown[trade_id] = datetime.now(timezone.utc)
 
     def _record_order():
         try:
@@ -639,7 +687,7 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
             logger.error(f"[Realtime] 주문 이력 기록 실패: {e}")
 
     try:
-        # 1) 기준가만 업데이트
+        # 1) 기준가만 업데이트 (정상 케이스: 매도신호 + 보유 0주 등)
         if action == 'update_base_price':
             _update_base_only()
             order_log['success'] = True
@@ -647,7 +695,7 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
             _record_order()
             return
 
-        # 2) 자격증명 조회
+        # 2) 자격증명 조회 — 실패 시 base_price 유지 (매매 미체결)
         cred_res = supabase.table('kis_credentials') \
             .select('*') \
             .order('updated_at', desc=True) \
@@ -657,16 +705,18 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         cred = cred_rows[0] if cred_rows else None
 
         if not cred:
-            logger.warning(f"[Realtime] {ticker} KIS 자격증명 없음 - 기준가만 업데이트")
-            _update_base_only('KIS 자격증명 없음')
+            err = 'KIS 자격증명 없음'
+            logger.warning(f"[Realtime] {ticker} {err} → base_price 유지, 쿨다운 등록")
+            _mark_failure(err)
             _record_order()
             return
 
         try:
             cano, prdt = _parse_account_no(cred.get('account_no'))
         except Exception as e:
-            logger.warning(f"[Realtime] 계좌번호 파싱 실패: {e}")
-            _update_base_only(f'계좌번호 파싱 실패: {e}')
+            err = f'계좌번호 파싱 실패: {e}'
+            logger.warning(f"[Realtime] {err} → base_price 유지, 쿨다운 등록")
+            _mark_failure(err)
             _record_order()
             return
 
@@ -697,21 +747,24 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
             }).eq('id', trade_id).execute()
             order_log['success'] = True
             order_log['order_no'] = result.get('order_no')
+            order_log['base_price_after'] = price
+            # 성공 시 쿨다운 해제
+            _realtime_failure_cooldown.pop(trade_id, None)
             logger.info(
                 f"[Realtime] {side.upper()} 성공: {ticker} {qty}주 @ {price} "
                 f"(보유 {current_quantity} → {new_qty})"
             )
         else:
             err = result.get('error', '주문 실패')
-            logger.warning(f"[Realtime] {side.upper()} 실패: {err} → 기준가만 업데이트")
-            _update_base_only(err)
+            logger.warning(
+                f"[Realtime] {side.upper()} 실패: {err} → base_price 유지 "
+                f"({_REALTIME_FAILURE_COOLDOWN_SECONDS}초 쿨다운)"
+            )
+            _mark_failure(err)
 
     except Exception as e:
         logger.error(f"[Realtime] 실시간 주문 처리 예외: {e}")
-        order_log['error_message'] = f"예외: {e}"
-        try:
-            _update_base_only()
-        except Exception:
-            pass
+        # 예외 시에도 base_price 유지 — 매매가 체결됐는지 불확실하므로 안전 측 선택
+        _mark_failure(f"예외: {e}")
     finally:
         _record_order()
