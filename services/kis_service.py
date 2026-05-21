@@ -187,3 +187,71 @@ async def sell_overseas_stock(
     normalized_price = _normalize_order_price(price)
     logger.info(f"[KIS] 매도: {ticker} {qty}주 @ ${normalized_price:.2f} ({exchange})")
     return await _order_overseas_stock(appkey, appsecret, account_no, account_code, "sell", exchange, ticker, price, qty)
+
+
+async def get_overseas_unfilled_orders(
+    appkey: str, appsecret: str, account_no: str, account_code: str,
+    excg_cd: str = "NASD",
+) -> dict:
+    """해외주식 미체결내역 조회 (TTTS3018R, 실전 전용).
+
+    excg_cd: NASD 입력 시 미국 전체(나스닥+뉴욕+아멕스) 미체결 조회.
+    반환 orders 항목 주요 필드: odno(주문번호), pdno(종목), sll_buy_dvsn_cd(01매도/02매수),
+    ft_ord_qty(주문수량), ft_ccld_qty(체결수량), nccs_qty(미체결수량),
+    ord_dt(주문일자 YYYYMMDD), ord_tmd(주문시각 HHMMSS), ovrs_excg_cd(거래소).
+    """
+    token = await get_access_token(appkey, appsecret)
+    params = {
+        "CANO": account_no.strip(),
+        "ACNT_PRDT_CD": account_code.strip(),
+        "OVRS_EXCG_CD": excg_cd,
+        "SORT_SQN": "",
+        "CTX_AREA_FK200": "",
+        "CTX_AREA_NK200": "",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{KIS_BASE_URL}/uapi/overseas-stock/v1/trading/inquire-nccs",
+            params=params,
+            headers=_make_headers(token, appkey, appsecret, "TTTS3018R"),
+        )
+    data = resp.json()
+    if data.get("rt_cd") == "0":
+        return {"success": True, "orders": data.get("output", []) or []}
+    return {"success": False, "error": data.get("msg1", "미체결내역 조회 실패")}
+
+
+async def cancel_overseas_order(
+    appkey: str, appsecret: str, account_no: str, account_code: str,
+    ticker: str, org_order_no: str, qty: int, excg_cd: str = "NASD",
+) -> dict:
+    """해외주식 주문 취소 (TTTT1004U, 미국 정정취소).
+
+    org_order_no: 원주문번호(ODNO) — 미체결내역/주문 API output의 ODNO.
+    excg_cd: NASD/NYSE/AMEX 등 원주문 거래소코드. 취소 시 단가는 "0".
+    """
+    token = await get_access_token(appkey, appsecret)
+    body = {
+        "CANO": account_no.strip(),
+        "ACNT_PRDT_CD": account_code.strip(),
+        "OVRS_EXCG_CD": excg_cd,
+        "PDNO": to_kis_ticker(ticker),
+        "ORGN_ODNO": str(org_order_no),
+        "RVSE_CNCL_DVSN_CD": "02",  # 02: 취소
+        "ORD_QTY": str(qty),
+        "OVRS_ORD_UNPR": "0",       # 취소 시 0
+        "ORD_SVR_DVSN_CD": "0",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order-rvsecncl",
+            json=body,
+            headers=_make_headers(token, appkey, appsecret, "TTTT1004U"),
+        )
+    data = resp.json()
+    if data.get("rt_cd") == "0":
+        logger.info(f"[KIS] 주문취소 성공: {ticker} ODNO={org_order_no}")
+        return {"success": True, "order_no": data.get("output", {}).get("ODNO"), "message": data.get("msg1")}
+    err = data.get("msg1", "취소 실패")
+    code = data.get("msg_cd", "")
+    return {"success": False, "error": f"[{code}] {err}" if code else err}

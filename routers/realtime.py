@@ -165,6 +165,8 @@ async def _detection_loop(approval_key: str):
                 rate = float(data.get("RATE") or 0)
                 mtyp = data.get("MTYP") or "1"
                 current_price = float(data.get("LAST") or 0)
+                ask_price = float(data.get("PASK") or 0)   # 매도호가 (매수 즉시체결용)
+                bid_price = float(data.get("PBID") or 0)   # 매수호가 (매도 즉시체결용)
                 khms = data.get("KHMS") or ""
 
                 norm_symb = _norm(symb)
@@ -229,6 +231,8 @@ async def _detection_loop(approval_key: str):
                     mtyp=mtyp,
                     supabase_client=supabase,
                     on_order_execute=_on_execute,
+                    ask_price=ask_price,
+                    bid_price=bid_price,
                 )
             except Exception as e:
                 logger.error(f"[Realtime] 가격 처리 오류: {e}")

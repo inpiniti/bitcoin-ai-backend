@@ -36,25 +36,44 @@ logger = logging.getLogger("auto_trade_service")
 
 CHUNK_SIZE = 5
 
-# 실시간 주문 실패 시 같은 종목에 대한 재시도를 일정 시간 차단 (로그 폭주 방지)
+# 실시간 주문 실패(거부) 시 같은 종목 재시도를 잠시 차단 (요청/로그 폭주 방지)
 # 키: trade_id, 값: 마지막 실패 시각(UTC)
 _realtime_failure_cooldown: dict[str, datetime] = {}
 _REALTIME_FAILURE_COOLDOWN_SECONDS = 60
 
-# 미체결 방지: 1호가만큼 호가창을 넘겨 주문 (US 주식 호가단위 $0.01)
-# 매수: 현재가 + 1호가 → 최선매도 잠식하여 즉시 체결
-# 매도: 현재가 - 1호가 → 최선매수 잠식하여 즉시 체결
-_US_TICK_SIZE = 0.01
+# gap 신호가 틱마다 연속 발생할 때 KIS 조회(미체결/잔고) 폭주를 막는 스로틀
+# 키: trade_id, 값: 마지막 처리 시각(UTC)
+_realtime_check_throttle: dict[str, datetime] = {}
+_REALTIME_CHECK_THROTTLE_SECONDS = 5
+
+# 미체결 주문을 취소 처리하기까지의 대기 시간 (이후 재주문 가능 상태로 복귀)
+_REALTIME_PENDING_CANCEL_SECONDS = 600  # 10분
 
 
-def _adjust_order_price(side: str, current_price: float) -> float:
-    if current_price <= 0:
-        return current_price
+def _resolve_order_price(side: str, current_price: float, ask: float, bid: float) -> float:
+    """즉시체결 유도용 주문가: 매수=매도호가(ask), 매도=매수호가(bid).
+    호가가 비어있으면(0) 현재가로 폴백."""
     if side == 'buy':
-        return round(current_price + _US_TICK_SIZE, 2)
-    if side == 'sell':
-        return round(max(current_price - _US_TICK_SIZE, _US_TICK_SIZE), 2)
-    return round(current_price, 2)
+        chosen = ask if ask and ask > 0 else current_price
+    elif side == 'sell':
+        chosen = bid if bid and bid > 0 else current_price
+    else:
+        chosen = current_price
+    return round(chosen, 2) if chosen and chosen > 0 else round(current_price, 2)
+
+
+def _norm_ticker(t: str) -> str:
+    """미체결 pdno와 DB ticker 비교용 정규화 (점/하이픈/슬래시 제거, 대문자)."""
+    return str(t or "").upper().replace(".", "").replace("-", "").replace("/", "")
+
+
+def _parse_kis_order_dt(ord_dt: str, ord_tmd: str) -> datetime | None:
+    """미체결내역 ord_dt(YYYYMMDD)+ord_tmd(HHMMSS, 한국시간)를 UTC datetime으로 변환."""
+    try:
+        dt = datetime.strptime(f"{(ord_dt or '').strip()}{(ord_tmd or '').strip()}", "%Y%m%d%H%M%S")
+        return dt.replace(tzinfo=ZoneInfo("Asia/Seoul")).astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def _calc_rebalance_qty(total_qty: int, ratio: float = 0.10) -> int:
@@ -605,8 +624,16 @@ def _parse_account_no(account_no: str) -> tuple[str, str]:
 
 
 async def execute_realtime_order(trade_id: str, order_data: dict, supabase_client):
-    """
-    실시간 감지 주문 실행 + base_price/quantity 갱신 + 주문 이력 기록.
+    """실시간 감지 주문 실행 (실거래 안전 설계).
+
+    핵심 원칙:
+      - '주문 접수(rt_cd=0) ≠ 체결'. 주문 접수만으로 base_price/quantity를 갱신하지 않는다.
+      - 미체결내역(inquire-nccs)으로 내 주문 상태를 확인한다:
+          * 해당 종목 미체결 주문이 있으면 추가주문 금지(중복주문 방지).
+          * 미체결이 10분 이상 경과하면 정정취소 API로 취소 → 재주문 가능 상태로 복귀.
+      - 미체결이 없으면(=직전 주문이 체결 또는 취소 완료) KIS 잔고를 다시 읽어 quantity를
+        실제 보유로 동기화하고, 보유가 바뀐 경우(=체결 발생)에만 base_price를 현재가로 갱신.
+      - 신규 주문은 즉시체결 유도를 위해 매수=매도호가/매도=매수호가 지정가로 넣는다.
 
     Args:
         trade_id: realtime_trading.id
@@ -620,151 +647,191 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
     side = order_data.get('side')
     qty = int(order_data.get('quantity', 0) or 0)
     current_price = float(order_data.get('price', 0) or 0)
+    ask = float(order_data.get('ask', 0) or 0)
+    bid = float(order_data.get('bid', 0) or 0)
     action = order_data.get('action')
     base_price_before = order_data.get('base_price_before')
     price_rate = order_data.get('price_rate')
     current_quantity = int(order_data.get('current_quantity', 0) or 0)
 
-    # 실주문 시엔 1호가 공격적으로 조정해 즉시 체결 유도 (미체결 방지).
-    # update_base_price 액션처럼 주문이 안 나가는 경우엔 그냥 현재가를 base_price로 갱신.
-    if side in ('buy', 'sell'):
-        price = _adjust_order_price(side, current_price)
-    else:
-        price = current_price
+    price = _resolve_order_price(side, current_price, ask, bid)
+    now = datetime.now(timezone.utc)
 
-    # 실주문 액션(매수/매도)에 한해 실패 쿨다운 적용 — 'update_base_price'는 정상 케이스라 제외
-    is_order_action = action in ('buy_and_update', 'sell_and_update')
-    if is_order_action:
-        last_fail = _realtime_failure_cooldown.get(trade_id)
-        if last_fail:
-            elapsed = (datetime.now(timezone.utc) - last_fail).total_seconds()
-            if elapsed < _REALTIME_FAILURE_COOLDOWN_SECONDS:
-                logger.debug(
-                    f"[Realtime] {ticker} 실패 쿨다운 중 ({elapsed:.0f}s/"
-                    f"{_REALTIME_FAILURE_COOLDOWN_SECONDS}s) — 스킵 (base_price 유지)"
-                )
-                return
-
-    order_log = {
-        'trade_id': trade_id,
-        'ticker': ticker,
-        'market': market,
-        'side': side,
-        'action': action,
-        'quantity': qty,
-        'price': price,
-        'base_price_before': base_price_before,
-        # 기본은 변동 없음 — 성공/정상 base 갱신 시에만 price로 덮어씀
-        'base_price_after': base_price_before,
-        'price_rate': price_rate,
-        'success': False,
-        'order_no': None,
-        'error_message': None,
-    }
-
-    def _update_base_only(reason: str | None = None):
+    def _record(**over):
+        row = {
+            'trade_id': trade_id,
+            'ticker': ticker,
+            'market': market,
+            'side': side,
+            'action': action,
+            'quantity': qty,
+            'price': price,
+            'base_price_before': base_price_before,
+            'base_price_after': base_price_before,
+            'price_rate': price_rate,
+            'success': False,
+            'order_no': None,
+            'error_message': None,
+        }
+        row.update(over)
         try:
-            supabase.table('realtime_trading').update({
-                'base_price': price,
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('id', trade_id).execute()
-            order_log['base_price_after'] = price
-        except Exception as e:
-            logger.error(f"[Realtime] base_price 업데이트 실패: {e}")
-        if reason:
-            order_log['error_message'] = reason
-
-    def _mark_failure(reason: str):
-        """주문 실패 처리: base_price는 유지(매매 미체결이므로), 쿨다운 등록, 사유만 기록."""
-        order_log['error_message'] = reason
-        # base_price_after는 base_price_before 그대로 둔다 (변동 없음)
-        _realtime_failure_cooldown[trade_id] = datetime.now(timezone.utc)
-
-    def _record_order():
-        try:
-            supabase.table('realtime_orders').insert(order_log).execute()
+            supabase.table('realtime_orders').insert(row).execute()
         except Exception as e:
             logger.error(f"[Realtime] 주문 이력 기록 실패: {e}")
 
-    try:
-        # 1) 기준가만 업데이트 (정상 케이스: 매도신호 + 보유 0주 등)
-        if action == 'update_base_price':
-            _update_base_only()
-            order_log['success'] = True
-            logger.info(f"[Realtime] {ticker} 기준가만 업데이트: {price}")
-            _record_order()
+    # ── A. 기준가만 갱신 (정상 케이스: 매도신호 + 보유 0주, 또는 gap_qty=0) ──
+    if action == 'update_base_price':
+        try:
+            supabase.table('realtime_trading').update({
+                'base_price': current_price,
+                'updated_at': now.isoformat(),
+            }).eq('id', trade_id).execute()
+        except Exception as e:
+            logger.error(f"[Realtime] {ticker} 기준가 갱신 실패: {e}")
             return
+        logger.info(f"[Realtime] {ticker} 기준가만 갱신: {current_price}")
+        _record(success=True, price=current_price, base_price_after=current_price)
+        return
 
-        # 2) 자격증명 조회 — 실패 시 base_price 유지 (매매 미체결)
+    if side not in ('buy', 'sell'):
+        return
+
+    # 스로틀: 틱이 몰려도 KIS 조회/주문 호출을 일정 간격으로 제한
+    last_check = _realtime_check_throttle.get(trade_id)
+    if last_check and (now - last_check).total_seconds() < _REALTIME_CHECK_THROTTLE_SECONDS:
+        return
+    _realtime_check_throttle[trade_id] = now
+
+    # 실패(거부) 쿨다운
+    last_fail = _realtime_failure_cooldown.get(trade_id)
+    if last_fail and (now - last_fail).total_seconds() < _REALTIME_FAILURE_COOLDOWN_SECONDS:
+        logger.debug(f"[Realtime] {ticker} 실패 쿨다운 중 — 스킵")
+        return
+
+    # 자격증명 조회
+    try:
         cred_res = supabase.table('kis_credentials') \
-            .select('*') \
-            .order('updated_at', desc=True) \
-            .limit(1) \
-            .execute()
+            .select('*').order('updated_at', desc=True).limit(1).execute()
         cred_rows = getattr(cred_res, 'data', None) or []
         cred = cred_rows[0] if cred_rows else None
+    except Exception as e:
+        logger.error(f"[Realtime] {ticker} 자격증명 조회 실패: {e}")
+        return
 
-        if not cred:
-            err = 'KIS 자격증명 없음'
-            logger.warning(f"[Realtime] {ticker} {err} → base_price 유지, 쿨다운 등록")
-            _mark_failure(err)
-            _record_order()
+    if not cred:
+        logger.warning(f"[Realtime] {ticker} KIS 자격증명 없음 → 쿨다운")
+        _realtime_failure_cooldown[trade_id] = now
+        _record(error_message='KIS 자격증명 없음')
+        return
+
+    try:
+        cano, prdt = _parse_account_no(cred.get('account_no'))
+    except Exception as e:
+        logger.warning(f"[Realtime] {ticker} 계좌번호 파싱 실패: {e} → 쿨다운")
+        _realtime_failure_cooldown[trade_id] = now
+        _record(error_message=f'계좌번호 파싱 실패: {e}')
+        return
+
+    appkey = cred.get('appkey')
+    appsecret = cred.get('appsecret')
+    ticker_norm = _norm_ticker(ticker)
+
+    try:
+        # ── B. 미체결 가드 + 10분 초과 취소 ──
+        nccs = await kis_service.get_overseas_unfilled_orders(appkey, appsecret, cano, prdt, "NASD")
+        if not nccs.get('success'):
+            # 미체결 상태를 모르면 중복주문 위험 → 이번 틱은 보류 (쿨다운은 걸지 않음)
+            logger.warning(f"[Realtime] {ticker} 미체결내역 조회 실패: {nccs.get('error')} → 이번 틱 보류")
             return
 
-        try:
-            cano, prdt = _parse_account_no(cred.get('account_no'))
-        except Exception as e:
-            err = f'계좌번호 파싱 실패: {e}'
-            logger.warning(f"[Realtime] {err} → base_price 유지, 쿨다운 등록")
-            _mark_failure(err)
-            _record_order()
+        unfilled = [o for o in nccs['orders'] if _norm_ticker(o.get('pdno')) == ticker_norm]
+
+        if unfilled:
+            def _age(o):
+                dt = _parse_kis_order_dt(o.get('ord_dt', ''), o.get('ord_tmd', ''))
+                return (now - dt).total_seconds() if dt else 0.0
+
+            oldest = max(unfilled, key=_age)  # age가 가장 큰 = 가장 오래된 주문
+            age = _age(oldest)
+
+            if age >= _REALTIME_PENDING_CANCEL_SECONDS:
+                odno = oldest.get('odno')
+                excg = oldest.get('ovrs_excg_cd') or 'NASD'
+                remain = int(float(oldest.get('nccs_qty', 0) or 0))
+                cancel_res = await kis_service.cancel_overseas_order(
+                    appkey, appsecret, cano, prdt, ticker, odno, remain, excg,
+                )
+                if cancel_res.get('success'):
+                    logger.info(f"[Realtime] {ticker} 미체결 {age/60:.1f}분 경과 → 취소 (ODNO={odno}, {remain}주)")
+                    _record(action='cancel', side='none', quantity=remain, price=current_price,
+                            success=True, order_no=odno, error_message=f'미체결 {age/60:.0f}분 경과 취소')
+                else:
+                    logger.warning(f"[Realtime] {ticker} 미체결 취소 실패: {cancel_res.get('error')}")
+                    _record(action='cancel', side='none', quantity=remain, price=current_price,
+                            order_no=odno, error_message=f"취소 실패: {cancel_res.get('error')}")
+            else:
+                logger.debug(f"[Realtime] {ticker} 미체결 대기중({age/60:.1f}분) → 추가주문 보류")
+            return  # 미체결이 있으면 어느 경우든 신규주문 안 함
+
+        # ── C. 미체결 없음 → 잔고로 체결 확정/동기화 ──
+        bal = await kis_service.get_overseas_balance(appkey, appsecret, cano, prdt)
+        if not bal.get('success'):
+            logger.warning(f"[Realtime] {ticker} 잔고 조회 실패: {bal.get('error')} → 이번 틱 보류")
             return
 
-        # 3) 주문 실행
-        appkey = cred.get('appkey')
-        appsecret = cred.get('appsecret')
+        real_qty = 0
+        for h in bal.get('holdings', []):
+            if _norm_ticker(h.get('pdno')) == ticker_norm:
+                real_qty = int(float(h.get('ccld_qty_smtl1', 0) or 0))
+                break
+
+        if real_qty != current_quantity:
+            # 직전 주문이 체결되어 보유수량이 변함 → 동기화 + 기준가를 현재가로 갱신
+            try:
+                supabase.table('realtime_trading').update({
+                    'quantity': real_qty,
+                    'base_price': current_price,
+                    'updated_at': now.isoformat(),
+                }).eq('id', trade_id).execute()
+            except Exception as e:
+                logger.error(f"[Realtime] {ticker} 체결 동기화 실패: {e}")
+                return
+            logger.info(
+                f"[Realtime] {ticker} 체결 반영: 보유 {current_quantity} → {real_qty}, 기준가 → {current_price}"
+            )
+            _record(action='settle', side='none', quantity=abs(real_qty - current_quantity),
+                    price=current_price, success=True, base_price_after=current_price)
+            return  # 이번 틱 소진, 다음 갭에서 신규주문
+
+        # ── D. 신규 주문 (즉시체결 유도 지정가: 매수=ask / 매도=bid) ──
+        if side == 'sell':
+            order_qty = min(qty, real_qty)
+        else:
+            order_qty = qty
+        if order_qty <= 0:
+            logger.debug(f"[Realtime] {ticker} 주문수량 0 → 스킵")
+            return
 
         if side == 'buy':
-            result = await kis_service.buy_overseas_stock(
-                appkey, appsecret, cano, prdt,
-                ticker, qty, price, market,
-            )
-        elif side == 'sell':
-            result = await kis_service.sell_overseas_stock(
-                appkey, appsecret, cano, prdt,
-                ticker, qty, price, market,
-            )
+            result = await kis_service.buy_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
         else:
-            result = {'success': False, 'error': f'알 수 없는 side: {side}'}
+            result = await kis_service.sell_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
 
-        # 4) 결과 처리
         if result.get('success'):
-            new_qty = current_quantity + qty if side == 'buy' else max(0, current_quantity - qty)
-            supabase.table('realtime_trading').update({
-                'base_price': price,
-                'quantity': new_qty,
-                'updated_at': datetime.now(timezone.utc).isoformat(),
-            }).eq('id', trade_id).execute()
-            order_log['success'] = True
-            order_log['order_no'] = result.get('order_no')
-            order_log['base_price_after'] = price
-            # 성공 시 쿨다운 해제
             _realtime_failure_cooldown.pop(trade_id, None)
             logger.info(
-                f"[Realtime] {side.upper()} 성공: {ticker} {qty}주 @ {price} "
-                f"(보유 {current_quantity} → {new_qty})"
+                f"[Realtime] {side.upper()} 주문 접수(체결 대기): {ticker} {order_qty}주 @ {price} "
+                f"(ODNO={result.get('order_no')})"
             )
+            # base_price/quantity는 체결 확인(C단계) 후에만 갱신 — 접수만으로는 갱신하지 않음
+            _record(quantity=order_qty, success=True, order_no=result.get('order_no'))
         else:
             err = result.get('error', '주문 실패')
-            logger.warning(
-                f"[Realtime] {side.upper()} 실패: {err} → base_price 유지 "
-                f"({_REALTIME_FAILURE_COOLDOWN_SECONDS}초 쿨다운)"
-            )
-            _mark_failure(err)
+            logger.warning(f"[Realtime] {side.upper()} 주문 실패: {err} → 쿨다운")
+            _realtime_failure_cooldown[trade_id] = now
+            _record(quantity=order_qty, error_message=err)
 
     except Exception as e:
-        logger.error(f"[Realtime] 실시간 주문 처리 예외: {e}")
-        # 예외 시에도 base_price 유지 — 매매가 체결됐는지 불확실하므로 안전 측 선택
-        _mark_failure(f"예외: {e}")
-    finally:
-        _record_order()
+        logger.error(f"[Realtime] {ticker} 실시간 주문 처리 예외: {e}")
+        _realtime_failure_cooldown[trade_id] = now
+        _record(error_message=f'예외: {e}')

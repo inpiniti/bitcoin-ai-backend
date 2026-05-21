@@ -287,12 +287,15 @@ async def handle_price_detection(
     rate: float,
     mtyp: str,
     supabase_client,
-    on_order_execute: Callable
+    on_order_execute: Callable,
+    ask_price: float = 0.0,
+    bid_price: float = 0.0,
 ):
     """가격 변동 감지 및 자동 매매 실행 (장중에만 매매)
 
     gap_qty: 갭 도달 시 매수/매도할 수량 (설정값)
     quantity: 현재 보유 수량 (매매 후 자동 갱신됨)
+    ask_price/bid_price: 실시간 매도호가/매수호가 (즉시체결 유도용, 없으면 현재가 폴백)
 
     - 가격이 gap% 이상 오르면 gap_qty만큼 매도 (단, 보유수량 부족 시 보유수량만큼만)
     - 가격이 gap% 이상 내리면 gap_qty만큼 매수
@@ -311,6 +314,8 @@ async def handle_price_detection(
         'ticker': ticker,
         'market': market,
         'price': current_price,
+        'ask': ask_price,
+        'bid': bid_price,
         'base_price_before': base_price,
         'price_rate': price_rate,
         'current_quantity': quantity,
