@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test, realtime
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test, realtime, auth
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,20 +138,20 @@ async def lifespan(app: FastAPI):
     )
     logger.info("[Scheduler] S&P 500 영향도 분석 등록: 매시간 정각 (UTC 기준)")
 
-    # ── 실시간 매매 감지 자동 시작 ────────────────────
+    # ── 실시간 매매 감지 자동 시작 (활성 사용자별) ────────
     try:
-        from routers.realtime import start_detection_internal
-        result = await start_detection_internal()
+        from routers.realtime import start_all_detections
+        result = await start_all_detections()
         logger.info(f"실시간 감지 자동 시작: {result}")
     except Exception as e:
         logger.warning(f"실시간 감지 자동 시작 실패: {e}")
 
     yield
 
-    # ── 실시간 매매 감지 종료 ────────────────────────
+    # ── 실시간 매매 감지 종료 (전체) ──────────────────
     try:
-        from routers.realtime import stop_detection_internal
-        await stop_detection_internal()
+        from routers.realtime import stop_all_detections
+        await stop_all_detections()
         logger.info("실시간 감지 종료 완료")
     except Exception as e:
         logger.warning(f"실시간 감지 종료 실패: {e}")
@@ -205,6 +205,7 @@ app.include_router(rl.router)
 app.include_router(sp500.router)
 app.include_router(portfolio.router)
 app.include_router(realtime.router)
+app.include_router(auth.router)
 app.include_router(test.router)
 
 

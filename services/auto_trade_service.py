@@ -623,7 +623,7 @@ def _parse_account_no(account_no: str) -> tuple[str, str]:
     return clean[:8], clean[8:10]
 
 
-async def execute_realtime_order(trade_id: str, order_data: dict, supabase_client):
+async def execute_realtime_order(trade_id: str, order_data: dict, supabase_client, user_id: str | None = None):
     """실시간 감지 주문 실행 (실거래 안전 설계).
 
     핵심 원칙:
@@ -708,10 +708,13 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         logger.debug(f"[Realtime] {ticker} 실패 쿨다운 중 — 스킵")
         return
 
-    # 자격증명 조회
+    # 자격증명 조회 — trade 소유자(user_id)의 것만 사용 (멀티유저 격리).
+    # user_id가 없으면(하위호환) 최신 1건으로 폴백.
     try:
-        cred_res = supabase.table('kis_credentials') \
-            .select('*').order('updated_at', desc=True).limit(1).execute()
+        cred_q = supabase.table('kis_credentials').select('*')
+        if user_id:
+            cred_q = cred_q.eq('user_id', user_id)
+        cred_res = cred_q.order('updated_at', desc=True).limit(1).execute()
         cred_rows = getattr(cred_res, 'data', None) or []
         cred = cred_rows[0] if cred_rows else None
     except Exception as e:

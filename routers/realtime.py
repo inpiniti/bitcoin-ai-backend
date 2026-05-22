@@ -1,17 +1,24 @@
 """
-실시간 매매 라우터
-- /realtime/start-detection : 감지 시작 (이미 실행 중이면 noop)
-- /realtime/stop-detection  : 감지 중지
-- /realtime/detection-status : 상태 조회
-- /realtime/ws : 앱 클라이언트용 WebSocket (KIS 가격 중계)
-서버 시작 시 main.py의 lifespan에서 start_detection_internal()을 호출해 자동 시작.
+실시간 매매 라우터 (멀티유저)
+
+사용자(user_id)별로 독립된 KIS WebSocket 감지 세션을 운영한다.
+요청 주인은 Authorization: Bearer <JWT>(앱 발급 토큰)로 식별한다.
+
+- POST /realtime/start-detection : 본인 감지 시작
+- POST /realtime/stop-detection  : 본인 감지 중지
+- GET  /realtime/detection-status: 본인 감지 상태
+- POST /realtime/reload-config   : 본인 설정 즉시 재동기화
+- WS   /realtime/ws?token=<JWT>  : 앱용 — 본인 종목 가격만 중계
+
+서버 시작 시 main.py lifespan에서 start_all_detections()로 활성 사용자별 세션을 자동 시작.
 """
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Header, WebSocket, WebSocketDisconnect
+
+from services import auth_service
 
 logger = logging.getLogger(__name__)
 
@@ -19,133 +26,126 @@ router = APIRouter(prefix="/realtime", tags=["realtime"])
 
 
 # ─────────────────────────────────────────────
-# 앱 클라이언트 WebSocket 브로드캐스터
+# 앱 클라이언트 WebSocket 브로드캐스터 (사용자별)
 # ─────────────────────────────────────────────
 class _AppBroadcaster:
     def __init__(self):
-        self._connections: list[WebSocket] = []
+        self._by_user: dict[str, list[WebSocket]] = {}
 
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws: WebSocket, user_id: str):
         await ws.accept()
-        self._connections.append(ws)
-        logger.info(f"[AppWS] 앱 연결 (총 {len(self._connections)}개)")
+        self._by_user.setdefault(user_id, []).append(ws)
+        total = sum(len(v) for v in self._by_user.values())
+        logger.info(f"[AppWS] 앱 연결 user={user_id} (총 {total}개)")
 
-    def disconnect(self, ws: WebSocket):
-        try:
-            self._connections.remove(ws)
-        except ValueError:
-            pass
-        logger.info(f"[AppWS] 앱 연결 해제 (총 {len(self._connections)}개)")
+    def disconnect(self, ws: WebSocket, user_id: str):
+        conns = self._by_user.get(user_id)
+        if conns:
+            try:
+                conns.remove(ws)
+            except ValueError:
+                pass
+            if not conns:
+                self._by_user.pop(user_id, None)
+        logger.info(f"[AppWS] 앱 연결 해제 user={user_id}")
 
-    async def broadcast(self, data: dict):
+    async def broadcast_to_user(self, user_id: str, data: dict):
         dead = []
-        for ws in list(self._connections):
+        for ws in list(self._by_user.get(user_id, [])):
             try:
                 await ws.send_json(data)
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self.disconnect(ws)
+            self.disconnect(ws, user_id)
 
 
 _app_broadcaster = _AppBroadcaster()
 
 
 # ─────────────────────────────────────────────
-# 전역 상태 (단일 인스턴스 가정)
+# 사용자별 감지 세션 상태
+#   user_id -> { task, manager, started_at, reload_event }
 # ─────────────────────────────────────────────
-_detection_state = {
-    "task": None,         # asyncio.Task
-    "manager": None,      # KISWebSocketManager
-    "started_at": None,
-    "reload_event": None, # asyncio.Event — set 시 즉시 동기화
-}
+_sessions: dict[str, dict] = {}
 
 
-def is_detection_running() -> bool:
-    task = _detection_state.get("task")
+def is_detection_running(user_id: str) -> bool:
+    sess = _sessions.get(user_id)
+    if not sess:
+        return False
+    task = sess.get("task")
     return task is not None and not task.done()
 
 
-# ─────────────────────────────────────────────
-# 내부 헬퍼
-# ─────────────────────────────────────────────
-def _get_supabase_env() -> tuple[str | None, str | None]:
-    # services/supabase_service.py와 동일한 우선순위
-    url = os.environ.get("VITE_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
-    key = (
-        os.environ.get("VITE_SUPABASE_ANON_KEY")
-        or os.environ.get("SUPABASE_ANON_KEY")
-        or os.environ.get("SUPABASE_KEY")
-    )
-    return url, key
+# 매칭 키 정규화: BRK.B / BRK-B / BRK/B / BRKB 모두 동일하게 비교
+def _norm(t):
+    return str(t or "").upper().replace(".", "").replace("-", "").replace("/", "")
 
 
-async def _fetch_latest_approval_key() -> str | None:
-    """Supabase websocket_keys에서 최신 키 1건 조회"""
-    from supabase import create_client
-
-    url, key = _get_supabase_env()
-    if not url or not key:
-        return None
-    sb = create_client(url, key)
+async def _fetch_user_approval_key(supabase, user_id: str) -> str | None:
+    """websocket_keys에서 해당 사용자의 최신 approval_key 조회"""
     try:
-        res = sb.table("websocket_keys") \
-            .select("approval_key, expires_at, issued_at") \
-            .order("issued_at", desc=True) \
-            .limit(1) \
+        res = (
+            supabase.table("websocket_keys")
+            .select("approval_key, issued_at")
+            .eq("user_id", user_id)
+            .order("issued_at", desc=True)
+            .limit(1)
             .execute()
+        )
         rows = res.data or []
-        if not rows:
-            return None
-        return rows[0].get("approval_key")
+        return rows[0].get("approval_key") if rows else None
     except Exception as e:
-        logger.error(f"[Realtime] approval_key 조회 실패: {e}")
+        logger.error(f"[Realtime] approval_key 조회 실패 user={user_id}: {e}")
         return None
 
 
-async def _detection_loop(approval_key: str):
-    """KIS WebSocket 연결 + 메시지 수신 루프 (task로 실행)"""
+async def _detection_loop(user_id: str, approval_key: str):
+    """특정 사용자의 KIS WebSocket 연결 + 메시지 수신 루프 (task로 실행)"""
     from supabase import create_client
     from services.websocket_service import KISWebSocketManager, handle_price_detection
     from services.auto_trade_service import execute_realtime_order
 
-    url, key = _get_supabase_env()
+    url, key = auth_service.get_supabase_env()
     if not url or not key:
         logger.error("[Realtime] Supabase 환경변수 없음")
         return
 
     supabase = create_client(url, key)
 
-    # 활성 trade 조회
+    # 해당 사용자의 활성 trade만 조회
     try:
-        res = supabase.table("realtime_trading").select("*").eq("is_active", True).execute()
+        res = (
+            supabase.table("realtime_trading")
+            .select("*")
+            .eq("is_active", True)
+            .eq("user_id", user_id)
+            .execute()
+        )
         active_trades = res.data or []
     except Exception as e:
-        logger.error(f"[Realtime] 활성 trade 조회 실패: {e}")
+        logger.error(f"[Realtime] 활성 trade 조회 실패 user={user_id}: {e}")
         return
 
     if not active_trades:
-        logger.info("[Realtime] 활성 종목 없음 - 감지 시작 안 함")
+        logger.info(f"[Realtime] 활성 종목 없음 user={user_id} - 감지 시작 안 함")
         return
-
-    # 매칭 키: BRK.B / BRK-B / BRK/B / BRKB 모두 동일하게 비교되도록 정규화
-    def _norm(t):
-        return str(t or "").upper().replace(".", "").replace("-", "").replace("/", "")
 
     active_trades_dict = {_norm(t["ticker"]): t for t in active_trades}
     tickers_str = ", ".join([t["ticker"] for t in active_trades])
-    logger.info(f"[Realtime] 감지 시작: {len(active_trades)}개 종목 ({tickers_str})")
+    logger.info(f"[Realtime] 감지 시작 user={user_id}: {len(active_trades)}개 ({tickers_str})")
 
     manager = KISWebSocketManager(
         approval_key=approval_key,
-        user_id="system",
+        user_id=user_id,
         supabase_url=url,
         supabase_key=key,
     )
-    _detection_state["manager"] = manager
     reload_event = asyncio.Event()
-    _detection_state["reload_event"] = reload_event
+    _sessions.setdefault(user_id, {})
+    _sessions[user_id]["manager"] = manager
+    _sessions[user_id]["reload_event"] = reload_event
 
     try:
         await manager.connect()
@@ -153,11 +153,10 @@ async def _detection_loop(approval_key: str):
         for trade in active_trades:
             try:
                 await manager.subscribe_to_stock(
-                    ticker=trade["ticker"],
-                    market=trade.get("market", "NAS"),
+                    ticker=trade["ticker"], market=trade.get("market", "NAS")
                 )
             except Exception as e:
-                logger.error(f"[Realtime] {trade['ticker']} 구독 실패: {e}")
+                logger.error(f"[Realtime] {trade['ticker']} 구독 실패 user={user_id}: {e}")
 
         async def on_price_update(data):
             try:
@@ -165,22 +164,21 @@ async def _detection_loop(approval_key: str):
                 rate = float(data.get("RATE") or 0)
                 mtyp = data.get("MTYP") or "1"
                 current_price = float(data.get("LAST") or 0)
-                ask_price = float(data.get("PASK") or 0)   # 매도호가 (매수 즉시체결용)
-                bid_price = float(data.get("PBID") or 0)   # 매수호가 (매도 즉시체결용)
+                ask_price = float(data.get("PASK") or 0)
+                bid_price = float(data.get("PBID") or 0)
                 khms = data.get("KHMS") or ""
 
                 norm_symb = _norm(symb)
                 trade = active_trades_dict.get(norm_symb)
                 if not trade:
                     return
-                # 추가 방어: is_active=false인 경우 매매 스킵 (동기화 직전 race condition 대비)
                 if trade.get("is_active") is False:
                     return
-                ticker = trade["ticker"]  # DB 원본 (BRK-B 등) 사용
-                logger.info(f"[Realtime] 가격 수신 - {ticker}: {current_price} ({khms})")
+                ticker = trade["ticker"]
+                logger.info(f"[Realtime] 가격 수신 user={user_id} {ticker}: {current_price} ({khms})")
 
-                # 앱 클라이언트에 가격 데이터 중계
-                await _app_broadcaster.broadcast({
+                # 본인 앱 클라이언트에만 가격 중계
+                await _app_broadcaster.broadcast_to_user(user_id, {
                     "ticker": ticker,
                     "price": current_price,
                     "rate": rate,
@@ -193,30 +191,23 @@ async def _detection_loop(approval_key: str):
                         trade_id=trade["id"],
                         order_data=order_data,
                         supabase_client=supabase,
+                        user_id=user_id,
                     )
                     # 매매/업데이트 후 캐시 최신화
                     try:
-                        latest = supabase.table("realtime_trading") \
-                            .select("*") \
-                            .eq("id", trade["id"]) \
-                            .execute()
+                        latest = supabase.table("realtime_trading").select("*").eq("id", trade["id"]).execute()
                         rows = getattr(latest, "data", None) or []
                         if rows and rows[0].get("is_active"):
                             active_trades_dict[norm_symb] = rows[0]
                         else:
-                            # row가 삭제됐거나 비활성화 → 캐시에서 제거 + 구독 해제
-                            # (무한 매수 방지)
                             active_trades_dict.pop(norm_symb, None)
                             try:
-                                await manager.unsubscribe_from_stock(
-                                    ticker=ticker,
-                                    market=trade.get("market", "NAS"),
-                                )
-                                logger.info(f"[Realtime] {ticker} 캐시/구독 정리 (행 없음 또는 비활성)")
+                                await manager.unsubscribe_from_stock(ticker=ticker, market=trade.get("market", "NAS"))
+                                logger.info(f"[Realtime] {ticker} 캐시/구독 정리 user={user_id} (행 없음 또는 비활성)")
                             except Exception as ue:
                                 logger.warning(f"[Realtime] {ticker} 구독 해제 실패: {ue}")
                     except Exception as e:
-                        logger.error(f"[Realtime] {ticker} 캐시 갱신 실패 → 안전상 캐시 제거: {e}")
+                        logger.error(f"[Realtime] {ticker} 캐시 갱신 실패 → 안전상 제거: {e}")
                         active_trades_dict.pop(norm_symb, None)
 
                 await handle_price_detection(
@@ -235,60 +226,59 @@ async def _detection_loop(approval_key: str):
                     bid_price=bid_price,
                 )
             except Exception as e:
-                logger.error(f"[Realtime] 가격 처리 오류: {e}")
+                logger.error(f"[Realtime] 가격 처리 오류 user={user_id}: {e}")
 
         async def _reconcile_subscriptions():
-            """주기적(or reload_event 트리거 시) DB 활성 trade를 재조회해 메모리/구독 동기화"""
-            sync_interval = 15  # 초
+            """주기적(or reload_event 트리거 시) 해당 사용자 활성 trade 재조회·동기화"""
+            sync_interval = 15
             while True:
                 try:
                     try:
                         await asyncio.wait_for(reload_event.wait(), timeout=sync_interval)
                         reload_event.clear()
-                        logger.info("[Realtime] reload 트리거 → 즉시 동기화")
+                        logger.info(f"[Realtime] reload 트리거 user={user_id} → 즉시 동기화")
                     except asyncio.TimeoutError:
                         pass
 
                     try:
-                        res = supabase.table("realtime_trading").select("*").eq("is_active", True).execute()
+                        res = (
+                            supabase.table("realtime_trading")
+                            .select("*")
+                            .eq("is_active", True)
+                            .eq("user_id", user_id)
+                            .execute()
+                        )
                     except Exception as e:
-                        logger.error(f"[Realtime] 동기화 - DB 조회 실패: {e}")
+                        logger.error(f"[Realtime] 동기화 DB 조회 실패 user={user_id}: {e}")
                         continue
 
                     fresh = res.data or []
                     fresh_dict = {_norm(t["ticker"]): t for t in fresh}
 
-                    # 신규 추가된 종목 → 구독
+                    # 신규 추가 → 구독
                     for norm_key, t in fresh_dict.items():
                         if norm_key not in active_trades_dict:
                             try:
-                                await manager.subscribe_to_stock(
-                                    ticker=t["ticker"],
-                                    market=t.get("market", "NAS"),
-                                )
-                                logger.info(f"[Realtime] 신규 종목 구독: {t['ticker']}")
+                                await manager.subscribe_to_stock(ticker=t["ticker"], market=t.get("market", "NAS"))
+                                logger.info(f"[Realtime] 신규 구독 user={user_id}: {t['ticker']}")
                             except Exception as e:
                                 logger.error(f"[Realtime] {t['ticker']} 신규 구독 실패: {e}")
 
-                    # 제거/비활성된 종목 → 구독 해제
+                    # 제거/비활성 → 구독 해제
                     for norm_key, t in list(active_trades_dict.items()):
                         if norm_key not in fresh_dict:
                             try:
-                                await manager.unsubscribe_from_stock(
-                                    ticker=t["ticker"],
-                                    market=t.get("market", "NAS"),
-                                )
-                                logger.info(f"[Realtime] 제거 종목 구독 해제: {t['ticker']}")
+                                await manager.unsubscribe_from_stock(ticker=t["ticker"], market=t.get("market", "NAS"))
+                                logger.info(f"[Realtime] 구독 해제 user={user_id}: {t['ticker']}")
                             except Exception as e:
                                 logger.error(f"[Realtime] {t['ticker']} 구독 해제 실패: {e}")
 
-                    # 캐시 교체 (gap_qty/gap/base_price 등 최신값 반영)
                     active_trades_dict.clear()
                     active_trades_dict.update(fresh_dict)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.error(f"[Realtime] 동기화 루프 오류: {e}")
+                    logger.error(f"[Realtime] 동기화 루프 오류 user={user_id}: {e}")
 
         listen_task = asyncio.create_task(manager.listen(on_price_update))
         reconcile_task = asyncio.create_task(_reconcile_subscriptions())
@@ -317,52 +307,63 @@ async def _detection_loop(approval_key: str):
                         pass
 
     except asyncio.CancelledError:
-        logger.info("[Realtime] 감지 task 취소됨")
+        logger.info(f"[Realtime] 감지 task 취소 user={user_id}")
         raise
     except Exception as e:
-        logger.error(f"[Realtime] WebSocket 감지 오류: {e}")
+        logger.error(f"[Realtime] WebSocket 감지 오류 user={user_id}: {e}")
     finally:
         try:
             await manager.disconnect()
         except Exception:
             pass
-        _detection_state["manager"] = None
-        _detection_state["reload_event"] = None
+        sess = _sessions.get(user_id)
+        if sess:
+            sess["manager"] = None
+            sess["reload_event"] = None
 
 
 # ─────────────────────────────────────────────
 # 시작 / 중지 (lifespan + 엔드포인트 공용)
 # ─────────────────────────────────────────────
-async def start_detection_internal(approval_key: str | None = None) -> dict:
-    if is_detection_running():
+async def start_detection_internal(user_id: str, approval_key: str | None = None) -> dict:
+    if not user_id:
+        return {"status": "no_user", "message": "user_id가 필요합니다"}
+    if is_detection_running(user_id):
         return {"status": "already_running"}
 
     if not approval_key:
-        approval_key = await _fetch_latest_approval_key()
+        from supabase import create_client
+        url, key = auth_service.get_supabase_env()
+        if not url or not key:
+            return {"status": "no_config"}
+        sb = create_client(url, key)
+        approval_key = await _fetch_user_approval_key(sb, user_id)
     if not approval_key:
-        return {"status": "no_key", "message": "websocket_keys 테이블에 키가 없습니다"}
+        return {"status": "no_key", "message": "해당 사용자의 websocket_keys가 없습니다"}
 
-    task = asyncio.create_task(_detection_loop(approval_key))
-    _detection_state["task"] = task
-    _detection_state["started_at"] = datetime.now(timezone.utc).isoformat()
-    return {"status": "started", "started_at": _detection_state["started_at"]}
+    task = asyncio.create_task(_detection_loop(user_id, approval_key))
+    _sessions.setdefault(user_id, {})
+    _sessions[user_id]["task"] = task
+    _sessions[user_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+    return {"status": "started", "started_at": _sessions[user_id]["started_at"]}
 
 
-async def stop_detection_internal() -> dict:
-    if not is_detection_running():
-        # task가 있어도 끝났으면 정리
-        _detection_state["task"] = None
-        _detection_state["manager"] = None
+async def stop_detection_internal(user_id: str) -> dict:
+    sess = _sessions.get(user_id)
+    if not sess or not is_detection_running(user_id):
+        if sess:
+            sess["task"] = None
+            sess["manager"] = None
         return {"status": "not_running"}
 
-    manager = _detection_state.get("manager")
+    manager = sess.get("manager")
     if manager:
         try:
             await manager.disconnect()
         except Exception as e:
-            logger.warning(f"[Realtime] manager.disconnect 오류: {e}")
+            logger.warning(f"[Realtime] manager.disconnect 오류 user={user_id}: {e}")
 
-    task = _detection_state.get("task")
+    task = sess.get("task")
     if task and not task.done():
         task.cancel()
         try:
@@ -370,57 +371,86 @@ async def stop_detection_internal() -> dict:
         except (asyncio.CancelledError, Exception):
             pass
 
-    _detection_state["task"] = None
-    _detection_state["manager"] = None
-    _detection_state["started_at"] = None
-    _detection_state["reload_event"] = None
+    _sessions.pop(user_id, None)
+    return {"status": "stopped"}
+
+
+async def start_all_detections() -> dict:
+    """서버 부팅 시: 활성 종목이 있는 사용자별로 감지 세션을 시작."""
+    from supabase import create_client
+    url, key = auth_service.get_supabase_env()
+    if not url or not key:
+        logger.error("[Realtime] Supabase 환경변수 없음 - 자동 시작 불가")
+        return {"status": "no_config"}
+    sb = create_client(url, key)
+    try:
+        res = sb.table("realtime_trading").select("user_id").eq("is_active", True).execute()
+        rows = res.data or []
+    except Exception as e:
+        logger.error(f"[Realtime] 활성 사용자 조회 실패: {e}")
+        return {"status": "error", "error": str(e)}
+
+    user_ids = {r.get("user_id") for r in rows if r.get("user_id")}
+    started = []
+    for uid in user_ids:
+        approval_key = await _fetch_user_approval_key(sb, uid)
+        if not approval_key:
+            logger.warning(f"[Realtime] user={uid} approval_key 없음 - 자동 시작 건너뜀")
+            continue
+        result = await start_detection_internal(uid, approval_key)
+        started.append({"user_id": uid, "result": result})
+    logger.info(f"[Realtime] 자동 시작 완료: {len(started)}명")
+    return {"status": "started", "users": started}
+
+
+async def stop_all_detections() -> dict:
+    for uid in list(_sessions.keys()):
+        await stop_detection_internal(uid)
     return {"status": "stopped"}
 
 
 # ─────────────────────────────────────────────
 # 엔드포인트
 # ─────────────────────────────────────────────
-@router.post(
-    "/start-detection",
-    summary="실시간 감지 시작",
-    description="approval_key 미지정 시 websocket_keys 테이블에서 최신 키를 자동 조회합니다. 이미 실행 중이면 noop.",
-)
-async def start_detection(approval_key: str | None = None):
-    return await start_detection_internal(approval_key)
+def _user_from_header(authorization: str | None) -> str | None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return auth_service.verify_supabase_jwt(authorization[7:])
 
 
-@router.post(
-    "/stop-detection",
-    summary="실시간 감지 중지",
-)
-async def stop_detection():
-    return await stop_detection_internal()
+@router.post("/start-detection", summary="실시간 감지 시작 (본인)")
+async def start_detection(authorization: str | None = Header(default=None)):
+    user_id = _user_from_header(authorization)
+    if not user_id:
+        return {"status": "unauthorized", "message": "유효한 인증 토큰이 필요합니다"}
+    return await start_detection_internal(user_id)
 
 
-@router.get(
-    "/detection-status",
-    summary="실시간 감지 상태 조회",
-)
-async def detection_status():
-    return {
-        "running": is_detection_running(),
-        "started_at": _detection_state.get("started_at"),
-    }
+@router.post("/stop-detection", summary="실시간 감지 중지 (본인)")
+async def stop_detection(authorization: str | None = Header(default=None)):
+    user_id = _user_from_header(authorization)
+    if not user_id:
+        return {"status": "unauthorized"}
+    return await stop_detection_internal(user_id)
 
 
-@router.post(
-    "/reload-config",
-    summary="실시간 설정 즉시 재동기화",
-    description=(
-        "DB의 realtime_trading 변경사항(추가/삭제/비활성화/gap_qty 변경 등)을 "
-        "메모리 캐시 및 KIS WebSocket 구독에 즉시 반영합니다. "
-        "감지가 실행 중이 아니면 noop. 미호출 시에도 15초 주기로 자동 동기화됩니다."
-    ),
-)
-async def reload_config():
-    if not is_detection_running():
+@router.get("/detection-status", summary="실시간 감지 상태 (본인)")
+async def detection_status(authorization: str | None = Header(default=None)):
+    user_id = _user_from_header(authorization)
+    if not user_id:
+        return {"running": False, "unauthorized": True}
+    sess = _sessions.get(user_id) or {}
+    return {"running": is_detection_running(user_id), "started_at": sess.get("started_at")}
+
+
+@router.post("/reload-config", summary="실시간 설정 즉시 재동기화 (본인)")
+async def reload_config(authorization: str | None = Header(default=None)):
+    user_id = _user_from_header(authorization)
+    if not user_id:
+        return {"status": "unauthorized"}
+    if not is_detection_running(user_id):
         return {"status": "not_running"}
-    ev = _detection_state.get("reload_event")
+    ev = (_sessions.get(user_id) or {}).get("reload_event")
     if ev is None:
         return {"status": "no_reload_event"}
     ev.set()
@@ -429,12 +459,17 @@ async def reload_config():
 
 @router.websocket("/ws")
 async def app_websocket(websocket: WebSocket):
-    """앱 클라이언트용 WebSocket — 백엔드가 KIS에서 수신한 가격 데이터를 중계"""
-    await _app_broadcaster.connect(websocket)
+    """앱 클라이언트용 WebSocket — 본인 종목 가격만 중계. ?token=<JWT>로 식별."""
+    token = websocket.query_params.get("token")
+    user_id = auth_service.verify_supabase_jwt(token) if token else None
+    if not user_id:
+        await websocket.close(code=4401)
+        return
+    await _app_broadcaster.connect(websocket, user_id)
     try:
         while True:
             await websocket.receive_text()  # 클라이언트 disconnect 감지
     except WebSocketDisconnect:
-        _app_broadcaster.disconnect(websocket)
+        _app_broadcaster.disconnect(websocket, user_id)
     except Exception:
-        _app_broadcaster.disconnect(websocket)
+        _app_broadcaster.disconnect(websocket, user_id)
