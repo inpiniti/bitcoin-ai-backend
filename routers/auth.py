@@ -46,11 +46,17 @@ async def kis_login(body: KisLoginRequest):
 
     cano, _prdt = kis_service.parse_account(account_no)
 
-    # 1. KIS 인증 검증 — 토큰 발급 성공 = appsecret을 아는 본인
+    # 1. KIS 인증 검증 — 웹소켓 approval_key 발급 성공 = appsecret을 아는 본인.
+    #    토큰 엔드포인트(/oauth2/tokenP)는 "1분당 1회" 제한이 있어, 앱이 로그인
+    #    직전 직접 발급한 토큰과 충돌해 거부(EGW00133)당한다. 별도 제한이 없는
+    #    Approval 엔드포인트로 검증하면 충돌 없이 본인 확인 + 웹소켓 키 확보를
+    #    한 번에 끝낼 수 있다.
     try:
-        await kis_service.get_access_token(appkey, appsecret)
+        approval_key = await issue_websocket_key(appkey, appsecret)
     except Exception as e:
-        logger.warning(f"[auth] KIS 인증 실패 (account=...{cano[-2:]}): {e}")
+        logger.warning(f"[auth] KIS 인증 요청 오류 (account=...{cano[-2:]}): {e}")
+        approval_key = None
+    if not approval_key:
         raise HTTPException(status_code=401, detail="KIS 인증 실패 — 계좌번호/AppKey/시크릿키를 확인하세요")
 
     user_id = auth_service.user_id_for_account(cano)
@@ -73,20 +79,16 @@ async def kis_login(body: KisLoginRequest):
         logger.error(f"[auth] kis_credentials 저장 실패: {e}")
         raise HTTPException(status_code=500, detail="자격증명 저장에 실패했습니다")
 
-    # 3. 웹소켓 approval_key 발급 + 저장 (실패해도 로그인은 계속 — 실시간 매매 사용 시에만 필요)
+    # 3. 웹소켓 approval_key 저장 (위 인증 단계에서 이미 발급됨)
     try:
-        approval_key = await issue_websocket_key(appkey, appsecret)
-        if approval_key:
-            expires_iso = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
-            sb.table("websocket_keys").delete().eq("user_id", user_id).execute()
-            sb.table("websocket_keys").insert({
-                "user_id": user_id,
-                "approval_key": approval_key,
-                "issued_at": now_iso,
-                "expires_at": expires_iso,
-            }).execute()
-        else:
-            logger.warning("[auth] approval_key 발급 결과가 비어 있음 (실시간 매매 시 재발급 필요)")
+        expires_iso = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+        sb.table("websocket_keys").delete().eq("user_id", user_id).execute()
+        sb.table("websocket_keys").insert({
+            "user_id": user_id,
+            "approval_key": approval_key,
+            "issued_at": now_iso,
+            "expires_at": expires_iso,
+        }).execute()
     except Exception as e:
         logger.warning(f"[auth] websocket_keys 저장 실패(무시): {e}")
 
