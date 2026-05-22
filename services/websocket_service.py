@@ -11,6 +11,12 @@ from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
+
+class InvalidApprovalError(Exception):
+    """KIS WebSocket Approval Key가 유효하지 않거나 만료되었을 때 발생하는 예외"""
+    pass
+
+
 class KISWebSocketManager:
     """KIS WebSocket 실시간 가격 감지 매니저"""
 
@@ -174,6 +180,12 @@ class KISWebSocketManager:
                             logger.debug(f"[WebSocket] PINGPONG")
                         else:
                             logger.info(f"[WebSocket] KIS 응답 tr_id={tr_id} msg_cd={msg_cd} msg1={msg1}")
+                            # 만료되거나 잘못된 approval_key인 경우 즉시 예외 발생
+                            if msg_cd == 'OPSP0011' or 'invalid approval' in msg1.lower():
+                                logger.error(f"[WebSocket] 유효하지 않은 KIS approval key 감지 (user={self.user_id}). 재연결을 중단합니다.")
+                                raise InvalidApprovalError(f"유효하지 않은 KIS approval key: {msg1}")
+                    except InvalidApprovalError:
+                        raise
                     except Exception:
                         logger.info(f"[WebSocket] JSON 응답 파싱 실패: {message[:200]}")
                     return
@@ -224,6 +236,8 @@ class KISWebSocketManager:
                 mtyp_label = {'1': '장중', '2': '장전', '3': '장후'}.get(data['MTYP'], f"MTYP={data['MTYP']}")
                 logger.info(f"[WebSocket] 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']}, {mtyp_label})")
                 await on_price_update(data)
+        except InvalidApprovalError:
+            raise
         except Exception as e:
             logger.error(f"Error handling message: {e}")
 
