@@ -791,16 +791,33 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         if real_qty != current_quantity:
             # 직전 주문이 체결되어 보유수량이 변함 → 동기화 + 기준가를 현재가로 갱신
             try:
+                # DB에서 현재 grid_step 조회
+                trade_res = supabase.table('realtime_trading').select('grid_step').eq('id', trade_id).execute()
+                current_step = 0
+                if trade_res.data:
+                    current_step = int(trade_res.data[0].get('grid_step', 0))
+                
+                next_step = current_step
+                if real_qty > current_quantity:
+                    next_step += 1
+                elif real_qty < current_quantity:
+                    next_step = max(0, next_step - 1)
+                
+                # 안전장치: 실제 보유량이 0이면 step도 0으로 초기화
+                if real_qty == 0:
+                    next_step = 0
+
                 supabase.table('realtime_trading').update({
                     'quantity': real_qty,
                     'base_price': current_price,
+                    'grid_step': next_step,
                     'updated_at': now.isoformat(),
                 }).eq('id', trade_id).execute()
             except Exception as e:
                 logger.error(f"[Realtime] {ticker} 체결 동기화 실패: {e}")
                 return
             logger.info(
-                f"[Realtime] {ticker} 체결 반영: 보유 {current_quantity} → {real_qty}, 기준가 → {current_price}"
+                f"[Realtime] {ticker} 체결 반영: 보유 {current_quantity} → {real_qty}, grid_step {current_step} → {next_step}, 기준가 → {current_price}"
             )
             _record(action='settle', side='none', quantity=abs(real_qty - current_quantity),
                     price=current_price, success=True, base_price_after=current_price)

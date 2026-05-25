@@ -304,6 +304,7 @@ async def handle_price_detection(
     on_order_execute: Callable,
     ask_price: float = 0.0,
     bid_price: float = 0.0,
+    grid_step: int = 0,
 ):
     """가격 변동 감지 및 자동 매매 실행 (장중에만 매매)
 
@@ -333,13 +334,27 @@ async def handle_price_detection(
         'base_price_before': base_price,
         'price_rate': price_rate,
         'current_quantity': quantity,
+        'grid_step': grid_step,
     }
 
     gap_qty = max(int(gap_qty or 0), 0)
 
-    # 3. gap% 이상 올랐을 때 → gap_qty만큼 매도 (보유 부족 시 보유량만큼만)
+    # 2. 보유량이 0이면서 기준가 대비 현재가가 상승(+)한 경우, 기준가를 현재가(감지이래 최고가)로 즉시 업데이트 (요구사항 1)
+    if quantity == 0 and price_rate > 0:
+        await on_order_execute({
+            **common,
+            'side': 'none',
+            'quantity': 0,
+            'action': 'update_base_price',
+        })
+        return
+
+    # 3. gap% 이상 올랐을 때 → 등비수열 수량만큼 매도 (보유 부족 시 보유량만큼만)
     if price_rate >= gap:
-        actual_sell_qty = min(gap_qty, quantity)
+        # 등비수열 매도 수량 계산 (요구사항 3): base_qty * (1.1 ** (grid_step - 1))
+        step = max(1, grid_step)
+        target_sell_qty = max(1, round(gap_qty * (1.1 ** (step - 1))))
+        actual_sell_qty = min(target_sell_qty, quantity)
         if actual_sell_qty > 0:
             await on_order_execute({
                 **common,
@@ -353,15 +368,17 @@ async def handle_price_detection(
                 'side': 'none',
                 'quantity': 0,
                 'action': 'update_base_price',
-            })
+              })
 
-    # 4. gap% 이상 내렸을 때 → gap_qty만큼 매수
+    # 4. gap% 이상 내렸을 때 → 등비수열 수량만큼 매수
     elif price_rate <= -gap:
         if gap_qty > 0:
+            # 등비수열 매수 수량 계산 (요구사항 3): base_qty * (1.1 ** grid_step)
+            buy_qty = max(1, round(gap_qty * (1.1 ** grid_step)))
             await on_order_execute({
                 **common,
                 'side': 'buy',
-                'quantity': gap_qty,
+                'quantity': buy_qty,
                 'action': 'buy_and_update',
             })
         else:

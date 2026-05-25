@@ -224,6 +224,7 @@ async def _detection_loop(user_id: str, approval_key: str):
                     on_order_execute=_on_execute,
                     ask_price=ask_price,
                     bid_price=bid_price,
+                    grid_step=int(trade.get("grid_step", 0)),
                 )
             except Exception as e:
                 logger.error(f"[Realtime] 가격 처리 오류 user={user_id}: {e}")
