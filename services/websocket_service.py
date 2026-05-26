@@ -17,6 +17,14 @@ class InvalidApprovalError(Exception):
     pass
 
 
+def _get_tr_id(market: str) -> str:
+    """마켓에 따른 TR ID 결정"""
+    if market in ('KRX', 'KOSDAQ'):
+        return 'H0STCNT0'  # 국내주식
+    else:
+        return 'HDFSCNT0'  # 해외주식 (기본값)
+
+
 class KISWebSocketManager:
     """KIS WebSocket 실시간 가격 감지 매니저"""
 
@@ -55,11 +63,16 @@ class KISWebSocketManager:
         if not self.is_connected:
             raise RuntimeError("WebSocket is not connected")
 
-        # tr_key 생성: D + market + ticker
-        # 점(.) → 슬래시(/), 하이픈(-) → 제거 (웹 kisWebSocket.js와 동일)
-        # 예: DNASAAPL, DNYSBRK/B (BRK.B 입력), DNYSBRKB (BRK-B 입력)
-        kis_ticker = ticker.upper().replace(".", "/").replace("-", "")
-        tr_key = f"D{market}{kis_ticker}"
+        tr_id = _get_tr_id(market)
+
+        if market in ('KRX', 'KOSDAQ'):
+            # 국내주식: 6자리 코드 그대로
+            tr_key = ticker.strip().upper()
+        else:
+            # 해외주식: D + market + ticker
+            # 점(.) → 슬래시(/), 하이픈(-) → 제거
+            kis_ticker = ticker.upper().replace(".", "/").replace("-", "")
+            tr_key = f"D{market}{kis_ticker}"
 
         header = {
             'approval_key': self.approval_key,
@@ -68,10 +81,9 @@ class KISWebSocketManager:
             'content-type': 'utf-8'
         }
 
-        # KIS 사양: body.input.{tr_id, tr_key} (웹 kisWebSocket.js와 동일)
         body = {
             'input': {
-                'tr_id': 'HDFSCNT0',
+                'tr_id': tr_id,
                 'tr_key': tr_key,
             }
         }
@@ -83,26 +95,31 @@ class KISWebSocketManager:
 
         await self.ws.send(message)
         self._active_subscriptions.add((ticker, market))
-        logger.info(f"Subscribed to {ticker} ({market}) tr_key={tr_key}")
+        logger.info(f"Subscribed to {ticker} ({market}) tr_id={tr_id} tr_key={tr_key}")
 
     async def unsubscribe_from_stock(self, ticker: str, market: str = 'NAS'):
         """종목 실시간 가격 구독 해제"""
         if not self.is_connected:
             raise RuntimeError("WebSocket is not connected")
 
-        kis_ticker = ticker.upper().replace(".", "/").replace("-", "")
-        tr_key = f"D{market}{kis_ticker}"
+        tr_id = _get_tr_id(market)
+
+        if market in ('KRX', 'KOSDAQ'):
+            tr_key = ticker.strip().upper()
+        else:
+            kis_ticker = ticker.upper().replace(".", "/").replace("-", "")
+            tr_key = f"D{market}{kis_ticker}"
 
         header = {
             'approval_key': self.approval_key,
-            'tr_type': '2',  # 해제
+            'tr_type': '2',
             'custtype': 'P',
             'content-type': 'utf-8'
         }
 
         body = {
             'input': {
-                'tr_id': 'HDFSCNT0',
+                'tr_id': tr_id,
                 'tr_key': tr_key,
             }
         }
@@ -196,46 +213,66 @@ class KISWebSocketManager:
                     return
 
                 tr_id = parts[1]
-                if tr_id != 'HDFSCNT0':
-                    return
 
-                # 실제 데이터는 parts[3]부터 ^로 구분
-                data_str = parts[3]
-                fields = data_str.split('^')
-                if len(fields) < 25:
-                    return
+                if tr_id == 'H0STCNT0':
+                    # 국내주식 실시간 체결가
+                    data_str = parts[3]
+                    fields = data_str.split('^')
+                    if len(fields) < 6:
+                        return
 
-                data = {
-                    'RSYM': fields[0],      # 실시간종목코드
-                    'SYMB': fields[1],      # 종목코드
-                    'ZDIV': fields[2],      # 수수점자리수
-                    'TYMD': fields[3],      # 현지영업일자
-                    'XYMD': fields[4],      # 현지일자
-                    'XHMS': fields[5],      # 현지시간
-                    'KYMD': fields[6],      # 한국일자
-                    'KHMS': fields[7],      # 한국시간
-                    'OPEN': fields[8],      # 시가
-                    'HIGH': fields[9],      # 고가
-                    'LOW': fields[10],      # 저가
-                    'LAST': fields[11],     # 현재가
-                    'SIGN': fields[12],     # 대비구분
-                    'DIFF': fields[13],     # 전일대비
-                    'RATE': fields[14],     # 등락율
-                    'PBID': fields[15],     # 매수호가
-                    'PASK': fields[16],     # 매도호가
-                    'VBID': fields[17],     # 매수잔량
-                    'VASK': fields[18],     # 매도잔량
-                    'EVOL': fields[19],     # 체결량
-                    'TVOL': fields[20],     # 거래량
-                    'TAMT': fields[21],     # 거래대금
-                    'BIVL': fields[22],     # 매도체결량
-                    'ASVL': fields[23],     # 매수체결량
-                    'STRN': fields[24],     # 체결강도
-                    'MTYP': fields[25] if len(fields) > 25 else '1',  # 시장구분
-                }
-                mtyp_label = {'1': '장중', '2': '장전', '3': '장후'}.get(data['MTYP'], f"MTYP={data['MTYP']}")
-                logger.info(f"[WebSocket] 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']}, {mtyp_label})")
-                await on_price_update(data)
+                    data = {
+                        'SYMB': fields[0],              # 종목코드 (6자리)
+                        'STCK_CNTG_HOUR': fields[1],    # 체결 시간
+                        'STCK_PRPR': fields[2],         # 현재가
+                        'PRDY_VRSS_SIGN': fields[3],    # 대비구분
+                        'PRDY_VRSS': fields[4],         # 전일대비
+                        'PRDY_CTRT': fields[5],         # 전일대비율
+                        'ACML_VOL': fields[13] if len(fields) > 13 else '0',  # 누적거래량
+                        'MARKET_TYPE': 'domestic',
+                    }
+                    logger.info(f"[WebSocket] 국내 데이터 수신 - {data['SYMB']}: {data['STCK_PRPR']} ({data['STCK_CNTG_HOUR']})")
+                    await on_price_update(data)
+
+                elif tr_id == 'HDFSCNT0':
+                    # 해외주식 실시간 가격
+                    data_str = parts[3]
+                    fields = data_str.split('^')
+                    if len(fields) < 25:
+                        return
+
+                    data = {
+                        'RSYM': fields[0],      # 실시간종목코드
+                        'SYMB': fields[1],      # 종목코드
+                        'ZDIV': fields[2],      # 수수점자리수
+                        'TYMD': fields[3],      # 현지영업일자
+                        'XYMD': fields[4],      # 현지일자
+                        'XHMS': fields[5],      # 현지시간
+                        'KYMD': fields[6],      # 한국일자
+                        'KHMS': fields[7],      # 한국시간
+                        'OPEN': fields[8],      # 시가
+                        'HIGH': fields[9],      # 고가
+                        'LOW': fields[10],      # 저가
+                        'LAST': fields[11],     # 현재가
+                        'SIGN': fields[12],     # 대비구분
+                        'DIFF': fields[13],     # 전일대비
+                        'RATE': fields[14],     # 등락율
+                        'PBID': fields[15],     # 매수호가
+                        'PASK': fields[16],     # 매도호가
+                        'VBID': fields[17],     # 매수잔량
+                        'VASK': fields[18],     # 매도잔량
+                        'EVOL': fields[19],     # 체결량
+                        'TVOL': fields[20],     # 거래량
+                        'TAMT': fields[21],     # 거래대금
+                        'BIVL': fields[22],     # 매도체결량
+                        'ASVL': fields[23],     # 매수체결량
+                        'STRN': fields[24],     # 체결강도
+                        'MTYP': fields[25] if len(fields) > 25 else '1',  # 시장구분
+                        'MARKET_TYPE': 'overseas',
+                    }
+                    mtyp_label = {'1': '장중', '2': '장전', '3': '장후'}.get(data['MTYP'], f"MTYP={data['MTYP']}")
+                    logger.info(f"[WebSocket] 해외 데이터 수신 - {data['SYMB']}: {data['LAST']} ({data['KHMS']}, {mtyp_label})")
+                    await on_price_update(data)
         except InvalidApprovalError:
             raise
         except Exception as e:

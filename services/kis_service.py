@@ -255,3 +255,110 @@ async def cancel_overseas_order(
     err = data.get("msg1", "취소 실패")
     code = data.get("msg_cd", "")
     return {"success": False, "error": f"[{code}] {err}" if code else err}
+
+
+# ============================================================
+# 국내주식 API (1단계 이후)
+# ============================================================
+
+async def get_domestic_balance(appkey: str, appsecret: str, account_no: str, account_code: str) -> dict:
+    """국내주식 잔고 조회 (TTTC8434R 실전 / VTTC8434R 모의)"""
+    token = await get_access_token(appkey, appsecret)
+    params = {
+        "CANO": account_no.strip(),
+        "ACNT_PRDT_CD": account_code.strip(),
+        "AFHR_FLPR_YN": "N",
+        "INQR_DVSN": "01",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "00",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
+            params=params,
+            headers=_make_headers(token, appkey, appsecret, "TTTC8434R"),
+        )
+    data = resp.json()
+    if data.get("rt_cd") == "0":
+        return {
+            "success": True,
+            "holdings": data.get("output1", []),
+            "summary": data.get("output2", [{}])[0] if data.get("output2") else {},
+        }
+    return {"success": False, "error": data.get("msg1", "잔고 조회 실패")}
+
+
+async def buy_domestic_stock(
+    appkey: str, appsecret: str, account_no: str, account_code: str,
+    ticker: str, qty: int, price: float = 0,
+) -> dict:
+    """국내주식 매수 (TTTC0012U 실전 / VTTC0012U 모의)
+
+    price=0 시 시장가로 주문 (ORD_DVSN=01).
+    price>0 시 지정가로 주문 (ORD_DVSN=00).
+    """
+    token = await get_access_token(appkey, appsecret)
+    ord_dvsn = "01" if price <= 0 else "00"
+    ord_unpr = "0" if price <= 0 else str(int(price))
+
+    body = {
+        "CANO": account_no.strip(),
+        "ACNT_PRDT_CD": account_code.strip(),
+        "PDNO": ticker.strip(),
+        "ORD_DVSN": ord_dvsn,
+        "ORD_QTY": str(qty),
+        "ORD_UNPR": ord_unpr,
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
+            json=body,
+            headers=_make_headers(token, appkey, appsecret, "TTTC0012U"),
+        )
+    data = resp.json()
+    if data.get("rt_cd") == "0":
+        order_info = data.get("output", {})
+        logger.info(f"[KIS] 국내 매수: {ticker} {qty}주 @ {ord_unpr} (ODNO={order_info.get('ODNO')})")
+        return {"success": True, "order_no": order_info.get("ODNO"), "message": data.get("msg1")}
+    err = data.get("msg1", "매수 실패")
+    code = data.get("msg_cd", "")
+    return {"success": False, "error": f"[{code}] {err}" if code else err}
+
+
+async def sell_domestic_stock(
+    appkey: str, appsecret: str, account_no: str, account_code: str,
+    ticker: str, qty: int, price: float = 0,
+) -> dict:
+    """국내주식 매도 (TTTC0011U 실전 / VTTC0011U 모의)
+
+    price=0 시 시장가로 주문 (ORD_DVSN=01).
+    price>0 시 지정가로 주문 (ORD_DVSN=00).
+    """
+    token = await get_access_token(appkey, appsecret)
+    ord_dvsn = "01" if price <= 0 else "00"
+    ord_unpr = "0" if price <= 0 else str(int(price))
+
+    body = {
+        "CANO": account_no.strip(),
+        "ACNT_PRDT_CD": account_code.strip(),
+        "PDNO": ticker.strip(),
+        "ORD_DVSN": ord_dvsn,
+        "ORD_QTY": str(qty),
+        "ORD_UNPR": ord_unpr,
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
+            json=body,
+            headers=_make_headers(token, appkey, appsecret, "TTTC0011U"),
+        )
+    data = resp.json()
+    if data.get("rt_cd") == "0":
+        order_info = data.get("output", {})
+        logger.info(f"[KIS] 국내 매도: {ticker} {qty}주 @ {ord_unpr} (ODNO={order_info.get('ODNO')})")
+        return {"success": True, "order_no": order_info.get("ODNO"), "message": data.get("msg1")}
+    err = data.get("msg1", "매도 실패")
+    code = data.get("msg_cd", "")
+    return {"success": False, "error": f"[{code}] {err}" if code else err}

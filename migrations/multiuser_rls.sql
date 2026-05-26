@@ -47,15 +47,18 @@ DELETE FROM websocket_keys  WHERE user_id IS NULL;
 -- ─────────────────────────────────────────────
 
 -- realtime_trading: 본인 행만. anon(게스트)은 정책이 없어 전면 차단된다.
+-- ⚠️ realtime_trading.user_id는 text 컬럼이고 auth.uid()는 uuid를 반환하므로,
+--    auth.uid()를 text로 캐스팅해 비교한다 (캐스팅 없으면 uuid=text 연산자 부재 에러).
 DROP POLICY IF EXISTS "Allow all access" ON realtime_trading;
 ALTER TABLE realtime_trading ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "rt_own_rows" ON realtime_trading;
 CREATE POLICY "rt_own_rows" ON realtime_trading
   FOR ALL TO authenticated
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
+  USING (auth.uid()::text = user_id)
+  WITH CHECK (auth.uid()::text = user_id);
 
 -- realtime_orders: 본인 trade의 주문만 조회 (insert는 백엔드 service_role이 우회).
+-- t.user_id(text) = auth.uid()::text 로 비교 (위와 동일한 타입 사유).
 ALTER TABLE realtime_orders ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "ro_own_select" ON realtime_orders;
 CREATE POLICY "ro_own_select" ON realtime_orders
@@ -63,7 +66,7 @@ CREATE POLICY "ro_own_select" ON realtime_orders
   USING (EXISTS (
     SELECT 1 FROM realtime_trading t
     WHERE t.id = realtime_orders.trade_id
-      AND t.user_id = auth.uid()
+      AND t.user_id = auth.uid()::text
   ));
 
 -- kis_credentials / websocket_keys: 앱은 직접 접근하지 않는다(백엔드 전용).

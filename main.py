@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test, realtime, auth
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test, realtime, auth, account
 
 logging.basicConfig(
     level=logging.INFO,
@@ -206,6 +206,7 @@ app.include_router(sp500.router)
 app.include_router(portfolio.router)
 app.include_router(realtime.router)
 app.include_router(auth.router)
+app.include_router(account.router)
 app.include_router(test.router)
 
 

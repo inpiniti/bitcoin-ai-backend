@@ -740,44 +740,50 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
     ticker_norm = _norm_ticker(ticker)
 
     try:
-        # ── B. 미체결 가드 + 10분 초과 취소 ──
-        nccs = await kis_service.get_overseas_unfilled_orders(appkey, appsecret, cano, prdt, "NASD")
-        if not nccs.get('success'):
-            # 미체결 상태를 모르면 중복주문 위험 → 이번 틱은 보류 (쿨다운은 걸지 않음)
-            logger.warning(f"[Realtime] {ticker} 미체결내역 조회 실패: {nccs.get('error')} → 이번 틱 보류")
-            return
+        is_domestic = market in ('KRX', 'KOSDAQ')
 
-        unfilled = [o for o in nccs['orders'] if _norm_ticker(o.get('pdno')) == ticker_norm]
+        # ── B. 미체결 가드 + 10분 초과 취소 (해외전용 - 국내는 미체결 API 없음) ──
+        if not is_domestic:
+            nccs = await kis_service.get_overseas_unfilled_orders(appkey, appsecret, cano, prdt, "NASD")
+            if not nccs.get('success'):
+                # 미체결 상태를 모르면 중복주문 위험 → 이번 틱은 보류 (쿨다운은 걸지 않음)
+                logger.warning(f"[Realtime] {ticker} 미체결내역 조회 실패: {nccs.get('error')} → 이번 틱 보류")
+                return
 
-        if unfilled:
-            def _age(o):
-                dt = _parse_kis_order_dt(o.get('ord_dt', ''), o.get('ord_tmd', ''))
-                return (now - dt).total_seconds() if dt else 0.0
+            unfilled = [o for o in nccs['orders'] if _norm_ticker(o.get('pdno')) == ticker_norm]
 
-            oldest = max(unfilled, key=_age)  # age가 가장 큰 = 가장 오래된 주문
-            age = _age(oldest)
+            if unfilled:
+                def _age(o):
+                    dt = _parse_kis_order_dt(o.get('ord_dt', ''), o.get('ord_tmd', ''))
+                    return (now - dt).total_seconds() if dt else 0.0
 
-            if age >= _REALTIME_PENDING_CANCEL_SECONDS:
-                odno = oldest.get('odno')
-                excg = oldest.get('ovrs_excg_cd') or 'NASD'
-                remain = int(float(oldest.get('nccs_qty', 0) or 0))
-                cancel_res = await kis_service.cancel_overseas_order(
-                    appkey, appsecret, cano, prdt, ticker, odno, remain, excg,
-                )
-                if cancel_res.get('success'):
-                    logger.info(f"[Realtime] {ticker} 미체결 {age/60:.1f}분 경과 → 취소 (ODNO={odno}, {remain}주)")
-                    _record(action='cancel', side='none', quantity=remain, price=current_price,
-                            success=True, order_no=odno, error_message=f'미체결 {age/60:.0f}분 경과 취소')
+                oldest = max(unfilled, key=_age)  # age가 가장 큰 = 가장 오래된 주문
+                age = _age(oldest)
+
+                if age >= _REALTIME_PENDING_CANCEL_SECONDS:
+                    odno = oldest.get('odno')
+                    excg = oldest.get('ovrs_excg_cd') or 'NASD'
+                    remain = int(float(oldest.get('nccs_qty', 0) or 0))
+                    cancel_res = await kis_service.cancel_overseas_order(
+                        appkey, appsecret, cano, prdt, ticker, odno, remain, excg,
+                    )
+                    if cancel_res.get('success'):
+                        logger.info(f"[Realtime] {ticker} 미체결 {age/60:.1f}분 경과 → 취소 (ODNO={odno}, {remain}주)")
+                        _record(action='cancel', side='none', quantity=remain, price=current_price,
+                                success=True, order_no=odno, error_message=f'미체결 {age/60:.0f}분 경과 취소')
+                    else:
+                        logger.warning(f"[Realtime] {ticker} 미체결 취소 실패: {cancel_res.get('error')}")
+                        _record(action='cancel', side='none', quantity=remain, price=current_price,
+                                order_no=odno, error_message=f"취소 실패: {cancel_res.get('error')}")
                 else:
-                    logger.warning(f"[Realtime] {ticker} 미체결 취소 실패: {cancel_res.get('error')}")
-                    _record(action='cancel', side='none', quantity=remain, price=current_price,
-                            order_no=odno, error_message=f"취소 실패: {cancel_res.get('error')}")
-            else:
-                logger.debug(f"[Realtime] {ticker} 미체결 대기중({age/60:.1f}분) → 추가주문 보류")
-            return  # 미체결이 있으면 어느 경우든 신규주문 안 함
+                    logger.debug(f"[Realtime] {ticker} 미체결 대기중({age/60:.1f}분) → 추가주문 보류")
+                return  # 미체결이 있으면 어느 경우든 신규주문 안 함
 
         # ── C. 미체결 없음 → 잔고로 체결 확정/동기화 ──
-        bal = await kis_service.get_overseas_balance(appkey, appsecret, cano, prdt)
+        if is_domestic:
+            bal = await kis_service.get_domestic_balance(appkey, appsecret, cano, prdt)
+        else:
+            bal = await kis_service.get_overseas_balance(appkey, appsecret, cano, prdt)
         if not bal.get('success'):
             logger.warning(f"[Realtime] {ticker} 잔고 조회 실패: {bal.get('error')} → 이번 틱 보류")
             return
@@ -833,9 +839,15 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
             return
 
         if side == 'buy':
-            result = await kis_service.buy_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
+            if is_domestic:
+                result = await kis_service.buy_domestic_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price)
+            else:
+                result = await kis_service.buy_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
         else:
-            result = await kis_service.sell_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
+            if is_domestic:
+                result = await kis_service.sell_domestic_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price)
+            else:
+                result = await kis_service.sell_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
 
         if result.get('success'):
             _realtime_failure_cooldown.pop(trade_id, None)
