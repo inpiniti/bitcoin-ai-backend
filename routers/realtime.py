@@ -182,6 +182,7 @@ async def _detection_loop(user_id: str, approval_key: str):
                     "ticker": ticker,
                     "price": current_price,
                     "rate": rate,
+                    "base_price": float(trade["base_price"]),
                     "mtyp": mtyp,
                     "khms": khms,
                 })

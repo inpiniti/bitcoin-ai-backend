@@ -399,13 +399,8 @@ async def handle_price_detection(
                 'quantity': actual_sell_qty,
                 'action': 'sell_and_update',
             })
-        else:
-            await on_order_execute({
-                **common,
-                'side': 'none',
-                'quantity': 0,
-                'action': 'update_base_price',
-              })
+        # 매도할 보유량이 없으면 아무 것도 하지 않는다 (하락 시 기준가 슬라이딩 금지).
+        # 기준가 슬라이딩은 오직 '신고점 + 보유 0'(section 2)에서만 일어난다.
 
     # 4. gap% 이상 내렸을 때 → 등비수열 수량만큼 매수
     elif price_rate <= -gap:
@@ -418,10 +413,4 @@ async def handle_price_detection(
                 'quantity': buy_qty,
                 'action': 'buy_and_update',
             })
-        else:
-            await on_order_execute({
-                **common,
-                'side': 'none',
-                'quantity': 0,
-                'action': 'update_base_price',
-            })
+        # gap_qty=0 등으로 매수 수량이 없어도 기준가를 끌어내리지 않는다 (하락 슬라이딩 금지).
