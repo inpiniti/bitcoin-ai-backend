@@ -842,11 +842,13 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
 
         if side == 'buy':
             if is_domestic:
+                logger.info(f"[Realtime] 국내 매수 시도: {ticker} {order_qty}주 @ {price}, CANO={cano} PRDT={prdt}")
                 result = await kis_service.buy_domestic_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price)
             else:
                 result = await kis_service.buy_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
         else:
             if is_domestic:
+                logger.info(f"[Realtime] 국내 매도 시도: {ticker} {order_qty}주 @ {price}, CANO={cano} PRDT={prdt}")
                 result = await kis_service.sell_domestic_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price)
             else:
                 result = await kis_service.sell_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
