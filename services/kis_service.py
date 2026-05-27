@@ -311,13 +311,16 @@ async def buy_domestic_stock(
         "ORD_QTY": str(qty),
         "ORD_UNPR": ord_unpr,
     }
+    headers = _make_headers(token, appkey, appsecret, "TTTC0012U")
+    logger.info(f"[KIS] 국내 매수 요청 - 헤더: {headers}, 바디: {body}")
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
             json=body,
-            headers=_make_headers(token, appkey, appsecret, "TTTC0012U"),
+            headers=headers,
         )
     data = resp.json()
+    logger.info(f"[KIS] 국내 매수 응답: {data}")
     if data.get("rt_cd") == "0":
         order_info = data.get("output", {})
         logger.info(f"[KIS] 국내 매수: {ticker} {qty}주 @ {ord_unpr} (ODNO={order_info.get('ODNO')})")
@@ -348,13 +351,16 @@ async def sell_domestic_stock(
         "ORD_QTY": str(qty),
         "ORD_UNPR": ord_unpr,
     }
+    headers = _make_headers(token, appkey, appsecret, "TTTC0011U")
+    logger.info(f"[KIS] 국내 매도 요청 - 헤더: {headers}, 바디: {body}")
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
             json=body,
-            headers=_make_headers(token, appkey, appsecret, "TTTC0011U"),
+            headers=headers,
         )
     data = resp.json()
+    logger.info(f"[KIS] 국내 매도 응답: {data}")
     if data.get("rt_cd") == "0":
         order_info = data.get("output", {})
         logger.info(f"[KIS] 국내 매도: {ticker} {qty}주 @ {ord_unpr} (ODNO={order_info.get('ODNO')})")
