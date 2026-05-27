@@ -161,12 +161,24 @@ async def _detection_loop(user_id: str, approval_key: str):
         async def on_price_update(data):
             try:
                 symb = (data.get("SYMB") or "").upper()
-                rate = float(data.get("RATE") or 0)
-                mtyp = data.get("MTYP") or "1"
-                current_price = float(data.get("LAST") or 0)
-                ask_price = float(data.get("PASK") or 0)
-                bid_price = float(data.get("PBID") or 0)
-                khms = data.get("KHMS") or ""
+                market_type = data.get("MARKET_TYPE", "overseas")
+
+                if market_type == "domestic":
+                    # 국내주식 (H0STCNT0): STCK_PRPR, PRDY_CTRT
+                    current_price = float(data.get("STCK_PRPR") or 0)
+                    rate = float(data.get("PRDY_CTRT") or 0)
+                    mtyp = "1"
+                    khms = data.get("STCK_CNTG_HOUR") or ""
+                    ask_price = float(data.get("ASKP1") or 0)
+                    bid_price = float(data.get("BIDP1") or 0)
+                else:
+                    # 해외주식 (HDFSCNT0): LAST, RATE
+                    current_price = float(data.get("LAST") or 0)
+                    rate = float(data.get("RATE") or 0)
+                    mtyp = data.get("MTYP") or "1"
+                    khms = data.get("KHMS") or ""
+                    ask_price = float(data.get("PASK") or 0)
+                    bid_price = float(data.get("PBID") or 0)
 
                 norm_symb = _norm(symb)
                 trade = active_trades_dict.get(norm_symb)
