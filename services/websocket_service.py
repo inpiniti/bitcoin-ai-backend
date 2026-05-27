@@ -228,6 +228,8 @@ class KISWebSocketManager:
                         'PRDY_VRSS_SIGN': fields[3],    # 대비구분
                         'PRDY_VRSS': fields[4],         # 전일대비
                         'PRDY_CTRT': fields[5],         # 전일대비율
+                        'ASKP1': fields[10] if len(fields) > 10 else '0',     # 매도호가1
+                        'BIDP1': fields[11] if len(fields) > 11 else '0',     # 매수호가1
                         'ACML_VOL': fields[13] if len(fields) > 13 else '0',  # 누적거래량
                         'MARKET_TYPE': 'domestic',
                     }

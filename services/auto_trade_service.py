@@ -791,7 +791,9 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         real_qty = 0
         for h in bal.get('holdings', []):
             if _norm_ticker(h.get('pdno')) == ticker_norm:
-                real_qty = int(float(h.get('ccld_qty_smtl1', 0) or 0))
+                # 국내 잔고(inquire-balance): hldg_qty, 해외 잔고(inquire-present-balance): ccld_qty_smtl1
+                qty_field = 'hldg_qty' if is_domestic else 'ccld_qty_smtl1'
+                real_qty = int(float(h.get(qty_field, 0) or 0))
                 break
 
         if real_qty != current_quantity:
