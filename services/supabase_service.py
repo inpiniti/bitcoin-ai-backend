@@ -606,3 +606,22 @@ async def get_portfolio_by_stock(
     except Exception as e:
         logger.error(f"종목 포트폴리오 조회 실패: {e}")
         return []
+
+
+async def save_kis_debug_log(krw_data: dict, usd_data: dict, notes: str | None = None) -> None:
+    """kis_debug_logs 테이블에 디버그/에러 로그 저장"""
+    _check_config()
+    url = f"{SUPABASE_URL}/rest/v1/kis_debug_logs"
+    payload = {
+        "krw_data": krw_data,
+        "usd_data": usd_data,
+        "notes": notes
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=payload, headers=_headers())
+        if resp.status_code >= 400:
+            logger.warning(f"kis_debug_logs 저장 실패 ({resp.status_code}): {resp.text}")
+    except Exception as e:
+        logger.error(f"kis_debug_logs 저장 실패 익셉션: {e}")
+

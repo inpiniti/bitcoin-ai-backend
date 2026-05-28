@@ -157,18 +157,51 @@ async def _order_overseas_stock(
         "ORD_SVR_DVSN_CD": "0",
         "ORD_DVSN": "00",
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order",
-            json=body,
-            headers=_make_headers(token, appkey, appsecret, tr_id),
+    headers = _make_headers(token, appkey, appsecret, tr_id)
+    url = f"{KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                url,
+                json=body,
+                headers=headers,
+            )
+        data = resp.json()
+    except Exception as e:
+        from services import supabase_service
+        masked_headers = {k: ("***" if k.lower() in ["appsecret", "authorization"] else v) for k, v in headers.items()}
+        err_msg = f"해외 주문 HTTP 통신 예외 발생: {str(e)}"
+        await supabase_service.save_kis_debug_log(
+            krw_data={},
+            usd_data={
+                "url": url,
+                "headers": masked_headers,
+                "body": body,
+                "error": err_msg
+            },
+            notes=err_msg
         )
-    data = resp.json()
+        return {"success": False, "error": err_msg}
+
     if data.get("rt_cd") == "0":
         return {"success": True, "order_no": data.get("output", {}).get("ODNO"), "message": data.get("msg1")}
     err = data.get("msg1", "주문 실패")
     code = data.get("msg_cd", "")
-    return {"success": False, "error": f"[{code}] {err}" if code else err}
+    err_full = f"[{code}] {err}" if code else err
+
+    from services import supabase_service
+    masked_headers = {k: ("***" if k.lower() in ["appsecret", "authorization"] else v) for k, v in headers.items()}
+    await supabase_service.save_kis_debug_log(
+        krw_data={},
+        usd_data={
+            "url": url,
+            "headers": masked_headers,
+            "body": body,
+            "response": data
+        },
+        notes=f"해외 {order_type.upper()} 주문 KIS 에러: {err_full}"
+    )
+    return {"success": False, "error": err_full}
 
 
 async def buy_overseas_stock(
@@ -312,14 +345,32 @@ async def buy_domestic_stock(
         "ORD_UNPR": ord_unpr,
     }
     headers = _make_headers(token, appkey, appsecret, "TTTC0012U")
+    url = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"
     logger.info(f"[KIS] 국내 매수 요청 - 헤더: {headers}, 바디: {body}")
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
-            json=body,
-            headers=headers,
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                url,
+                json=body,
+                headers=headers,
+            )
+        data = resp.json()
+    except Exception as e:
+        from services import supabase_service
+        masked_headers = {k: ("***" if k.lower() in ["appsecret", "authorization"] else v) for k, v in headers.items()}
+        err_msg = f"국내 매수 HTTP 통신 예외 발생: {str(e)}"
+        await supabase_service.save_kis_debug_log(
+            krw_data={
+                "url": url,
+                "headers": masked_headers,
+                "body": body,
+                "error": err_msg
+            },
+            usd_data={},
+            notes=err_msg
         )
-    data = resp.json()
+        return {"success": False, "error": err_msg}
+
     logger.info(f"[KIS] 국내 매수 응답: {data}")
     if data.get("rt_cd") == "0":
         order_info = data.get("output", {})
@@ -327,7 +378,21 @@ async def buy_domestic_stock(
         return {"success": True, "order_no": order_info.get("ODNO"), "message": data.get("msg1")}
     err = data.get("msg1", "매수 실패")
     code = data.get("msg_cd", "")
-    return {"success": False, "error": f"[{code}] {err}" if code else err}
+    err_full = f"[{code}] {err}" if code else err
+
+    from services import supabase_service
+    masked_headers = {k: ("***" if k.lower() in ["appsecret", "authorization"] else v) for k, v in headers.items()}
+    await supabase_service.save_kis_debug_log(
+        krw_data={
+            "url": url,
+            "headers": masked_headers,
+            "body": body,
+            "response": data
+        },
+        usd_data={},
+        notes=f"국내 매수 KIS 에러: {err_full}"
+    )
+    return {"success": False, "error": err_full}
 
 
 async def sell_domestic_stock(
@@ -352,14 +417,32 @@ async def sell_domestic_stock(
         "ORD_UNPR": ord_unpr,
     }
     headers = _make_headers(token, appkey, appsecret, "TTTC0011U")
+    url = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"
     logger.info(f"[KIS] 국내 매도 요청 - 헤더: {headers}, 바디: {body}")
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
-            json=body,
-            headers=headers,
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                url,
+                json=body,
+                headers=headers,
+            )
+        data = resp.json()
+    except Exception as e:
+        from services import supabase_service
+        masked_headers = {k: ("***" if k.lower() in ["appsecret", "authorization"] else v) for k, v in headers.items()}
+        err_msg = f"국내 매도 HTTP 통신 예외 발생: {str(e)}"
+        await supabase_service.save_kis_debug_log(
+            krw_data={
+                "url": url,
+                "headers": masked_headers,
+                "body": body,
+                "error": err_msg
+            },
+            usd_data={},
+            notes=err_msg
         )
-    data = resp.json()
+        return {"success": False, "error": err_msg}
+
     logger.info(f"[KIS] 국내 매도 응답: {data}")
     if data.get("rt_cd") == "0":
         order_info = data.get("output", {})
@@ -367,4 +450,18 @@ async def sell_domestic_stock(
         return {"success": True, "order_no": order_info.get("ODNO"), "message": data.get("msg1")}
     err = data.get("msg1", "매도 실패")
     code = data.get("msg_cd", "")
-    return {"success": False, "error": f"[{code}] {err}" if code else err}
+    err_full = f"[{code}] {err}" if code else err
+
+    from services import supabase_service
+    masked_headers = {k: ("***" if k.lower() in ["appsecret", "authorization"] else v) for k, v in headers.items()}
+    await supabase_service.save_kis_debug_log(
+        krw_data={
+            "url": url,
+            "headers": masked_headers,
+            "body": body,
+            "response": data
+        },
+        usd_data={},
+        notes=f"국내 매도 KIS 에러: {err_full}"
+    )
+    return {"success": False, "error": err_full}
