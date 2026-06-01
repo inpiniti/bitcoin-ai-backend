@@ -351,8 +351,9 @@ async def handle_price_detection(
     quantity: 현재 보유 수량 (매매 후 자동 갱신됨)
     ask_price/bid_price: 실시간 매도호가/매수호가 (즉시체결 유도용, 없으면 현재가 폴백)
 
-    - 가격이 gap% 이상 오르면 gap_qty만큼 매도 (단, 보유수량 부족 시 보유수량만큼만)
-    - 가격이 gap% 이상 내리면 gap_qty만큼 매수
+    - 매수: 가격이 gap% 이상 내리면 gap_qty만큼 매수
+    - 매도: 가격이 gap * 1.054% 이상 오르면 gap_qty만큼 매도 (거래세+수수료 약 0.54% 보정)
+      예) gap=1% → 1.054% 이상 상승 시 매도 / gap=2% → 2.108% 이상 상승 시 매도
     """
 
     # 1. 장전/장중이 아니면 매매 스킵 (수신/표시는 호출자에서 이미 처리됨)
@@ -388,8 +389,11 @@ async def handle_price_detection(
         })
         return
 
-    # 3. gap% 이상 올랐을 때 → 등비수열 수량만큼 매도 (보유 부족 시 보유량만큼만)
-    if price_rate >= gap:
+    # 3. gap * 1.054% 이상 올랐을 때 → 등비수열 수량만큼 매도 (보유 부족 시 보유량만큼만)
+    # 매도 시 거래세+수수료(약 0.54%)를 감안해 gap에 1.054를 곱한 임계값을 사용
+    # 예) gap=1% → 1.054% 이상 상승해야 매도 / gap=2% → 2.108% 이상 상승해야 매도
+    sell_gap = gap * 1.054
+    if price_rate >= sell_gap:
         # 등비수열 매도 수량 계산 (요구사항 3): base_qty * (1.1 ** (grid_step - 1))
         step = max(1, grid_step)
         target_sell_qty = max(1, round(gap_qty * (1.1 ** (step - 1))))
@@ -400,6 +404,7 @@ async def handle_price_detection(
                 'side': 'sell',
                 'quantity': actual_sell_qty,
                 'action': 'sell_and_update',
+                'sell_gap': sell_gap,
             })
         # 매도할 보유량이 없으면 아무 것도 하지 않는다 (하락 시 기준가 슬라이딩 금지).
         # 기준가 슬라이딩은 오직 '신고점 + 보유 0'(section 2)에서만 일어난다.
