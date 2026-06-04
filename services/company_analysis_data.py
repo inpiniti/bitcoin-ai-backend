@@ -3,36 +3,39 @@ Yahoo Finance data fetching functions for Company Analysis
 """
 import logging
 import httpx
+import asyncio
+import random
 
 logger = logging.getLogger("company_analysis_data")
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-}
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+]
 
 async def get_yahoo_cookie_and_crumb() -> tuple[dict, str]:
     """
-    Yahoo Finance의 Cookie와 Crumb를 동적으로 획득합니다.
+    Yahoo Finance의 Cookie와 Crumb를 동적으로 획득합니다 (재시도 로직 포함).
     """
     cookie_url = "https://fc.yahoo.com"
     crumb_url = "https://query2.finance.yahoo.com/v1/test/getcrumb"
     
-    try:
-        async with httpx.AsyncClient(timeout=15, headers=HEADERS, verify=False) as client:
-            # 1. fc.yahoo.com에서 쿠키(A3 등) 획득
-            await client.get(cookie_url)
-            # 2. getcrumb에서 crumb 획득
-            crumb_resp = await client.get(crumb_url)
-            if crumb_resp.status_code == 200:
-                crumb = crumb_resp.text.strip()
-                # httpx의 Cookies 객체를 딕셔너리로 변환하여 반환
-                return dict(client.cookies), crumb
-    except Exception as e:
-        logger.error(f"[Yahoo] Cookie 및 Crumb 획득 실패: {e}")
+    for attempt in range(3):
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        try:
+            async with httpx.AsyncClient(timeout=15, headers=headers, verify=False) as client:
+                await client.get(cookie_url)
+                crumb_resp = await client.get(crumb_url)
+                if crumb_resp.status_code == 200:
+                    crumb = crumb_resp.text.strip()
+                    if crumb:
+                        return dict(client.cookies), crumb
+        except Exception as e:
+            logger.error(f"[Yahoo] Cookie 및 Crumb 획득 실패 (시도 {attempt+1}): {e}")
+            
+        await asyncio.sleep(1)
     
     return {}, ""
 
@@ -47,23 +50,30 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
         
     url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings&crumb={crumb}"
     
-    try:
-        async with httpx.AsyncClient(timeout=15, headers=HEADERS, cookies=cookies, verify=False) as client:
-            resp = await client.get(url)
+    for attempt in range(3):
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        try:
+            async with httpx.AsyncClient(timeout=15, headers=headers, cookies=cookies, verify=False) as client:
+                resp = await client.get(url)
+                
+            if resp.status_code != 200:
+                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
+                await asyncio.sleep(1)
+                continue
+                
+            data = resp.json()
+            result = data.get("quoteSummary", {}).get("result")
+            if not result:
+                logger.warning(f"[Yahoo] {symbol} quoteSummary result empty (시도 {attempt+1})")
+                await asyncio.sleep(1)
+                continue
+                
+            return result[0]
+        except Exception as e:
+            logger.error(f"[Yahoo] {symbol} quoteSummary 조회 중 에러 (시도 {attempt+1}): {e}")
+            await asyncio.sleep(1)
             
-        if resp.status_code != 200:
-            logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code}")
-            return {}
-            
-        data = resp.json()
-        result = data.get("quoteSummary", {}).get("result")
-        if not result:
-            return {}
-            
-        return result[0]
-    except Exception as e:
-        logger.error(f"[Yahoo] {symbol} quoteSummary 조회 중 에러: {e}")
-        return {}
+    return {}
 
 async def fetch_company_news(symbol: str) -> list[dict]:
     """
@@ -76,7 +86,8 @@ async def fetch_company_news(symbol: str) -> list[dict]:
     news_items = []
     
     try:
-        async with httpx.AsyncClient(timeout=15, headers=HEADERS, verify=False) as client:
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        async with httpx.AsyncClient(timeout=15, headers=headers, verify=False) as client:
             resp = await client.get(url)
             
         if resp.status_code != 200:
