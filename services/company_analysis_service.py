@@ -56,8 +56,13 @@ def build_market_research_prompt(symbol: str, profile: dict, news: list[dict]) -
         for n in news
     ])
     
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+    
     return f"""You are a senior investment analyst and market researcher specializing in technology and growth stocks.
 Analyze the following company data and news to provide a professional-grade market research report.
+
+[ANALYSIS DATE / REPORT DATE]
+{today_str}
 
 [COMPANY PROFILE: {symbol}]
 {company_info}
@@ -69,6 +74,7 @@ Analyze the following company data and news to provide a professional-grade mark
 {news_context}
 
 Please generate an in-depth analysis report structured as follows (Write the report in Korean):
+*CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
 1. **Executive Summary**: Core thesis on why this stock is a buy, hold, or sell.
 2. **Business Strategy & Market Positioning**: Critique their product strategy, industry moat, and competitors.
 3. **Financial Health & Efficiency Analysis**: Evaluate revenue growth, margins, cash flow strength, and debt levels.
@@ -105,8 +111,13 @@ def build_earnings_review_prompt(symbol: str, profile: dict, news: list[dict]) -
             for n in news[:10]
         ])
 
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+
     return f"""You are an expert financial auditor and earnings analyst.
 Review the following financial performance metrics and news regarding {symbol}'s recent earnings release.
+
+[ANALYSIS DATE / REPORT DATE]
+{today_str}
 
 [FINANCIAL PERFORMANCE: {symbol}]
 {financials}
@@ -115,6 +126,7 @@ Review the following financial performance metrics and news regarding {symbol}'s
 {news_context}
 
 Please generate an Earnings Review Report in Korean. Structure the report as follows:
+*CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
 1. **Earnings Summary**: Highlight actual numbers vs. street consensus if available, plus revenue and EPS growth rates.
 2. **Margin & Profitability Analysis**: Dive into gross margins, operating margin expansions/contractions, and cash generation.
 3. **Management Guidance & Outlook**: What is the management outlook/future forecasts discussed in the news/filings?
@@ -151,8 +163,13 @@ def build_valuation_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
         for n in news[:10]
     ])
 
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+
     return f"""You are a Valuation Expert and Equity Research Analyst.
 Assess the intrinsic and relative value of {symbol} using the financial indicators and recent market news below.
+
+[ANALYSIS DATE / REPORT DATE]
+{today_str}
 
 [FINANCIAL METRICS: {symbol}]
 {financials}
@@ -161,6 +178,7 @@ Assess the intrinsic and relative value of {symbol} using the financial indicato
 {news_context}
 
 Please generate a professional Valuation & Comps Analysis Report in Korean. Structure the report as follows:
+*CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
 1. **Executive Summary**: Overview of the company's valuation state (Undervalued, Fairly valued, Overvalued).
 2. **Intrinsic Valuation (DCF-based Analysis)**: Critique their Free Cash Flow (FCF) generation strength, project growth rates, and estimate cash flow stability.
 3. **Relative Valuation (Comps Multiples)**: Compare current P/E, EV/EBITDA, and PEG ratios with industry averages and key competitors (recommend peer multi-comparison).
@@ -197,8 +215,13 @@ def build_preview_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
             for n in news[:10]
         ])
 
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+
     return f"""You are an Equity Research Analyst preparing an Earnings Preview.
 Analyze upcoming expectations and sentiment for {symbol}'s near-term earnings release.
+
+[ANALYSIS DATE / REPORT DATE]
+{today_str}
 
 [CURRENT RECENT METRICS: {symbol}]
 {financials}
@@ -207,6 +230,7 @@ Analyze upcoming expectations and sentiment for {symbol}'s near-term earnings re
 {news_context}
 
 Please generate an Earnings Preview Report in Korean. Structure the report as follows:
+*CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
 1. **Earnings Expectations**: Summarize the street consensus for revenue and EPS.
 2. **Key Metrics to Watch**: Identify 2-3 segment revenues or operational metrics (e.g., Cloud growth, hardware delivery volume) that will decide the stock's post-earnings direction.
 3. **Sentiment & Position Check**: Detail whether the market sentiment going into earnings is hot, cold, or neutral, and evaluate options/price movement implications.
@@ -247,8 +271,13 @@ def build_moat_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
             for n in news[:10]
         ])
 
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+
     return f"""You are a Strategic Management Consultant and Private Equity Dilegence Analyst.
 Evaluate {symbol}'s economic moat and AI technology readiness based on the business description, margins, and news below.
+
+[ANALYSIS DATE / REPORT DATE]
+{today_str}
 
 [BUSINESS PROFILE: {symbol}]
 {company_info}
@@ -260,6 +289,7 @@ Evaluate {symbol}'s economic moat and AI technology readiness based on the busin
 {news_context}
 
 Please generate an Economic Moat & AI Readiness Report in Korean. Structure the report as follows:
+*CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
 1. **Moat Assessment**: Define the type of moat they possess (Network Effects, Switching Costs, Cost Advantage, or Intangible Assets) and rate it (Wide, Narrow, None).
 2. **Competitor & Market Position Analysis**: Assess their market share and threat from key rivals.
 3. **AI Readiness & Tech Stack Integration**: Analyze their AI initiatives, software capabilities, and whether they are an AI leader, fast follower, or laggard.
@@ -294,8 +324,13 @@ def build_risk_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
             for n in news[:10]
         ])
 
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+
     return f"""You are a Financial Risk Manager and Auditor.
 Analyze potential risk factors and red flags for {symbol} based on their leverage metrics and recent negative news flow.
+
+[ANALYSIS DATE / REPORT DATE]
+{today_str}
 
 [LEVERAGE & LIQUIDITY METRICS: {symbol}]
 {financials}
@@ -304,6 +339,7 @@ Analyze potential risk factors and red flags for {symbol} based on their leverag
 {news_context}
 
 Please generate a Risk & Warning Signals Report in Korean. Structure the report as follows:
+*CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
 1. **Key Risk Matrix**: Classify risks into Financial, Operational, Regulatory, and Macroeconomic categories.
 2. **Financial Risk & Liquidity Audit**: Evaluate their debt levels, interest coverage, current ratio, and overall liquidity posture.
 3. **Operational & Regulatory Red Flags**: Call out supply chain disruptions, litigation issues, government probes, or management churn from recent news.
