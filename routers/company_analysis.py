@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/analysis", tags=["company-analysis"])
 
 class CompanyAnalysisRequest(BaseModel):
     ticker: str
-    analysis_type: str = "market"  # market (기업분석) or earnings (실적리뷰)
+    analysis_type: str = "market"  # market(기업분석), earnings(실적리뷰), valuation(가치평가), preview(실적프리뷰), moat(해자분석), risk(리스크감지)
 
 class CompanyAnalysisResponse(BaseModel):
     status: str
@@ -23,9 +23,15 @@ class CompanyAnalysisResponse(BaseModel):
 @router.post("/company", response_model=CompanyAnalysisResponse)
 async def analyze_company(req: CompanyAnalysisRequest):
     """
-    특정 종목(Ticker)에 대한 AI 기업분석 또는 실적 리뷰 리포트를 생성합니다.
+    특정 종목(Ticker)에 대한 AI 기업분석 리포트를 생성합니다.
     - **ticker**: 예) TSLA, AAPL, NVDA
-    - **analysis_type**: market (기본 기업분석) / earnings (실적리뷰)
+    - **analysis_type**: 
+      - `market`: 기본 기업분석
+      - `earnings`: 실적 리뷰
+      - `valuation`: 적정 가치 평가
+      - `preview`: 실적 프리뷰
+      - `moat`: 해자 분석 및 AI 준비도
+      - `risk`: 리스크 및 경고 신호 감지
     """
     result = await run_company_analysis(req.ticker, req.analysis_type)
     if result.get("status") == "error":
