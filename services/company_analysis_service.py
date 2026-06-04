@@ -39,6 +39,8 @@ def build_market_research_prompt(symbol: str, profile: dict, news: list[dict]) -
     """
     
     financials = f"""
+- Current Price: {fin_data.get('currentPrice', {}).get('fmt', 'N/A')}
+- 52-Week Range: {detail.get('fiftyTwoWeekLow', {}).get('fmt', 'N/A')} - {detail.get('fiftyTwoWeekHigh', {}).get('fmt', 'N/A')}
 - Market Cap: {detail.get('marketCap', {}).get('fmt', 'N/A')}
 - Total Revenue: {fin_data.get('totalRevenue', {}).get('fmt', 'N/A')}
 - Free Cash Flow: {fin_data.get('freeCashflow', {}).get('fmt', 'N/A')}
@@ -71,7 +73,7 @@ Please generate an in-depth analysis report structured as follows (Write the rep
 2. **Business Strategy & Market Positioning**: Critique their product strategy, industry moat, and competitors.
 3. **Financial Health & Efficiency Analysis**: Evaluate revenue growth, margins, cash flow strength, and debt levels.
 4. **Recent News Sentiment & Catalysts**: Discuss major news, public sentiment, and short-term catalysts.
-5. **Investment Recommendation**: Clear rating (Buy / Hold / Sell) with specific target/range advice.
+5. **Investment Recommendation**: Clear rating (Buy / Hold / Sell) with specific target/range advice. Ensure this recommendation is mathematically consistent with the provided 'Current Price' and any estimated target price ranges.
 
 Make it clean, structured, insightful, and professional. Use markdown formatting.
 """
@@ -85,6 +87,7 @@ def build_earnings_review_prompt(symbol: str, profile: dict, news: list[dict]) -
     stats = profile.get("defaultKeyStatistics", {})
     
     financials = f"""
+- Current Price: {fin_data.get('currentPrice', {}).get('fmt', 'N/A')}
 - Revenue Growth (YoY): {fin_data.get('revenueGrowth', {}).get('fmt', 'N/A')}
 - Gross Profits: {fin_data.get('grossProfits', {}).get('fmt', 'N/A')}
 - EBITDA: {fin_data.get('ebitda', {}).get('fmt', 'N/A')}
@@ -116,7 +119,7 @@ Please generate an Earnings Review Report in Korean. Structure the report as fol
 2. **Margin & Profitability Analysis**: Dive into gross margins, operating margin expansions/contractions, and cash generation.
 3. **Management Guidance & Outlook**: What is the management outlook/future forecasts discussed in the news/filings?
 4. **Key Risks & Red Flags**: List any negative factors, margin pressures, or macro risks.
-5. **Earnings Score**: Assign a final rating (A+, A, B, C, D) with a 2-sentence rationale.
+5. **Earnings Score**: Assign a final rating (A+, A, B, C, D) with a 2-sentence rationale. Compare the performance context against the provided 'Current Price' to reflect whether the current price matches the earnings trajectory.
 
 Make the output extremely analytical, data-driven, and written in clean Korean markdown.
 """
@@ -130,6 +133,8 @@ def build_valuation_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
     detail = profile.get("summaryDetail", {})
     
     financials = f"""
+- Current Price: {fin_data.get('currentPrice', {}).get('fmt', 'N/A')}
+- 52-Week Range: {detail.get('fiftyTwoWeekLow', {}).get('fmt', 'N/A')} - {detail.get('fiftyTwoWeekHigh', {}).get('fmt', 'N/A')}
 - Market Cap: {detail.get('marketCap', {}).get('fmt', 'N/A')}
 - Revenue: {fin_data.get('totalRevenue', {}).get('fmt', 'N/A')}
 - Free Cash Flow: {fin_data.get('freeCashflow', {}).get('fmt', 'N/A')}
@@ -161,6 +166,7 @@ Please generate a professional Valuation & Comps Analysis Report in Korean. Stru
 3. **Relative Valuation (Comps Multiples)**: Compare current P/E, EV/EBITDA, and PEG ratios with industry averages and key competitors (recommend peer multi-comparison).
 4. **Valuation Sensitivity & Catalysts**: Detail key risks to the valuation (e.g., interest rates, growth slowdowns) and catalysts that could unlock value.
 5. **Target Price Range & Investment Verdict**: Provide a realistic target price range (e.g., $X ~ $Y) and a clear Buy/Hold/Sell recommendation with mathematical justification.
+   *CRITICAL REQUIREMENT*: You must explicitly compare your Target Price Range with the provided 'Current Price'. If the Target Price Range is lower than the Current Price, it is a Downside (not Upside) and the rating must NOT be BUY (it should be HOLD or SELL). If the Target Price Range is higher than the Current Price, it is an Upside, and you can recommend BUY. The calculated Upside/Downside percentage and the rating MUST be mathematically consistent.
 
 Make it clean, quantitative, and written in professional Korean markdown.
 """
@@ -174,6 +180,7 @@ def build_preview_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
     detail = profile.get("summaryDetail", {})
     
     financials = f"""
+- Current Price: {fin_data.get('currentPrice', {}).get('fmt', 'N/A')}
 - Revenue Growth (YoY): {fin_data.get('revenueGrowth', {}).get('fmt', 'N/A')}
 - Operating Margins: {fin_data.get('operatingMargins', {}).get('fmt', 'N/A')}
 - Profit Margins: {fin_data.get('profitMargins', {}).get('fmt', 'N/A')}
@@ -204,7 +211,7 @@ Please generate an Earnings Preview Report in Korean. Structure the report as fo
 2. **Key Metrics to Watch**: Identify 2-3 segment revenues or operational metrics (e.g., Cloud growth, hardware delivery volume) that will decide the stock's post-earnings direction.
 3. **Sentiment & Position Check**: Detail whether the market sentiment going into earnings is hot, cold, or neutral, and evaluate options/price movement implications.
 4. **Bull vs. Bear Scenarios**: Draft a clear table/bullet comparison of the Bull case (what happens if they beat & guide up) vs. Bear case (what happens if they miss or guide down).
-5. **Earnings Strategy & Rating**: Give an overall tactical recommendation (e.g., Neutral, Buy into Strength, Caution) for short-term traders.
+5. **Earnings Strategy & Rating**: Give an overall tactical recommendation (e.g., Neutral, Buy into Strength, Caution) for short-term traders. Make sure to relate this strategy directly to the current price level ('Current Price').
 
 Make the output forward-looking, catalyst-centric, and written in clean Korean markdown.
 """
@@ -224,6 +231,7 @@ def build_moat_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
     """
     
     financials = f"""
+- Current Price: {fin_data.get('currentPrice', {}).get('fmt', 'N/A')}
 - Operating Margins: {fin_data.get('operatingMargins', {}).get('fmt', 'N/A')}
 - Return on Equity (ROE): {fin_data.get('returnOnEquity', {}).get('fmt', 'N/A')}
 - Gross Margins: {fin_data.get('grossMargins', {}).get('fmt', 'N/A')}
@@ -255,7 +263,7 @@ Please generate an Economic Moat & AI Readiness Report in Korean. Structure the 
 1. **Moat Assessment**: Define the type of moat they possess (Network Effects, Switching Costs, Cost Advantage, or Intangible Assets) and rate it (Wide, Narrow, None).
 2. **Competitor & Market Position Analysis**: Assess their market share and threat from key rivals.
 3. **AI Readiness & Tech Stack Integration**: Analyze their AI initiatives, software capabilities, and whether they are an AI leader, fast follower, or laggard.
-4. **Margin & Capital Efficiency Audit**: Link their high/low margins and ROE back to their structural business advantages.
+4. **Margin & Capital Efficiency Audit**: Link their high/low margins and ROE back to their structural business advantages, evaluating how well the current stock price ('Current Price') values these attributes.
 5. **Strategic SWOT Summary**: Provide a strategic advice summary on their technological survival over the next 5-10 years.
 
 Write in a highly strategic, professional tone using clean Korean markdown.
@@ -269,6 +277,7 @@ def build_risk_prompt(symbol: str, profile: dict, news: list[dict]) -> str:
     stats = profile.get("defaultKeyStatistics", {})
     
     financials = f"""
+- Current Price: {fin_data.get('currentPrice', {}).get('fmt', 'N/A')}
 - Debt to Equity: {fin_data.get('debtToEquity', {}).get('fmt', 'N/A')}
 - Current Ratio: {fin_data.get('currentRatio', {}).get('fmt', 'N/A')}
 - Quick Ratio: {fin_data.get('quickRatio', {}).get('fmt', 'N/A')}
@@ -299,7 +308,7 @@ Please generate a Risk & Warning Signals Report in Korean. Structure the report 
 2. **Financial Risk & Liquidity Audit**: Evaluate their debt levels, interest coverage, current ratio, and overall liquidity posture.
 3. **Operational & Regulatory Red Flags**: Call out supply chain disruptions, litigation issues, government probes, or management churn from recent news.
 4. **Macroeconomic Sensitivity**: How sensitive is the business to interest rate changes, inflation, currency swings, and general economic slowdowns (Beta/Volatility analysis).
-5. **Warning Score & Mitigation Verdict**: Assign a Risk Warning level (High, Medium, Low) with actionable hedging or mitigation advice for investors.
+5. **Warning Score & Mitigation Verdict**: Assign a Risk Warning level (High, Medium, Low) with actionable hedging or mitigation advice for investors. Contextualize the threat severity in terms of the 'Current Price' level.
 
 Make it analytical, caution-oriented, objective, and written in clean Korean markdown.
 """
