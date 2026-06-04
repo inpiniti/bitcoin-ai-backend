@@ -19,7 +19,7 @@ if VERCEL_PROXY_URL:
 else:
     GEMINI_API_URL = (
         "https://generativelanguage.googleapis.com/v1beta/models"
-        "/gemini-2.5-flash-lite:generateContent?key={api_key}"
+        "/gemini-1.5-flash:generateContent?key={api_key}"
     )
 
 
