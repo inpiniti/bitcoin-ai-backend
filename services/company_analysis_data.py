@@ -15,6 +15,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 ]
 
+# Global cache for Yahoo cookie and crumb to prevent frequent fc.yahoo.com calls
+_cached_cookies = None
+_cached_crumb = None
+
 async def get_yahoo_cookie_and_crumb() -> tuple[dict, str]:
     """
     Yahoo Finance의 Cookie와 Crumb를 동적으로 획득합니다 (재시도 로직 포함).
@@ -25,7 +29,7 @@ async def get_yahoo_cookie_and_crumb() -> tuple[dict, str]:
     for attempt in range(3):
         headers = {"User-Agent": random.choice(USER_AGENTS)}
         try:
-            async with httpx.AsyncClient(timeout=15, headers=headers, verify=False) as client:
+            async with httpx.AsyncClient(timeout=15, headers=headers, verify=False, follow_redirects=True) as client:
                 await client.get(cookie_url)
                 crumb_resp = await client.get(crumb_url)
                 if crumb_resp.status_code == 200:
@@ -41,20 +45,30 @@ async def get_yahoo_cookie_and_crumb() -> tuple[dict, str]:
 
 async def fetch_company_profile_and_financials(symbol: str) -> dict:
     """
-    Yahoo Finance quoteSummary API를 활용하여 기업 프로필 및 재무 데이터를 가져옵니다.
+    Yahoo Finance quoteSummary API를 활용하여 기업 프로필 및 재무 데이터를 가져옵니다 (쿠키/크럼 캐싱 적용).
     """
-    cookies, crumb = await get_yahoo_cookie_and_crumb()
-    if not crumb:
-        logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패로 인해 조회 불가")
-        return {}
-        
-    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings&crumb={crumb}"
+    global _cached_cookies, _cached_crumb
     
-    for attempt in range(3):
+    for attempt in range(2):
+        if not _cached_crumb:
+            _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
+            
+        if not _cached_crumb:
+            logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패로 인해 조회 불가")
+            return {}
+            
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings&crumb={_cached_crumb}"
         headers = {"User-Agent": random.choice(USER_AGENTS)}
+        
         try:
-            async with httpx.AsyncClient(timeout=15, headers=headers, cookies=cookies, verify=False) as client:
+            async with httpx.AsyncClient(timeout=15, headers=headers, cookies=_cached_cookies, verify=False, follow_redirects=True) as client:
                 resp = await client.get(url)
+                
+            if resp.status_code == 401:
+                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 401 (크럼 만료). 캐시 초기화 후 재시도...")
+                _cached_cookies = None
+                _cached_crumb = None
+                continue
                 
             if resp.status_code != 200:
                 logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
