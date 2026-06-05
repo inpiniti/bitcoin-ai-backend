@@ -20,4 +20,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push --force https://inpiniti:$HF_TOKEN@huggingface.co/spaces/younginpiniti/bitcoin-ai-backend main
+          git push --force https://inpiniti:$HF_TOKEN@huggingface.co/spaces/younginpiniti/bitcoin-ai-backend HEAD:main
