@@ -356,26 +356,38 @@ async def run_company_analysis(symbol: str, analysis_type: str = "market") -> di
     symbol = symbol.upper().strip()
     logger.info(f"[CompanyAnalysis] Starting {analysis_type} analysis for {symbol}")
     
-    # 1. 데이터 수집
-    profile = await fetch_company_profile_and_financials(symbol)
+    # 1. 데이터 수집 (국내 주식 티커의 경우 .KS, .KQ 순차적 자동 변환 탐색 적용)
+    target_symbols = [symbol]
+    if symbol.isdigit() and len(symbol) == 6:
+        target_symbols = [f"{symbol}.KS", f"{symbol}.KQ"]
+        
+    profile = {}
+    resolved_symbol = symbol
+    for ts in target_symbols:
+        logger.info(f"[CompanyAnalysis] Fetching profile for {ts}...")
+        profile = await fetch_company_profile_and_financials(ts)
+        if profile:
+            resolved_symbol = ts
+            break
+            
     if not profile:
         return {"status": "error", "message": f"기업 기본 정보를 수집할 수 없습니다: {symbol}"}
         
-    news = await fetch_company_news(symbol)
+    news = await fetch_company_news(resolved_symbol)
     
     # 2. 프롬프트 작성
     if analysis_type == "earnings":
-        prompt = build_earnings_review_prompt(symbol, profile, news)
+        prompt = build_earnings_review_prompt(resolved_symbol, profile, news)
     elif analysis_type == "valuation":
-        prompt = build_valuation_prompt(symbol, profile, news)
+        prompt = build_valuation_prompt(resolved_symbol, profile, news)
     elif analysis_type == "preview":
-        prompt = build_preview_prompt(symbol, profile, news)
+        prompt = build_preview_prompt(resolved_symbol, profile, news)
     elif analysis_type == "moat":
-        prompt = build_moat_prompt(symbol, profile, news)
+        prompt = build_moat_prompt(resolved_symbol, profile, news)
     elif analysis_type == "risk":
-        prompt = build_risk_prompt(symbol, profile, news)
+        prompt = build_risk_prompt(resolved_symbol, profile, news)
     else:
-        prompt = build_market_research_prompt(symbol, profile, news)
+        prompt = build_market_research_prompt(resolved_symbol, profile, news)
         
     # 3. Gemini API 호출
     try:

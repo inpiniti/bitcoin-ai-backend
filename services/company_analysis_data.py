@@ -70,6 +70,10 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
                 _cached_crumb = None
                 continue
                 
+            if resp.status_code == 404:
+                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 404 (존재하지 않는 심볼)")
+                return {}
+                
             if resp.status_code != 200:
                 logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
                 await asyncio.sleep(1)
@@ -96,7 +100,12 @@ async def fetch_company_news(symbol: str) -> list[dict]:
     import xml.etree.ElementTree as ET
     from email.utils import parsedate_to_datetime
     
-    url = f"https://news.google.com/rss/search?q={symbol}+stock&hl=en-US&gl=US&ceid=US:en"
+    # 국내 주식의 경우 뒤의 .KS나 .KQ를 제거하여 검색 성능을 향상시킵니다 (예: 005930.KS -> 005930)
+    search_keyword = symbol
+    if symbol.endswith((".KS", ".KQ")):
+        search_keyword = symbol.split(".")[0]
+        
+    url = f"https://news.google.com/rss/search?q={search_keyword}+stock&hl=en-US&gl=US&ceid=US:en"
     news_items = []
     
     try:
