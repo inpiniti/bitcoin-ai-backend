@@ -865,6 +865,25 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
             err = result.get('error', '주문 실패')
             logger.warning(f"[Realtime] {side.upper()} 주문 실패: {err} → 쿨다운")
             _realtime_failure_cooldown[trade_id] = now
+            
+            # 주문가능금액 초과로 실패한 경우 (매수 주문에 한함) 설정의 갭을 +1.0% 상향 조정
+            if side == 'buy' and ('APBK0952' in err or '주문가능금액을 초과' in err or '주문가능금액' in err):
+                try:
+                    trade_res = supabase.table('realtime_trading').select('gap').eq('id', trade_id).execute()
+                    if trade_res.data:
+                        current_gap = float(trade_res.data[0].get('gap', 1.0))
+                        if current_gap < 30.0:  # 최대 갭 한계선 30%
+                            new_gap = min(30.0, current_gap + 1.0)
+                            supabase.table('realtime_trading').update({
+                                'gap': new_gap,
+                                'updated_at': now.isoformat(),
+                            }).eq('id', trade_id).execute()
+                            logger.info(f"[Realtime] {ticker} 주문가능금액 초과로 갭 상향 조정: {current_gap}% → {new_gap}%")
+                        else:
+                            logger.info(f"[Realtime] {ticker} 주문가능금액 초과하였으나 이미 최대 갭 한계선(30%)에 도달하여 유지합니다.")
+                except Exception as db_err:
+                    logger.error(f"[Realtime] {ticker} 갭 자동 조절 중 DB 오류 발생: {db_err}")
+
             _record(quantity=order_qty, error_message=err)
 
     except Exception as e:
