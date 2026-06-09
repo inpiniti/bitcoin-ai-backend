@@ -46,10 +46,234 @@ async def get_yahoo_cookie_and_crumb() -> tuple[dict, str]:
     
     return {}, ""
 
+def clean_float(val_str: str) -> float:
+    if not val_str or val_str == "N/A" or val_str == "-":
+        return 0.0
+    val_str = val_str.replace(",", "").strip()
+    val_str = val_str.replace("%", "")
+    try:
+        return float(val_str)
+    except ValueError:
+        return 0.0
+
+def parse_market_cap(val_str: str) -> float:
+    if not val_str:
+        return 0.0
+    val_str = val_str.replace(",", "").strip()
+    total = 0.0
+    try:
+        if "조" in val_str:
+            parts = val_str.split("조")
+            cho = float(parts[0].strip())
+            total += cho * 1_000_000_000_000
+            if len(parts) > 1 and "억" in parts[1]:
+                ok = float(parts[1].replace("억", "").strip())
+                total += ok * 100_000_000
+        elif "억" in val_str:
+            ok = float(val_str.replace("억", "").strip())
+            total += ok * 100_000_000
+    except Exception:
+        pass
+    return total
+
+def is_korean_stock(symbol: str) -> bool:
+    symbol = symbol.upper().strip()
+    if symbol.isdigit() and len(symbol) == 6:
+        return True
+    if symbol.endswith((".KS", ".KQ")) and symbol[:-3].isdigit() and len(symbol[:-3]) == 6:
+        return True
+    return False
+
+async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
+    """
+    네이버 금융 모바일 API 및 웹스크래핑을 병렬로 처리하여 한국 주식의 상세 정보를 조회합니다.
+    """
+    code = symbol.upper().replace(".KS", "").replace(".KQ", "").strip()
+    if not (code.isdigit() and len(code) == 6):
+        logger.warning(f"[Naver] 잘못된 한국 주식 코드: {symbol}")
+        return {}
+        
+    basic_url = f"https://m.stock.naver.com/api/stock/{code}/basic"
+    integration_url = f"https://m.stock.naver.com/api/stock/{code}/integration"
+    pc_url = f"https://finance.naver.com/item/main.naver?code={code}"
+    
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/html, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    
+    async def fetch_json(client, url):
+        try:
+            resp = await client.get(url, timeout=10)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            logger.error(f"[Naver] JSON 조회 실패 ({url}): {e}")
+        return None
+
+    async def fetch_html(client, url):
+        try:
+            resp = await client.get(url, timeout=10)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception as e:
+            logger.error(f"[Naver] HTML 조회 실패 ({url}): {e}")
+        return None
+
+    try:
+        async with httpx.AsyncClient(headers=headers, verify=False) as client:
+            basic_data, integration_data, pc_html = await asyncio.gather(
+                fetch_json(client, basic_url),
+                fetch_json(client, integration_url),
+                fetch_html(client, pc_url)
+            )
+    except Exception as e:
+        logger.error(f"[Naver] 병렬 데이터 수집 중 치명적 오류: {e}")
+        return {}
+
+    if not basic_data or not integration_data:
+        logger.warning(f"[Naver] 필수 API 데이터 수집 실패: {symbol}")
+        return {}
+
+    stock_name = basic_data.get("stockName", symbol)
+    stock_exchange = basic_data.get("stockExchangeName", "KOSPI")
+    sosok = basic_data.get("sosok", "0") # 0: 코스피, 1: 코스닥
+    current_price_str = basic_data.get("closePrice", "0")
+    current_price = clean_float(current_price_str)
+    
+    total_infos = integration_data.get("totalInfos", [])
+    info_map = {item.get("code"): item.get("value") for item in total_infos if item.get("code")}
+    
+    low_52_str = info_map.get("lowPriceOf52Weeks", "N/A")
+    high_52_str = info_map.get("highPriceOf52Weeks", "N/A")
+    low_52 = clean_float(low_52_str)
+    high_52 = clean_float(high_52_str)
+    
+    market_cap_str = info_map.get("marketValue", "N/A")
+    market_cap_num = parse_market_cap(market_cap_str)
+    
+    per_str = info_map.get("per", "N/A")
+    eps_str = info_map.get("eps", "N/A")
+    forward_pe_str = info_map.get("cnsPer", "N/A")
+    forward_eps_str = info_map.get("cnsEps", "N/A")
+    pbr_str = info_map.get("pbr", "N/A")
+    bps_str = info_map.get("bps", "N/A")
+    dividend_yield_str = info_map.get("dividendYieldRatio", "N/A")
+    dividend_str = info_map.get("dividend", "N/A")
+    
+    business_summary = "정보가 제공되지 않습니다."
+    revenue_growth = 0.0
+    total_revenue = 0.0
+    operating_margin = 0.0
+    net_margin = 0.0
+    roe = 0.0
+    debt_to_equity = 0.0
+    op_income = 0.0
+    
+    last_actual_idx = 2
+    rev_str = "0"
+    op_inc_str = "0"
+    
+    if pc_html:
+        from bs4 import BeautifulSoup
+        try:
+            soup = BeautifulSoup(pc_html, "lxml")
+            summary_div = soup.find("div", class_="summary_info")
+            if summary_div:
+                business_summary = summary_div.text.strip().replace("\n", " ").replace("\t", " ")
+                
+            tbl = soup.find("table", class_="tb_type1_ifrs")
+            if tbl:
+                thead_trs = tbl.find("thead").find_all("tr")
+                if len(thead_trs) > 1:
+                    ths = [th.text.strip().replace("\n", "").replace("\t", "") for th in thead_trs[1].find_all("th")]
+                    years = ths[:4]
+                    
+                    last_actual_idx = 0
+                    for idx, year in enumerate(years):
+                        if "(E)" not in year:
+                            last_actual_idx = idx
+                    prev_actual_idx = max(0, last_actual_idx - 1)
+                    
+                    rows = {}
+                    for tr in tbl.find_all("tr"):
+                        th_el = tr.find("th")
+                        td_els = tr.find_all("td")
+                        if th_el and td_els:
+                            row_name = th_el.text.strip()
+                            rows[row_name] = [td.text.strip() for td in td_els]
+                            
+                    def get_row_val(row_name, idx):
+                        if row_name in rows and len(rows[row_name]) > idx:
+                            return rows[row_name][idx]
+                        return "0"
+                        
+                    rev_str = get_row_val("매출액", last_actual_idx)
+                    total_revenue = clean_float(rev_str) * 100_000_000
+                    
+                    rev_prev = clean_float(get_row_val("매출액", prev_actual_idx))
+                    if rev_prev > 0:
+                        revenue_growth = (clean_float(rev_str) - rev_prev) / rev_prev
+                        
+                    op_inc_str = get_row_val("영업이익", last_actual_idx)
+                    op_income = clean_float(op_inc_str) * 100_000_000
+                    
+                    operating_margin = clean_float(get_row_val("영업이익률", last_actual_idx))
+                    net_margin = clean_float(get_row_val("순이익률", last_actual_idx))
+                    roe = clean_float(get_row_val("ROE(지배주주)", last_actual_idx)) or clean_float(get_row_val("ROE", last_actual_idx))
+                    debt_to_equity = clean_float(get_row_val("부채비율", last_actual_idx))
+                    
+        except Exception as e:
+            logger.error(f"[Naver] HTML 파싱 실패: {e}")
+
+    profile = {
+        "assetProfile": {
+            "sector": "KOSPI" if sosok == "0" else "KOSDAQ",
+            "industry": stock_exchange,
+            "longBusinessSummary": business_summary,
+            "companyOfficers": [{"name": f"{stock_name} Management"}]
+        },
+        "financialData": {
+            "currentPrice": {"raw": current_price, "fmt": current_price_str},
+            "totalRevenue": {"raw": total_revenue, "fmt": f"{rev_str}억"},
+            "freeCashflow": {"raw": 0, "fmt": "N/A"},
+            "operatingMargins": {"raw": operating_margin / 100.0, "fmt": f"{operating_margin}%"},
+            "returnOnEquity": {"raw": roe / 100.0, "fmt": f"{roe}%"},
+            "debtToEquity": {"raw": debt_to_equity, "fmt": f"{debt_to_equity}%"},
+            "revenueGrowth": {"raw": revenue_growth, "fmt": f"{revenue_growth * 100:.2f}%"},
+            "grossProfits": {"raw": op_income, "fmt": f"{op_inc_str}억"},
+            "ebitda": {"raw": op_income, "fmt": f"{op_inc_str}억"},
+            "profitMargins": {"raw": net_margin / 100.0, "fmt": f"{net_margin}%"}
+        },
+        "defaultKeyStatistics": {
+            "forwardPE": {"raw": clean_float(forward_pe_str), "fmt": f"{forward_pe_str}배"},
+            "pegRatio": {"raw": 0, "fmt": "N/A"},
+            "trailingEps": {"raw": clean_float(eps_str), "fmt": f"{eps_str}원"},
+            "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
+            "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
+            "beta": {"raw": 0, "fmt": "N/A"}
+        },
+        "summaryDetail": {
+            "fiftyTwoWeekLow": {"raw": low_52, "fmt": low_52_str},
+            "fiftyTwoWeekHigh": {"raw": high_52, "fmt": high_52_str},
+            "marketCap": {"raw": market_cap_num, "fmt": market_cap_str},
+            "trailingPE": {"raw": clean_float(per_str), "fmt": f"{per_str}배"}
+        },
+        "earnings": {}
+    }
+
+    logger.info(f"[Naver] {symbol} ({stock_name}) 데이터 바인딩 완료")
+    return profile
+
 async def fetch_company_profile_and_financials(symbol: str) -> dict:
     """
     Yahoo Finance quoteSummary API를 활용하여 기업 프로필 및 재무 데이터를 가져옵니다 (쿠키/크럼 캐싱 적용).
+    단, 한국 주식은 네이버 금융 연동을 통해 수집하여 차단 문제를 우회합니다.
     """
+    if is_korean_stock(symbol):
+        return await fetch_company_profile_and_financials_naver(symbol)
+
     global _cached_cookies, _cached_crumb
     
     for attempt in range(2):
