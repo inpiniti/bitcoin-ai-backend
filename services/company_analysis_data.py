@@ -369,3 +369,97 @@ async def fetch_company_news(symbol: str) -> list[dict]:
         logger.error(f"[GoogleNews] {symbol} RSS 조회 실패: {e}")
         return []
 
+async def fetch_macro_indicators() -> dict:
+    """
+    글로벌 매크로 지표(주식 지수, 금리, 환율, 원자재, 공포지수 등)의 최근 수치 및 전일대비 변동률 데이터를 야후 파이낸스 API를 통해 일괄 수집합니다.
+    """
+    global _cached_cookies, _cached_crumb
+    
+    symbols = [
+        "^GSPC",       # S&P 500
+        "^IXIC",       # 나스닥 종합지수
+        "^SOX",        # 필라델피아 반도체지수
+        "^KS11",       # 코스피 지수
+        "^TNX",        # 미국 10년물 국채 금리 (수치가 10배 표기됨. 예: 4.15% -> 41.5)
+        "USDKRW=X",    # 원·달러 환율
+        "CL=F",        # WTI 원유 선물
+        "GC=F",        # 국제 금 선물
+        "^VIX",        # CBOE 변동성 지수 (공포지수)
+        "DX-Y.NYB"     # 달러 인덱스
+    ]
+    symbols_str = ",".join(symbols)
+    headers = get_headers()
+    
+    logger.info("[MacroData] Fetching global macro indicators with cookies and crumb...")
+    
+    for attempt in range(2):
+        if not _cached_crumb:
+            _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
+            
+        if not _cached_crumb:
+            logger.warning("[MacroData] Crumb 획득 실패로 인해 조회 불가")
+            return {}
+            
+        url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols_str}&crumb={_cached_crumb}"
+        
+        try:
+            async with httpx.AsyncClient(timeout=15, headers=headers, cookies=_cached_cookies, verify=False) as client:
+                resp = await client.get(url)
+                
+            if resp.status_code == 401:
+                logger.warning("[MacroData] API HTTP 401 (크럼 만료). 캐시 초기화 후 재시도...")
+                _cached_cookies = None
+                _cached_crumb = None
+                continue
+                
+            if resp.status_code != 200:
+                logger.warning(f"[MacroData] API HTTP {resp.status_code} (시도 {attempt+1})")
+                await asyncio.sleep(1)
+                continue
+                
+            data = resp.json()
+            results = data.get("quoteResponse", {}).get("result", [])
+            
+            macro_dict = {}
+            name_map = {
+                "^GSPC": "S&P 500",
+                "^IXIC": "NASDAQ",
+                "^SOX": "SOX (필라델피아 반도체)",
+                "^KS11": "KOSPI",
+                "^TNX": "US 10Y Yield (미국 10년 국채금리)",
+                "USDKRW=X": "USD/KRW (원·달러 환율)",
+                "CL=F": "Crude Oil WTI (국제유가)",
+                "GC=F": "Gold (국제 금값)",
+                "^VIX": "CBOE VIX (공포지수)",
+                "DX-Y.NYB": "US Dollar Index (달러인덱스)"
+            }
+            
+            for item in results:
+                symbol = item.get("symbol")
+                mapped_name = name_map.get(symbol, symbol)
+                
+                price = item.get("regularMarketPrice", 0.0)
+                change_percent = item.get("regularMarketChangePercent", 0.0)
+                change = item.get("regularMarketChange", 0.0)
+                
+                # 미국 10년물 국채 금리의 경우 야후 파이낸스에서는 4.15%가 41.5로 반환되므로 변환
+                if symbol == "^TNX" and price > 0:
+                    price = price / 10.0
+                    
+                macro_dict[symbol] = {
+                    "name": mapped_name,
+                    "price": price,
+                    "change": change,
+                    "changePercent": change_percent
+                }
+                
+            return macro_dict
+            
+        except Exception as e:
+            logger.error(f"[MacroData] 매크로 지표 조회 에러 (시도 {attempt+1}): {e}")
+            await asyncio.sleep(1)
+            
+    return {}
+
+
+

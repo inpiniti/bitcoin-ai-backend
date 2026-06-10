@@ -7,7 +7,7 @@ import httpx
 import asyncio
 from datetime import datetime, timezone
 from services.gemini_key_manager import get_key_manager
-from services.company_analysis_data import fetch_company_profile_and_financials, fetch_company_news
+from services.company_analysis_data import fetch_company_profile_and_financials, fetch_company_news, fetch_macro_indicators
 
 logger = logging.getLogger("company_analysis_service")
 
@@ -350,6 +350,47 @@ Please generate a Risk & Warning Signals Report in Korean. Structure the report 
 Make it analytical, caution-oriented, objective, and written in clean Korean markdown.
 """
 
+def build_macro_analysis_prompt(macro_data: dict) -> str:
+    """
+    거시경제 분석가 에이전트 전용 프롬프트 조립
+    """
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+    
+    macro_context_list = []
+    for symbol, info in macro_data.items():
+        macro_context_list.append(
+            f"- {info['name']} ({symbol}): 현재가={info['price']}, 전일비={info['change']:.4f}({info['changePercent']:.2f}%)"
+        )
+    macro_context = "\n".join(macro_context_list)
+    
+    return f"""You are a Global Macro Strategist and Chief Economist.
+Analyze the following real-time global financial indicators to determine the macroeconomic regime and recommend a baseline Asset Allocation (Stock vs. Cash ratio).
+
+[ANALYSIS DATE / REPORT DATE]
+{today_str}
+
+[GLOBAL FINANCIAL INDICATORS]
+{macro_context}
+
+Please generate a Global Macro Economic Assessment Report in Korean. Structure the report as follows:
+*CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
+
+1. **글로벌 시장 국면 평가 (Global Market Regime)**
+   - 현재 글로벌 주식 시장(S&P 500, 나스닥, 반도체 지수, 코스피)의 단기 및 중기 흐름을 진단하십시오.
+   - 시장의 위험 성향이 위험 선호(Risk-on)인지, 아니면 공포와 회피(Risk-off)인지 명확하게 정의하십시오.
+2. **비용 및 수급 지표 진단 (Commodity & FX Audit)**
+   - 원·달러 환율과 유가, 금 가격이 국내외 주식 시장(외국인 수급 및 기업 원가 구조)에 미치는 단기적 영향을 설명하십시오.
+3. **금리 및 통화 긴축 수준 평가 (Monetary Policy & Yields)**
+   - 미국 10년물 국채 금리 및 달러 인덱스의 움직임이 주는 금융 긴축 여건을 분석하십시오. (성장주 및 신흥국 증시에 미치는 효과 중심)
+4. **심리 지표 분석 (CBOE VIX)**
+   - VIX 지수를 기반으로 한 시장의 공포 심리 상태를 해석하십시오.
+5. **자산 배분 가이드라인 제안 (Recommended Baseline Asset Allocation)**
+   - 현재 매크로 여건을 종합하여, 투자자가 보유해야 할 표준적인 **[주식 비중 %]** 대 **[현금 비중 %]** 비율을 제안하십시오. (예: 주식 40%, 현금 60%)
+   - 이러한 배분의 핵심 거시적 근거를 2줄 요약하십시오.
+
+Make the output strategic, objective, data-driven, and written in clean Korean markdown.
+"""
+
 def build_portfolio_manager_prompt(symbol: str, profile: dict, sub_reports: dict) -> str:
     """
     Portfolio Manager Agent 스타일의 종합 분석 보고서 프롬프트 조립
@@ -360,15 +401,16 @@ def build_portfolio_manager_prompt(symbol: str, profile: dict, sub_reports: dict
     
     today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
     
-    # 5대 서브 리포트 취합
+    # 6대 서브 리포트 취합
     market_rep = sub_reports.get("market", "N/A")
     earnings_rep = sub_reports.get("earnings", "N/A")
     valuation_rep = sub_reports.get("valuation", "N/A")
     moat_rep = sub_reports.get("moat", "N/A")
     risk_rep = sub_reports.get("risk", "N/A")
+    macro_rep = sub_reports.get("macro", "N/A")
     
     return f"""You are a Chief Investment Officer (CIO) and Senior Portfolio Manager.
-Your job is to synthesize five specialized analysis reports for {symbol} and write a final, comprehensive Investment Memorandum (종합 투자 분석 보고서) in Korean.
+Your job is to synthesize five specialized domain reports AND a global macro economic report for {symbol} to write a final, comprehensive Investment Memorandum (종합 투자 분석 보고서) in Korean.
 
 [ANALYSIS DATE / REPORT DATE]
 {today_str}
@@ -393,9 +435,12 @@ Your job is to synthesize five specialized analysis reports for {symbol} and wri
 
 [5. RISK & WARNING REPORT]
 {risk_rep}
+
+[6. GLOBAL MACRO ECONOMIC REPORT]
+{macro_rep}
 ==================================================
 
-Based on the five specialized reports above, write a high-conviction, professional Investment Memorandum in Korean. 
+Based on the six reports above, write a high-conviction, professional Investment Memorandum in Korean. 
 Your report must be structured as follows:
 
 *CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
@@ -405,12 +450,14 @@ Your report must be structured as follows:
    - 1~100점 사이의 종합 투자 매력도 점수(종합 평점)를 부여하고, 그 이유를 3줄 요약으로 제공하십시오.
    - 현재가 대비 최종 판단을 내린 요약을 작성하십시오.
 2. **에이전트별 분석 요약 및 조율 (Synthesis of Domain Analyses)**
-   - 5개 에이전트의 핵심 발견 사항을 각각 요약하십시오. (시장 기회, 실적 성과, 가치 평가 수준, 해자 및 AI 경쟁력, 주요 리스크 신호)
-   - 의견이 상충하는 부분(예: 훌륭한 해자 vs 비싼 밸류에이션, 혹은 좋은 실적 vs 높은 리스크)이 있다면 포트폴리오 매니저의 관점에서 어떻게 조율하여 최종 의견을 정했는지 명확히 설명하십시오.
-3. **핵심 투자 촉매제 (Key Catalysts)**
-   - 향후 6~12개월 내 주가 상승을 이끌 수 있는 핵심 이벤트 2~3가지를 서술하십시오.
-4. **핵심 리스크 및 대응 요령 (Risks & Mitigation)**
-   - 투자 판단을 뒤흔들 수 있는 가장 치명적인 위험 요소 1~2가지와 투자자 입장에서의 리스크 헤지/대응 전략을 제시하십시오.
+   - 5개 기업 에이전트의 핵심 발견 사항을 각각 요약하십시오. (시장 기회, 실적 성과, 가치 평가 수준, 해자 및 AI 경쟁력, 주요 리스크 신호)
+   - 의견이 상충하는 부분을 포트폴리오 매니저의 관점에서 어떻게 조율했인지 명확히 설명하십시오.
+3. **글로벌 거시경제 진단 & 자산 배분 비중 제안 (Macro Regime & Asset Allocation)**
+   - 글로벌 매크로 보고서(6번)를 기반으로 현재 금융 시장의 주된 국면(위험 선호 vs 회피)을 설명하십시오.
+   - 투자자가 안전하게 가져가야 할 표준 **[주식 비중 % vs 현금 비중 %]**을 권고하십시오.
+   - 이 종목({symbol})을 전체 투자 자산 대비 몇 % 비율로 편입(투자 배분 비중)하는 것이 적절한지 구체적인 권고(예: 전체 포트폴리오의 3~5% 이내 편입 등)를 적어주십시오.
+4. **핵심 투자 촉매제 및 리스크 (Catalysts & Risks)**
+   - 향후 6~12개월 내 주가 상승을 이끌 수 있는 핵심 이벤트와 이에 대비해야 할 치명적인 위험 요소를 요약하십시오.
 5. **최종 가치 평가 및 목표 주가 (Final Valuation & Verdict)**
    - 가치평가 및 리스크 리포트를 기반으로 산출한 합리적인 적정 주가 범위(Target Price Range)를 명시하고, 현재가와의 괴리율(상승/하락 여력, Upside/Downside %)을 수학적으로 명확하게 계산하여 적으십시오.
    - 최종 권고안(예: 비중 확대, 분할 매수, 관망 등)과 함께 투자 전략적 조언을 덧붙이십시오.
@@ -491,16 +538,20 @@ async def run_company_analysis(symbol: str, analysis_type: str = "market") -> di
 
     # 3. 종합 분석(comprehensive)과 단일 분석 분기 처리
     if analysis_type == "comprehensive":
-        # 5대 에이전트 프롬프트 빌드
+        # 매크로 지표 데이터 병렬 수집
+        macro_data = await fetch_macro_indicators()
+        
+        # 5대 에이전트 + 매크로 에이전트 프롬프트 빌드
         prompts = {
             "market": build_market_research_prompt(resolved_symbol, profile, news),
             "earnings": build_earnings_review_prompt(resolved_symbol, profile, news),
             "valuation": build_valuation_prompt(resolved_symbol, profile, news),
             "moat": build_moat_prompt(resolved_symbol, profile, news),
             "risk": build_risk_prompt(resolved_symbol, profile, news),
+            "macro": build_macro_analysis_prompt(macro_data),
         }
         
-        # 5대 에이전트 비동기 호출 태스크 생성 (429 완화를 위해 1초씩 미세한 시차 주입)
+        # 6대 에이전트 비동기 호출 태스크 생성 (429 완화를 위해 1초씩 미세한 시차 주입)
         tasks = []
         keys = list(prompts.keys())
         
