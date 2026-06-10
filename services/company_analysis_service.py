@@ -617,3 +617,46 @@ async def run_company_analysis(symbol: str, analysis_type: str = "market") -> di
         except Exception as e:
             logger.exception(f"[CompanyAnalysis] Gemini 호출 중 오류 발생: {e}")
             return {"status": "error", "message": f"Gemini 호출 오류: {str(e)}"}
+
+async def run_macro_analysis() -> dict:
+    """
+    글로벌 거시경제 지표 및 자산 배분 비중 분석을 독립적으로 수행합니다.
+    """
+    logger.info("[CompanyAnalysis] Starting standalone macro analysis")
+    
+    # 1. 매크로 지표 데이터 수집
+    try:
+        from services.company_analysis_data import fetch_macro_indicators
+        macro_data = await fetch_macro_indicators()
+    except Exception as e:
+        logger.error(f"[CompanyAnalysis] Macro data fetching failed: {e}")
+        return {"status": "error", "message": f"매크로 데이터 수집 실패: {str(e)}"}
+        
+    if not macro_data:
+        return {"status": "error", "message": "거시경제 지표 데이터를 수집할 수 없습니다."}
+        
+    # 2. API 키 획득
+    try:
+        key_manager = get_key_manager()
+        api_key = key_manager.next_key()
+    except Exception as e:
+        logger.error(f"[CompanyAnalysis] API 키 매니저 에러: {e}")
+        return {"status": "error", "message": "Gemini API 키가 설정되지 않았습니다."}
+        
+    # 3. 프롬프트 생성
+    prompt = build_macro_analysis_prompt(macro_data)
+    
+    # 4. Gemini 호출
+    try:
+        report = await call_gemini(prompt, api_key)
+    except Exception as e:
+        logger.exception(f"[CompanyAnalysis] Gemini Macro 분석 호출 중 오류 발생: {e}")
+        return {"status": "error", "message": f"Gemini 분석 실패: {str(e)}"}
+        
+    analysis_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return {
+        "status": "ok",
+        "analysis_date": analysis_date,
+        "report": report,
+        "macro_data": macro_data
+    }
