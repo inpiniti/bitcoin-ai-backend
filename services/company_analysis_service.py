@@ -585,7 +585,8 @@ async def run_company_analysis(symbol: str, analysis_type: str = "market") -> di
             "ticker": symbol,
             "analysis_type": analysis_type,
             "analysis_date": analysis_date,
-            "report": final_report
+            "report": final_report,
+            "macro_data": macro_data
         }
 
     else:
