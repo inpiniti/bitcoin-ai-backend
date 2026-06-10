@@ -442,15 +442,51 @@ async def fetch_macro_indicators() -> dict:
                 change_percent = item.get("regularMarketChangePercent", 0.0)
                 change = item.get("regularMarketChange", 0.0)
                 
-                # 미국 10년물 국채 금리의 경우 야후 파이낸스에서는 4.15%가 41.5로 반환되므로 변환
-                if symbol == "^TNX" and price > 0:
-                    price = price / 10.0
+                # 중장기 추세 지표 추출
+                fifty_day_avg = item.get("fiftyDayAverage", 0.0)
+                two_hundred_day_avg = item.get("twoHundredDayAverage", 0.0)
+                fifty_two_week_low = item.get("fiftyTwoWeekLow", 0.0)
+                fifty_two_week_high = item.get("fiftyTwoWeekHigh", 0.0)
+                
+                # 미국 10년물 국채 금리의 경우 야후 파이낸스에서는 4.15%가 41.5로 반환되므로 10으로 나누어 보정
+                if symbol == "^TNX":
+                    if price > 0:
+                        price = price / 10.0
+                    if fifty_day_avg > 0:
+                        fifty_day_avg = fifty_day_avg / 10.0
+                    if two_hundred_day_avg > 0:
+                        two_hundred_day_avg = two_hundred_day_avg / 10.0
+                    if fifty_two_week_low > 0:
+                        fifty_two_week_low = fifty_two_week_low / 10.0
+                    if fifty_two_week_high > 0:
+                        fifty_two_week_high = fifty_two_week_high / 10.0
+                
+                # 52주 가격 범위 백분위 (0% ~ 100%)
+                fifty_two_week_percentile = 0.0
+                if fifty_two_week_high and fifty_two_week_low and (fifty_two_week_high - fifty_two_week_low) > 0:
+                    fifty_two_week_percentile = ((price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low)) * 100.0
+                
+                # 50일 및 200일 이동평균선 대비 괴리율 (%)
+                fifty_day_ma_diff = 0.0
+                if fifty_day_avg > 0:
+                    fifty_day_ma_diff = ((price - fifty_day_avg) / fifty_day_avg) * 100.0
+                
+                two_hundred_day_ma_diff = 0.0
+                if two_hundred_day_avg > 0:
+                    two_hundred_day_ma_diff = ((price - two_hundred_day_avg) / two_hundred_day_avg) * 100.0
                     
                 macro_dict[symbol] = {
                     "name": mapped_name,
                     "price": price,
                     "change": change,
-                    "changePercent": change_percent
+                    "changePercent": change_percent,
+                    "fiftyDayAverage": fifty_day_avg,
+                    "twoHundredDayAverage": two_hundred_day_avg,
+                    "fiftyTwoWeekLow": fifty_two_week_low,
+                    "fiftyTwoWeekHigh": fifty_two_week_high,
+                    "fiftyTwoWeekPercentile": fifty_two_week_percentile,
+                    "fiftyDayMaDiff": fifty_day_ma_diff,
+                    "twoHundredDayMaDiff": two_hundred_day_ma_diff
                 }
                 
             return macro_dict

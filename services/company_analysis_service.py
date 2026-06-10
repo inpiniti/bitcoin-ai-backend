@@ -352,41 +352,43 @@ Make it analytical, caution-oriented, objective, and written in clean Korean mar
 
 def build_macro_analysis_prompt(macro_data: dict) -> str:
     """
-    거시경제 분석가 에이전트 전용 프롬프트 조립
+    거시경제 분석가 에이전트 전용 프롬프트 조립 (중장기 추세 지표 포함)
     """
     today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
     
     macro_context_list = []
     for symbol, info in macro_data.items():
         macro_context_list.append(
-            f"- {info['name']} ({symbol}): 현재가={info['price']}, 전일비={info['change']:.4f}({info['changePercent']:.2f}%)"
+            f"- {info['name']} ({symbol}): 현재가={info['price']}, 전일비={info['change']:.4f}({info['changePercent']:.2f}%), "
+            f"52주 범위(저가~고가)={info['fiftyTwoWeekLow']:.4f}~{info['fiftyTwoWeekHigh']:.4f} (현재 백분위 위치={info['fiftyTwoWeekPercentile']:.1f}%), "
+            f"50일이평선 대비 괴리율={info['fiftyDayMaDiff']:.2f}%, 200일이평선 대비 괴리율={info['twoHundredDayMaDiff']:.2f}%"
         )
     macro_context = "\n".join(macro_context_list)
     
     return f"""You are a Global Macro Strategist and Chief Economist.
-Analyze the following real-time global financial indicators to determine the macroeconomic regime and recommend a baseline Asset Allocation (Stock vs. Cash ratio).
+Analyze the following real-time and long-term trend global financial indicators to determine the macroeconomic regime and recommend a baseline Asset Allocation (Stock vs. Cash ratio).
 
 [ANALYSIS DATE / REPORT DATE]
 {today_str}
 
-[GLOBAL FINANCIAL INDICATORS]
+[GLOBAL FINANCIAL INDICATORS WITH LONG-TERM TRENDS]
 {macro_context}
 
 Please generate a Global Macro Economic Assessment Report in Korean. Structure the report as follows:
 *CRITICAL REQUIREMENT*: You must write "{today_str}" as the report date (보고서 작성일) at the beginning of the report.
 
-1. **글로벌 시장 국면 평가 (Global Market Regime)**
-   - 현재 글로벌 주식 시장(S&P 500, 나스닥, 반도체 지수, 코스피)의 단기 및 중기 흐름을 진단하십시오.
-   - 시장의 위험 성향이 위험 선호(Risk-on)인지, 아니면 공포와 회피(Risk-off)인지 명확하게 정의하십시오.
+1. **글로벌 시장 국면 및 장기 추세 평가 (Global Market Regime & Long-term Trends)**
+   - 현재 글로벌 주식 시장(S&P 500, 나스닥, 반도체 지수, 코스피)의 단기 변동 및 중장기 이평선(50일, 200일선) 기준 추세와 52주 범위 내 현재 위치(백분위)를 진단하십시오.
+   - 이평선 돌파 여부와 괴리율을 고려하여 시장이 중장기 상승세인지, 하락 전환 중인지, 아니면 과열 상태인지 판단하고 위험 성향(Risk-on vs Risk-off)을 평가하십시오.
 2. **비용 및 수급 지표 진단 (Commodity & FX Audit)**
-   - 원·달러 환율과 유가, 금 가격이 국내외 주식 시장(외국인 수급 및 기업 원가 구조)에 미치는 단기적 영향을 설명하십시오.
+   - 원·달러 환율과 유가, 금 가격의 중장기 추세와 현재 수준이 국내외 주식 시장에 미치는 영향을 다차원적으로 설명하십시오.
 3. **금리 및 통화 긴축 수준 평가 (Monetary Policy & Yields)**
-   - 미국 10년물 국채 금리 및 달러 인덱스의 움직임이 주는 금융 긴축 여건을 분석하십시오. (성장주 및 신흥국 증시에 미치는 효과 중심)
+   - 미국 10년물 국채 금리 및 달러 인덱스의 장기 이평선 대비 추세와 52주 고점 대비 위치를 기반으로 한 금융 긴축 여건을 분석하십시오.
 4. **심리 지표 분석 (CBOE VIX)**
-   - VIX 지수를 기반으로 한 시장의 공포 심리 상태를 해석하십시오.
+   - VIX 지수의 52주 범위 위치(백분위)와 이평선 추세를 해석하여 시장의 공포가 바닥(자만)인지, 극대화(바닥 접근) 되었는지 진단하십시오.
 5. **자산 배분 가이드라인 제안 (Recommended Baseline Asset Allocation)**
-   - 현재 매크로 여건을 종합하여, 투자자가 보유해야 할 표준적인 **[주식 비중 %]** 대 **[현금 비중 %]** 비율을 제안하십시오. (예: 주식 40%, 현금 60%)
-   - 이러한 배분의 핵심 거시적 근거를 2줄 요약하십시오.
+   - 현재 매크로 및 중장기 추세 여건을 종합하여, 투자자가 보유해야 할 표준적인 **[주식 비중 %]** 대 **[현금 비중 %]** 비율을 제안하십시오. (예: 주식 40%, 현금 60%)
+   - 이러한 배분의 핵심 거시적 근거를 중장기 추세적 근거를 포함하여 2줄 요약하십시오.
 
 Make the output strategic, objective, data-driven, and written in clean Korean markdown.
 """
