@@ -13,14 +13,23 @@ def extract_attractiveness(report_text: str) -> int | None:
     """
     종합 분석 보고서 텍스트에서 종합 투자 매력도 점수를 파싱합니다.
     """
+    if not report_text:
+        return None
+
+    # 마크다운 볼드체 및 방해 문자 제거 (별표 제거)
+    cleaned = report_text.replace("*", "")
+    
+    # 1단계: 표준 정규식 매칭 시도
     patterns = [
         r"종합\s*투자\s*매력도\s*[:：\s]*(\d+)",
         r"종합\s*투자\s*매력도\s*점수\s*[:：\s]*(\d+)",
         r"투자\s*매력도\s*[:：\s]*(\d+)",
-        r"종합\s*평점\s*[:：\s]*(\d+)"
+        r"종합\s*평점\s*[:：\s]*(\d+)",
+        r"최종\s*투자\s*매력도\s*[:：\s]*(\d+)",
+        r"투자\s*매력도[^\d]*(\d+)"
     ]
     for pattern in patterns:
-        match = re.search(pattern, report_text)
+        match = re.search(pattern, cleaned, re.IGNORECASE)
         if match:
             try:
                 score = int(match.group(1))
@@ -28,6 +37,24 @@ def extract_attractiveness(report_text: str) -> int | None:
                     return score
             except ValueError:
                 continue
+                
+    # 2단계: 휴리스틱 파싱 (키워드 반경 근처에서 숫자 찾기)
+    for kw in ["투자 매력도", "투자매력도", "종합 평점", "종합평점"]:
+        idx = cleaned.find(kw)
+        if idx != -1:
+            chunk = cleaned[idx:idx + 60]
+            numbers = re.findall(r"\d+", chunk)
+            for num_str in numbers:
+                try:
+                    val = int(num_str)
+                    if 0 <= val <= 100:
+                        # 100인 분모 제거용 예외 처리 (e.g. 85 / 100 에서 100 무시)
+                        if val == 100 and len(numbers) > 1:
+                            continue
+                        return val
+                except ValueError:
+                    continue
+                    
     return None
 
 async def run_hourly_attractiveness_analysis():
