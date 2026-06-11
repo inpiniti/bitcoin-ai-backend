@@ -2,7 +2,7 @@
 기업 분석 및 실적 리뷰 API 라우터
 """
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from services.company_analysis_service import run_company_analysis
@@ -83,3 +83,13 @@ async def analyze_macro():
         report=result["report"],
         macro_data=result["macro_data"]
     )
+
+@router.post("/trigger-scheduled-attractiveness")
+async def trigger_scheduled_attractiveness(background_tasks: BackgroundTasks):
+    """
+    시간별 관심 종목 투자 매력도 분석 스케줄러를 즉시 백그라운드에서 실행합니다.
+    """
+    from services.attractiveness_scheduler import run_hourly_attractiveness_analysis
+    background_tasks.add_task(run_hourly_attractiveness_analysis)
+    return {"status": "triggered", "message": "시간별 투자 매력도 분석 작업이 백그라운드에서 시작되었습니다."}
+
