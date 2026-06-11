@@ -467,42 +467,76 @@ Your report must be structured as follows:
 Make it clean, authoritative, data-driven, and written in highly professional Korean investment terminology. Use clean markdown formatting.
 """
 
-async def call_gemini(prompt: str, api_key: str) -> str:
+async def call_gemini(prompt: str, api_key: str | None = None) -> str:
     """
-    Gemini API를 호출하는 비동기 헬퍼 함수 (429 Rate Limit 시 기하급수적 백오프 재시도 적용)
+    Gemini API를 호출하는 비동기 헬퍼 함수
+    (429, 503, 504 에러 시 기하급수적 백오프 재시도 및 API 키 로테이션 적용)
     """
+    import os
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192},
     }
-    url = GEMINI_API_URL.format(api_key=api_key)
     
     max_retries = 5
     base_delay = 2.0
     
-    for attempt in range(max_retries):
+    current_key = api_key
+    if not current_key:
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            current_key = get_key_manager().next_key()
+        except Exception as e:
+            logger.warning(f"[Gemini] KeyManager에서 키를 가져오지 못했습니다: {e}")
+            current_key = os.environ.get("GEMINI_API_KEY", "").strip()
+            
+    for attempt in range(max_retries):
+        url = GEMINI_API_URL.format(api_key=current_key)
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(url, json=payload)
                 
             if resp.status_code == 200:
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
-            elif resp.status_code == 429:
+            elif resp.status_code in (429, 503, 504):
+                if resp.status_code == 429 and current_key:
+                    try:
+                        get_key_manager().mark_rate_limited(current_key, cooldown_seconds=60)
+                    except Exception:
+                        pass
+                
                 retry_after = base_delay * (2 ** attempt)
-                logger.warning(f"[Gemini] 429 Rate Limit 감지. {retry_after}초 후 재시도합니다 (시도 {attempt+1}/{max_retries}).")
+                logger.warning(
+                    f"[Gemini] {resp.status_code} 오류 발생. "
+                    f"{retry_after}초 후 재시도합니다 (시도 {attempt+1}/{max_retries})."
+                )
+                
+                # 호출 시 고정 키가 전달되지 않았다면 재시도마다 사용 키 로테이션 시도
+                if not api_key:
+                    try:
+                        current_key = get_key_manager().next_key()
+                        logger.info(f"[Gemini] 재시도 시 다른 API 키로 교체합니다.")
+                    except Exception as ke:
+                        logger.warning(f"[Gemini] 재시도 시 새 API 키 획득 실패: {ke}")
+                        
                 await asyncio.sleep(retry_after)
                 continue
             else:
                 raise Exception(f"Gemini API 에러: {resp.status_code} - {resp.text}")
-        except httpx.HTTPError as he:
+        except (httpx.HTTPError, asyncio.TimeoutError) as he:
             if attempt == max_retries - 1:
                 raise he
             retry_after = base_delay * (2 ** attempt)
-            logger.warning(f"[Gemini] HTTP 통신 오류 발생. {retry_after}초 후 재시도합니다: {he}")
+            logger.warning(f"[Gemini] HTTP 통신/타임아웃 오류 발생. {retry_after}초 후 재시도합니다: {he}")
+            
+            if not api_key:
+                try:
+                    current_key = get_key_manager().next_key()
+                except Exception:
+                    pass
             await asyncio.sleep(retry_after)
             
-    raise Exception("Gemini API 호출 재시도 횟수를 초과했습니다 (429 Rate Limit).")
+    raise Exception("Gemini API 호출 재시도 횟수를 초과했습니다.")
 
 async def run_company_analysis(symbol: str, analysis_type: str = "market") -> dict:
     """
@@ -553,18 +587,23 @@ async def run_company_analysis(symbol: str, analysis_type: str = "market") -> di
             "macro": build_macro_analysis_prompt(macro_data),
         }
         
-        # 6대 에이전트 비동기 호출 태스크 생성 (429 완화를 위해 1초씩 미세한 시차 주입)
+        # 6대 에이전트 비동기 호출 태스크 생성 (429 완화를 위해 시차 주입 및 Semaphore 도입)
         tasks = []
         keys = list(prompts.keys())
         
-        async def delayed_call(name: str, pr: str, key: str, delay: float):
+        # 동시 호출을 최대 2개로 제한하는 세마포어 적용
+        sem = asyncio.Semaphore(2)
+        
+        async def delayed_call(name: str, pr: str, delay: float):
             if delay > 0:
                 await asyncio.sleep(delay)
-            logger.info(f"[CompanyAnalysis] Starting sub-agent: {name} after {delay}s delay")
-            return await call_gemini(pr, key)
+            async with sem:
+                logger.info(f"[CompanyAnalysis] Starting sub-agent under semaphore control: {name} after {delay}s delay")
+                # api_key 인수를 생략하여 call_gemini 내부에서 매번 KeyManager.next_key()로 다른 키를 취득하도록 유도
+                return await call_gemini(pr)
             
         for i, k in enumerate(keys):
-            tasks.append(delayed_call(k, prompts[k], api_key, i * 1.0))
+            tasks.append(delayed_call(k, prompts[k], i * 1.5))
             
         try:
             results = await asyncio.gather(*tasks)
@@ -576,7 +615,8 @@ async def run_company_analysis(symbol: str, analysis_type: str = "market") -> di
         # 포트폴리오 매니저 프롬프트 빌드 및 최종 호출
         pm_prompt = build_portfolio_manager_prompt(resolved_symbol, profile, sub_reports)
         try:
-            final_report = await call_gemini(pm_prompt, api_key)
+            # pm_prompt 호출 시에도 키를 생략하여 다른 키 로테이션을 유도
+            final_report = await call_gemini(pm_prompt)
         except Exception as e:
             logger.exception(f"[CompanyAnalysis] 포트폴리오 매니저 취합 중 오류 발생: {e}")
             return {"status": "error", "message": f"포트폴리오 매니저 취합 실패: {str(e)}"}
