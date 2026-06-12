@@ -57,6 +57,127 @@ def extract_attractiveness(report_text: str) -> int | None:
                     
     return None
 
+def extract_reason(report_text: str) -> str | None:
+    """
+    종합 분석 보고서 텍스트에서 종합 투자 매력도 점수의 핵심 이유(3줄 요약 부근)를 추출합니다.
+    """
+    if not report_text:
+        return None
+        
+    cleaned = report_text.replace("*", "")
+    
+    import re
+    patterns = [
+        r"(?:이유|3줄\s*요약|요약|핵심\s*이유)[\s:：]*\n*([\s\S]{1,300}?)(?=\n\d+\.|\n[A-Za-z]|\n[가-힣]+|\n\n|\Z)",
+        r"(?:종합\s*평점\s*및\s*요약)[\s:：]*\n*([\s\S]{1,400}?)(?=\n2\.)"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            reason_str = match.group(1).strip()
+            if reason_str:
+                return reason_str
+                
+    # 폴백: 서두 150자 반환
+    return cleaned[:150].strip() + "..."
+
+def extract_macro_ratio(report_text: str) -> tuple[int, int]:
+    """
+    거시경제 보고서 텍스트에서 추천 주식/현금 비중을 추출합니다. (기본값 50%, 50%)
+    """
+    if not report_text:
+        return 50, 50
+        
+    cleaned = report_text.replace("*", "")
+    import re
+    
+    patterns = [
+        r"주식\s*(?:비중)?\s*[:：\s]*(\d+)\s*%\s*(?:대|vs|및|,)?\s*현금\s*(?:비중)?\s*[:：\s]*(\d+)\s*%",
+        r"주식\s*(\d+)\s*%\s*,\s*현금\s*(\d+)\s*%",
+        r"주식\s*:\s*(\d+)\s*,\s*현금\s*:\s*(\d+)"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, cleaned)
+        if match:
+            try:
+                stock = int(match.group(1))
+                cash = int(match.group(2))
+                if 0 <= stock <= 100 and 0 <= cash <= 100:
+                    return stock, cash
+            except ValueError:
+                continue
+                
+    # 개별 파싱 폴백
+    stock_match = re.search(r"주식\s*(?:비중)?\s*[:：\s]*(\d+)\s*%", cleaned)
+    cash_match = re.search(r"현금\s*(?:비중)?\s*[:：\s]*(\d+)\s*%", cleaned)
+    if stock_match and cash_match:
+        try:
+            stock = int(stock_match.group(1))
+            cash = int(cash_match.group(2))
+            return stock, cash
+        except ValueError:
+            pass
+            
+    return 50, 50
+
+def extract_macro_reason(report_text: str) -> str | None:
+    """
+    거시경제 보고서에서 자산 배분 비중 권고 근거(2줄 요약)를 파싱합니다.
+    """
+    if not report_text:
+        return None
+        
+    cleaned = report_text.replace("*", "")
+    import re
+    
+    patterns = [
+        r"(?:자산\s*배분의?\s*핵심\s*거시적\s*근거|핵심\s*거시적\s*근거|배분의?\s*핵심\s*근거)[\s:：]*\n*([\s\S]{1,250}?)(?=\n\d+\.|\n[A-Za-z]|\n[가-힣]+|\n\n|\Z)",
+        r"(?:자산\s*배분\s*가이드라인\s*제안)[\s:：]*\n*([\s\S]{1,400}?)(?=\n\n|\Z)"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            reason_str = match.group(1).strip()
+            if reason_str:
+                return reason_str
+                
+    return cleaned[:150].strip() + "..."
+
+async def run_hourly_macro_analysis(supabase, year: int, month: int, day: int, hour: int):
+    """
+    글로벌 거시경제 분석을 실행하여 현금/주식 비율 및 리포트 원문을 macro_analysis 테이블에 저장합니다.
+    """
+    logger.info(f"[Scheduler] 글로벌 거시경제 분석 시작 ({year}-{month:02d}-{day:02d} {hour:02d}시)")
+    try:
+        from services.company_analysis_service import run_macro_analysis
+        result = await run_macro_analysis()
+        if result.get("status") != "ok":
+            raise Exception(result.get("message") or "거시경제 분석 실행 실패")
+            
+        report = result.get("report", "")
+        stock, cash = extract_macro_ratio(report)
+        reason = extract_macro_reason(report)
+        
+        payload = {
+            "year": year,
+            "month": month,
+            "day": day,
+            "hour": hour,
+            "stock_ratio": stock,
+            "cash_ratio": cash,
+            "reason": reason,
+            "report": report
+        }
+        
+        supabase.table("macro_analysis").upsert(
+            payload,
+            on_conflict="year,month,day,hour"
+        ).execute()
+        
+        logger.info(f"[Scheduler] 글로벌 거시경제 분석 적재 완료 (주식: {stock}%, 현금: {cash}%)")
+    except Exception as e:
+        logger.error(f"[Scheduler] 글로벌 거시경제 분석 스케줄링 적재 실패: {e}")
+
 async def run_hourly_attractiveness_analysis():
     """
     매 시각 호출되는 관심종목 투자 매력도 분석/저장 메인 태스크
@@ -70,6 +191,17 @@ async def run_hourly_attractiveness_analysis():
         return
         
     supabase = create_client(url, key)
+    
+    # 한국 시간(KST) 기준 년/월/일/시 획득
+    kst = pytz.timezone("Asia/Seoul")
+    now_kst = datetime.now(kst)
+    year = now_kst.year
+    month = now_kst.month
+    day = now_kst.day
+    hour = now_kst.hour
+    
+    # A. 글로벌 거시경제 분석 우선 실행 및 적재
+    await run_hourly_macro_analysis(supabase, year, month, day, hour)
     
     # 2. 실시간 매매 대상 관심종목 (is_active = true) 목록 조회
     try:
@@ -85,14 +217,6 @@ async def run_hourly_attractiveness_analysis():
         return
         
     logger.info(f"[Scheduler] 분석 대상 관심종목 ({len(tickers)}개): {tickers}")
-    
-    # 한국 시간(KST) 기준 년/월/일/시 획득
-    kst = pytz.timezone("Asia/Seoul")
-    now_kst = datetime.now(kst)
-    year = now_kst.year
-    month = now_kst.month
-    day = now_kst.day
-    hour = now_kst.hour
     
     # 3. 1분 간격으로 종목마다 순차 분석 실행
     for idx, ticker in enumerate(tickers):
@@ -116,6 +240,9 @@ async def run_hourly_attractiveness_analysis():
                 if score is None:
                     raise Exception("보고서 본문에서 매력도 점수를 추출하지 못했습니다.")
                     
+                # 3줄 요약 핵심 근거 추출
+                reason = extract_reason(report)
+                    
                 # DB 저장 (upsert)
                 payload = {
                     "year": year,
@@ -123,7 +250,8 @@ async def run_hourly_attractiveness_analysis():
                     "day": day,
                     "hour": hour,
                     "ticker": ticker,
-                    "attractiveness": score
+                    "attractiveness": score,
+                    "reason": reason
                 }
                 
                 # Supabase upsert 호출 (unique 제약 조건에 의해 충돌 시 업데이트됨)
