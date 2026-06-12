@@ -59,7 +59,7 @@ def extract_attractiveness(report_text: str) -> int | None:
 
 def extract_reason(report_text: str) -> str | None:
     """
-    종합 분석 보고서 텍스트에서 종합 투자 매력도 점수의 핵심 이유(3줄 요약 부근)를 추출합니다.
+    종합 분석 보고서 텍스트에서 종합 투자 매력도 점수의 핵심 이유(3줄 요약 및 평점 요약)를 추출합니다.
     """
     if not report_text:
         return None
@@ -67,9 +67,20 @@ def extract_reason(report_text: str) -> str | None:
     cleaned = report_text.replace("*", "")
     
     import re
+    
+    # 1단계: '1. 종합 평점 및 요약' 섹션의 전체 본문을 '2. 에이전트별 분석 요약' 전까지 추출
+    # 별표가 제거된 텍스트이므로 보통 '1. 종합 평점 및 요약 (Executive Summary & Final Rating)' 형태로 매칭됨
+    match = re.search(r"종합\s*평점\s*및\s*요약[^\n]*\n([\s\S]+?)(?=\n2\.\s*(?:에이전트|Synthesis)|\n\n\n|\Z)", cleaned, re.IGNORECASE)
+    if match:
+        reason_str = match.group(1).strip()
+        if reason_str:
+            # 혹시 맨 앞부분에 '(Executive Summary & Final Rating)' 등의 괄호 잔재가 단독으로 오거나 불필요한 줄바꿈이 있으면 정리
+            return reason_str
+
+    # 2단계: 특정 핵심 이유/요약/3줄 요약 키워드 기준 추출 (룩어헤드로 2번 섹션 시작 전까지만 제한)
     patterns = [
-        r"(?:이유|3줄\s*요약|요약|핵심\s*이유)[\s:：]*\n*([\s\S]{1,300}?)(?=\n\d+\.|\n[A-Za-z]|\n[가-힣]+|\n\n|\Z)",
-        r"(?:종합\s*평점\s*및\s*요약)[\s:：]*\n*([\s\S]{1,400}?)(?=\n2\.)"
+        r"(?:3줄\s*요약|핵심\s*이유|이유)[\s:：]*\n*([\s\S]{1,400}?)(?=\n2\.\s*(?:에이전트|Synthesis)|\n\n\n|\Z)",
+        r"(?:종합\s*평점\s*및\s*요약)[\s:：]*\n*([\s\S]{1,400}?)(?=\n2\.\s*(?:에이전트|Synthesis)|\n\n\n|\Z)"
     ]
     for pattern in patterns:
         match = re.search(pattern, cleaned, re.IGNORECASE)
