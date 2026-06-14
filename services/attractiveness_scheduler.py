@@ -189,11 +189,74 @@ async def run_hourly_macro_analysis(supabase, year: int, month: int, day: int, h
     except Exception as e:
         logger.error(f"[Scheduler] 글로벌 거시경제 분석 스케줄링 적재 실패: {e}")
 
-async def run_hourly_attractiveness_analysis():
+async def get_google_access_token(client_id: str, client_secret: str, refresh_token: str) -> str:
+    url = "https://oauth2.googleapis.com/token"
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token"
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, data=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["access_token"]
+
+
+async def upload_text_to_drive(filename: str, content: str, folder_id: str | None = None) -> str | None:
     """
-    매 시각 호출되는 관심종목 투자 매력도 분석/저장 메인 태스크
+    텍스트(Markdown) 내용을 구글 드라이브에 .md 파일로 업로드하고 파일 ID를 반환합니다.
     """
-    logger.info("[Scheduler] 시간별 투자 매력도 분석 스케줄러 시작")
+    import os
+    import json
+    import httpx
+    
+    client_id = os.environ.get("GOOGLE_DRIVE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_DRIVE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN")
+    
+    if not all([client_id, client_secret, refresh_token]):
+        logger.warning("[GoogleDrive] credentials(ID, Secret, Refresh Token)가 env에 설정되지 않았습니다. 업로드를 스킵합니다.")
+        return None
+        
+    try:
+        access_token = await get_google_access_token(client_id, client_secret, refresh_token)
+        
+        metadata = {
+            "name": filename,
+            "mimeType": "text/markdown"
+        }
+        if folder_id:
+            metadata["parents"] = [folder_id]
+            
+        files = {
+            "metadata": (None, json.dumps(metadata), "application/json; charset=UTF-8"),
+            "file": (filename, content, "text/markdown")
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}"
+        }
+        
+        url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink"
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, files=files)
+            resp.raise_for_status()
+            res_data = resp.json()
+            logger.info(f"[GoogleDrive] 파일 업로드 완료: {filename} (ID: {res_data.get('id')})")
+            return res_data.get("id")
+    except Exception as e:
+        logger.error(f"[GoogleDrive] 파일 업로드 중 오류 발생: {e}")
+        return None
+
+
+async def run_daily_attractiveness_analysis():
+    """
+    매일 새벽 KST에 시작되어 지수 구성종목을 순회 분석하는 일별 투자 매력도 스케줄러
+    """
+    logger.info("[Scheduler] 일별 투자 매력도 분석 스케줄러 시작")
     
     # 1. Supabase 인증 정보 획득
     url, key = auth_service.get_supabase_env()
@@ -203,31 +266,41 @@ async def run_hourly_attractiveness_analysis():
         
     supabase = create_client(url, key)
     
-    # 한국 시간(KST) 기준 년/월/일/시 획득
+    # 한국 시간(KST) 기준 년/월/일 획득
     kst = pytz.timezone("Asia/Seoul")
     now_kst = datetime.now(kst)
     year = now_kst.year
     month = now_kst.month
     day = now_kst.day
-    hour = now_kst.hour
     
-    # A. 글로벌 거시경제 분석 우선 실행 및 적재
-    await run_hourly_macro_analysis(supabase, year, month, day, hour)
+    # A. 글로벌 거시경제 분석 우선 실행 및 적재 (매일 1회 실행)
+    await run_hourly_macro_analysis(supabase, year, month, day, now_kst.hour)
     
-    # 2. 실시간 매매 대상 관심종목 (is_active = true) 목록 조회
-    try:
-        res = supabase.table("realtime_trading").select("ticker").eq("is_active", True).execute()
-        rows = res.data or []
-    except Exception as e:
-        logger.error(f"[Scheduler] 활성 관심종목 조회 실패: {e}")
-        return
-        
-    tickers = sorted(list(set(row.get("ticker").upper().strip() for row in rows if row.get("ticker"))))
+    # 2. 지수 그룹별 종목 리스트 수집 및 통합 (sp500, qqq, kospi200, kosdaq150, krx300)
+    from services.data_collector import fetch_tickers_for_group
+    
+    groups = ["sp500", "qqq", "kospi200", "kosdaq150", "krx300"]
+    all_tickers_set = set()
+    
+    for g in groups:
+        try:
+            tickers_in_group = await fetch_tickers_for_group(g)
+            for t in tickers_in_group:
+                clean_t = str(t or "").upper().strip()
+                if clean_t:
+                    all_tickers_set.add(clean_t)
+        except Exception as e:
+            logger.error(f"[Scheduler] 지수 그룹 {g} 수집 실패: {e}")
+            
+    tickers = sorted(list(all_tickers_set))
     if not tickers:
-        logger.info("[Scheduler] 활성 관심종목이 없어 스케줄 작업을 종료합니다.")
+        logger.info("[Scheduler] 분석 대상 종목이 없어 작업을 종료합니다.")
         return
         
-    logger.info(f"[Scheduler] 분석 대상 관심종목 ({len(tickers)}개): {tickers}")
+    logger.info(f"[Scheduler] 총 분석 대상 종목 ({len(tickers)}개): {tickers}")
+    
+    import os
+    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
     
     # 3. 1분 간격으로 종목마다 순차 분석 실행
     for idx, ticker in enumerate(tickers):
@@ -235,7 +308,7 @@ async def run_hourly_attractiveness_analysis():
             logger.info(f"[Scheduler] 다음 분석 전 60초 대기 중... ({idx}/{len(tickers)})")
             await asyncio.sleep(60)
             
-        logger.info(f"[Scheduler] [{ticker}] AI 종합 분석 시작 ({year}-{month:02d}-{day:02d} {hour:02d}시)")
+        logger.info(f"[Scheduler] [{ticker}] AI 종합 분석 시작 ({year}-{month:02d}-{day:02d})")
         
         success = False
         max_retries = 3
@@ -251,27 +324,27 @@ async def run_hourly_attractiveness_analysis():
                 if score is None:
                     raise Exception("보고서 본문에서 매력도 점수를 추출하지 못했습니다.")
                     
-                # 3줄 요약 핵심 근거 추출
-                reason = extract_reason(report)
-                    
+                # 구글 드라이브에 마크다운 보고서 파일 업로드
+                filename = f"report_{ticker}_{year}{month:02d}{day:02d}.md"
+                drive_file_id = await upload_text_to_drive(filename, report, folder_id)
+                
                 # DB 저장 (upsert)
                 payload = {
                     "year": year,
                     "month": month,
                     "day": day,
-                    "hour": hour,
                     "ticker": ticker,
                     "attractiveness": score,
-                    "reason": reason
+                    "reason_link": drive_file_id
                 }
                 
                 # Supabase upsert 호출 (unique 제약 조건에 의해 충돌 시 업데이트됨)
                 supabase.table("ticker_attractiveness").upsert(
                     payload,
-                    on_conflict="year,month,day,hour,ticker"
+                    on_conflict="year,month,day,ticker"
                 ).execute()
                 
-                logger.info(f"[Scheduler] [{ticker}] 분석 및 저장 완료: {score}점")
+                logger.info(f"[Scheduler] [{ticker}] 분석 및 저장 완료: {score}점, 드라이브 ID: {drive_file_id}")
                 success = True
                 break
                 
@@ -284,4 +357,4 @@ async def run_hourly_attractiveness_analysis():
         if not success:
             logger.error(f"[Scheduler] [{ticker}] {max_retries}회 재시도 모두 실패")
             
-    logger.info("[Scheduler] 시간별 투자 매력도 분석 스케줄러 완료")
+    logger.info("[Scheduler] 일별 투자 매력도 분석 스케줄러 완료")

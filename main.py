@@ -112,19 +112,20 @@ async def lifespan(app: FastAPI):
     result = await reschedule_from_settings()
     logger.info(f"[Scheduler] 자동매매 스케줄러 시작: {result['schedule']}")
 
-    # ── 시간별 투자 매력도 스케줄러 등록 ────────────────
+    # ── 일별 투자 매력도 스케줄러 등록 ────────────────
     try:
-        from services.attractiveness_scheduler import run_hourly_attractiveness_analysis
-        scheduler.add_job(
-            run_hourly_attractiveness_analysis,
-            CronTrigger(
-                minute=0,
-                timezone="Asia/Seoul",
-            ),
-            id="hourly_attractiveness",
-            replace_existing=True,
-        )
-        logger.info("[Scheduler] 시간별 투자 매력도 스케줄 등록 완료 (매시 정각 KST)")
+         from services.attractiveness_scheduler import run_daily_attractiveness_analysis
+         scheduler.add_job(
+             run_daily_attractiveness_analysis,
+             CronTrigger(
+                 hour=1,
+                 minute=0,
+                 timezone="Asia/Seoul",
+             ),
+             id="daily_attractiveness",
+             replace_existing=True,
+         )
+         logger.info("[Scheduler] 일별 투자 매력도 스케줄 등록 완료 (매일 KST 새벽 1시 정각)")
     except Exception as e:
         logger.error(f"[Scheduler] 시간별 투자 매력도 스케줄 등록 실패: {e}")
 

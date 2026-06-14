@@ -89,6 +89,8 @@ async def fetch_tickers_for_group(group_key: str) -> list[str]:
         return await _fetch_kospi200()
     elif group_key == "kosdaq150":
         return await _fetch_kosdaq150()
+    elif group_key == "krx300":
+        return await _fetch_krx300()
     elif group_key == "indices":
         return ["^GSPC", "^NDX", "^IXIC", "^DJI", "^RUT", "^VIX"]
     else:
@@ -199,7 +201,44 @@ async def _fetch_usall() -> list[str]:
     return tickers
 
 
+async def _fetch_naver_index_stocks(index_code: str) -> list[str]:
+    """
+    네이버 증권 모바일 API를 사용하여 특정 지수의 구성 종목 목록을 페이지네이션 순회하여 긁어옵니다.
+    index_code 예시: KPI200 (코스피 200), KOSDAQ150 (코스닥 150), KRX300 (KRX 300)
+    """
+    tickers = []
+    page = 1
+    async with httpx.AsyncClient(timeout=15) as client:
+        while page <= 25:
+            url = f"https://m.stock.naver.com/api/index/{index_code}/enrollStocks?page={page}"
+            try:
+                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                stocks = data.get("stocks") or []
+                if not stocks:
+                    break
+                for s in stocks:
+                    item_code = s.get("itemCode")
+                    if item_code and item_code.isdigit() and len(item_code) == 6:
+                        tickers.append(item_code)
+                page += 1
+            except Exception as e:
+                logger.warning(f"[NaverIndex] {index_code} page {page} 수집 중 오류: {e}")
+                break
+    return tickers
+
+
 async def _fetch_kospi200() -> list[str]:
+    # 1. 네이버 API 우선 시도
+    tickers = await _fetch_naver_index_stocks("KPI200")
+    if tickers:
+        logger.info(f"[KOSPI200] 네이버 API를 통해 {len(tickers)}개 종목 수집 성공")
+        return tickers
+
+    # 2. 실패 시 위키백과 폴백
+    logger.info("[KOSPI200] 네이버 API 실패로 위키백과 폴백 작동")
     url = "https://ko.wikipedia.org/wiki/%EC%BD%94%EC%8A%A4%ED%94%BC_200"
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -217,12 +256,20 @@ async def _fetch_kospi200() -> list[str]:
                     if re.match(r"^\d{6}$", ticker):
                         tickers.append(ticker)
             break
-    logger.info(f"[KOSPI200] {len(tickers)}개 종목 로드")
+    logger.info(f"[KOSPI200] 위키백과 폴백 결과 {len(tickers)}개 종목 로드")
     return tickers
 
 
 async def _fetch_kosdaq150() -> list[str]:
-    """KOSDAQ 150 지수 구성 종목 (한국 증권거래소 중형주)"""
+    """KOSDAQ 150 지수 구성 종목"""
+    # 1. 네이버 API 우선 시도
+    tickers = await _fetch_naver_index_stocks("KOSDAQ150")
+    if tickers:
+        logger.info(f"[KOSDAQ150] 네이버 API를 통해 {len(tickers)}개 종목 수집 성공")
+        return tickers
+
+    # 2. 실패 시 위키백과 폴백
+    logger.info("[KOSDAQ150] 네이버 API 실패로 위키백과 폴백 작동")
     url = "https://ko.wikipedia.org/wiki/%EC%BD%94%EC%8A%A4%EB%8B%A5_150"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -233,25 +280,29 @@ async def _fetch_kosdaq150() -> list[str]:
         soup = BeautifulSoup(resp.text, "html.parser")
         tickers = []
         for table in soup.find_all("table", class_="wikitable"):
-            # KOSDAQ 150 테이블 찾기 (테이블에 특정 내용 포함 여부 확인)
             if "종목명" in table.text or "코드" in table.text:
                 tbody = table.find("tbody")
                 if tbody:
                     for row in tbody.find_all("tr"):
                         cols = row.find_all("td")
                         if len(cols) >= 2:
-                            # 보통 첫 또는 두 번째 컬럼이 종목 코드
                             ticker = cols[0].text.strip() if cols else ""
                             if not ticker:
                                 ticker = cols[1].text.strip() if len(cols) > 1 else ""
-                            # 6자리 숫자 코드만 사용
                             if re.match(r"^\d{6}$", ticker):
                                 tickers.append(ticker)
-        logger.info(f"[KOSDAQ150] {len(tickers)}개 종목 로드")
+        logger.info(f"[KOSDAQ150] 위키백과 폴백 결과 {len(tickers)}개 종목 로드")
         return tickers
     except Exception as e:
         logger.warning(f"[KOSDAQ150] 자동 수집 실패: {e} - 빈 목록 반환")
         return []
+
+
+async def _fetch_krx300() -> list[str]:
+    """KRX 300 지수 구성 종목 (네이버 API 전용)"""
+    tickers = await _fetch_naver_index_stocks("KRX300")
+    logger.info(f"[KRX300] 네이버 API를 통해 {len(tickers)}개 종목 수집 완료")
+    return tickers
 
 
 # ── Yahoo Finance 히스토리 수집 ───────────────────────────────

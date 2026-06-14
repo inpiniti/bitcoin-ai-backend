@@ -87,9 +87,53 @@ async def analyze_macro():
 @router.post("/trigger-scheduled-attractiveness")
 async def trigger_scheduled_attractiveness(background_tasks: BackgroundTasks):
     """
-    시간별 관심 종목 투자 매력도 분석 스케줄러를 즉시 백그라운드에서 실행합니다.
+    일별 관심 종목 투자 매력도 분석 스케줄러를 즉시 백그라운드에서 실행합니다.
     """
-    from services.attractiveness_scheduler import run_hourly_attractiveness_analysis
-    background_tasks.add_task(run_hourly_attractiveness_analysis)
-    return {"status": "triggered", "message": "시간별 투자 매력도 분석 작업이 백그라운드에서 시작되었습니다."}
+    from services.attractiveness_scheduler import run_daily_attractiveness_analysis
+    background_tasks.add_task(run_daily_attractiveness_analysis)
+    return {"status": "triggered", "message": "일별 투자 매력도 분석 작업이 백그라운드에서 시작되었습니다."}
+
+@router.get("/report-content/{file_id}")
+async def get_report_content(file_id: str):
+    """
+    구글 드라이브 파일 ID를 사용하여 마크다운 리포트 본문 내용을 텍스트 형식으로 다운로드하여 반환합니다.
+    """
+    from services.attractiveness_scheduler import get_google_access_token
+    import os
+    import httpx
+    
+    client_id = os.environ.get("GOOGLE_DRIVE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_DRIVE_CLIENT_SECRET")
+    refresh_token = os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN")
+    
+    if not all([client_id, client_secret, refresh_token]):
+        raise HTTPException(status_code=500, detail="Google Drive credentials are not configured in environment variables.")
+        
+    try:
+        access_token = await get_google_access_token(client_id, client_secret, refresh_token)
+        headers = {
+            "Authorization": f"Bearer {access_token}"
+        }
+        url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return {"status": "ok", "content": resp.text}
+    except Exception as e:
+        logger.error(f"[RouterReport] Google Drive download failed for file {file_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch report content: {str(e)}")
+
+@router.get("/tickers/{group_key}")
+async def get_tickers_by_group(group_key: str):
+    """
+    특정 지수 그룹(sp500, qqq, kospi200, kosdaq150, krx300)의 구성 종목 티커 리스트를 반환합니다.
+    """
+    from services.data_collector import fetch_tickers_for_group
+    try:
+        tickers = await fetch_tickers_for_group(group_key)
+        return {"status": "ok", "group": group_key, "tickers": tickers}
+    except Exception as e:
+        logger.error(f"[RouterReport] Tickers fetch failed for group {group_key}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
