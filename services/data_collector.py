@@ -337,14 +337,24 @@ async def fetch_stock_history_yf(ticker: str, days: int) -> list[dict]:
     try:
         import yfinance as yf
         import pandas as pd
+        import requests
+        import ssl
 
+        ssl._create_default_https_context = ssl._create_unverified_context
         period = _days_to_yf_period(days)
 
         # yfinance는 동기 라이브러리이므로 executor에서 실행
         loop = asyncio.get_event_loop()
 
         def _download():
-            tkr = yf.Ticker(ticker)
+            session = requests.Session()
+            session.verify = False
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            })
+            tkr = yf.Ticker(ticker, session=session)
             # max 미지원 종목(워런트 등)은 5y → 2y → 1y 순으로 폴백
             fallback_periods = [period] if period != "max" else ["max", "5y", "2y", "1y"]
             for p in fallback_periods:
@@ -385,6 +395,10 @@ def _fetch_52w_prices_bulk(tickers: list[str]) -> dict[str, dict]:
     import yfinance as yf
     import pandas as pd
     import time
+    import requests
+    import ssl
+    
+    ssl._create_default_https_context = ssl._create_unverified_context
     
     yf_tickers = []
     ticker_map = {}
@@ -405,8 +419,15 @@ def _fetch_52w_prices_bulk(tickers: list[str]) -> dict[str, dict]:
         
     prices_map = {}
     try:
+        session = requests.Session()
+        session.verify = False
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        })
         # 52주(1년)간의 종가 데이터를 벌크 다운로드
-        data = yf.download(yf_tickers, period="1y", group_by="ticker", progress=False)
+        data = yf.download(yf_tickers, period="1y", group_by="ticker", progress=False, session=session)
         if data is None or data.empty:
             return {}
             
@@ -620,13 +641,25 @@ async def collect_and_train_data(
         def _batch_download(batch_tickers, period):
             import yfinance as yf
             import pandas as pd
+            import requests
+            import ssl
+            
+            ssl._create_default_https_context = ssl._create_unverified_context
             try:
+                session = requests.Session()
+                session.verify = False
+                session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                })
                 df = yf.download(
                     batch_tickers,
                     period=period,
                     auto_adjust=True,
                     progress=False,
                     threads=True,
+                    session=session,
                 )
                 if df is None or df.empty:
                     return {}
