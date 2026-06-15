@@ -268,57 +268,81 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
 
 async def fetch_company_profile_and_financials(symbol: str) -> dict:
     """
-    Yahoo Finance quoteSummary API를 활용하여 기업 프로필 및 재무 데이터를 가져옵니다 (쿠키/크럼 캐싱 적용).
+    Yahoo Finance quoteSummary API 대신 yfinance 라이브러리를 SSL 우회 및 세션 헤더 설정을 적용하여 기업 데이터를 조회합니다.
     단, 한국 주식은 네이버 금융 연동을 통해 수집하여 차단 문제를 우회합니다.
     """
     if is_korean_stock(symbol):
         return await fetch_company_profile_and_financials_naver(symbol)
 
-    global _cached_cookies, _cached_crumb
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    import requests
+    import yfinance as yf
     
-    for attempt in range(2):
-        if not _cached_crumb:
-            _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
-            
-        if not _cached_crumb:
-            logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패로 인해 조회 불가")
-            return {}
-            
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings&crumb={_cached_crumb}"
-        headers = get_headers()
+    loop = asyncio.get_event_loop()
+    
+    def _fetch():
+        session = requests.Session()
+        session.verify = False
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        })
+        ticker = yf.Ticker(symbol, session=session)
+        info = ticker.info
+        if not info or (not info.get("currentPrice") and not info.get("regularMarketPrice")):
+            # 최소한의 가격 정보마저 안 가져와진 경우
+            raise ValueError("yfinance info fetching failed or rate limited")
+        return info
+
+    try:
+        # yfinance의 동기 IO 작업을 비동기 스레드 풀에서 실행
+        info = await loop.run_in_executor(None, _fetch)
         
-        try:
-            async with httpx.AsyncClient(timeout=15, headers=headers, cookies=_cached_cookies, verify=False) as client:
-                resp = await client.get(url)
-                
-            if resp.status_code == 401:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 401 (크럼 만료). 캐시 초기화 후 재시도...")
-                _cached_cookies = None
-                _cached_crumb = None
-                continue
-                
-            if resp.status_code == 404:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 404 (존재하지 않는 심볼)")
-                return {}
-                
-            if resp.status_code != 200:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
-                await asyncio.sleep(1)
-                continue
-                
-            data = resp.json()
-            result = data.get("quoteSummary", {}).get("result")
-            if not result:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary result empty (시도 {attempt+1})")
-                await asyncio.sleep(1)
-                continue
-                
-            return result[0]
-        except Exception as e:
-            logger.error(f"[Yahoo] {symbol} quoteSummary 조회 중 에러 (시도 {attempt+1}): {e}")
-            await asyncio.sleep(1)
-            
-    return {}
+        # 기존 quoteSummary의 API 스키마 규격으로 데이터 변환 가공
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice") or 0.0
+        
+        profile = {
+            "assetProfile": {
+                "sector": info.get("sector", "N/A"),
+                "industry": info.get("industry", "N/A"),
+                "longBusinessSummary": info.get("longBusinessSummary", "정보가 제공되지 않습니다."),
+                "companyOfficers": info.get("companyOfficers", [])
+            },
+            "financialData": {
+                "currentPrice": {"raw": current_price, "fmt": f"${current_price}"},
+                "totalRevenue": {"raw": info.get("totalRevenue", 0.0)},
+                "freeCashflow": {"raw": info.get("freeCashflow", 0.0)},
+                "operatingMargins": {"raw": info.get("operatingMargins", 0.0)},
+                "returnOnEquity": {"raw": info.get("returnOnEquity", 0.0)},
+                "debtToEquity": {"raw": info.get("debtToEquity", 0.0)},
+                "revenueGrowth": {"raw": info.get("revenueGrowth", 0.0)},
+                "grossProfits": {"raw": info.get("grossProfits", 0.0)},
+                "ebitda": {"raw": info.get("ebitda", 0.0)},
+                "profitMargins": {"raw": info.get("profitMargins", 0.0)}
+            },
+            "defaultKeyStatistics": {
+                "forwardPE": {"raw": info.get("forwardPE", 0.0)},
+                "pegRatio": {"raw": info.get("pegRatio", 0.0)},
+                "trailingEps": {"raw": info.get("trailingEps", 0.0)},
+                "enterpriseToRevenue": {"raw": info.get("enterpriseToRevenue", 0.0)},
+                "enterpriseToEbitda": {"raw": info.get("enterpriseToEbitda", 0.0)},
+                "beta": {"raw": info.get("beta", 0.0)}
+            },
+            "summaryDetail": {
+                "fiftyTwoWeekLow": {"raw": info.get("fiftyTwoWeekLow", 0.0)},
+                "fiftyTwoWeekHigh": {"raw": info.get("fiftyTwoWeekHigh", 0.0)},
+                "marketCap": {"raw": info.get("marketCap", 0.0)},
+                "trailingPE": {"raw": info.get("trailingPE", 0.0)}
+            },
+            "earnings": {}
+        }
+        logger.info(f"[Yahoo-yfinance] {symbol} 데이터 바인딩 완료")
+        return profile
+    except Exception as e:
+        logger.error(f"[Yahoo-yfinance] {symbol} 데이터 수집 중 오류: {e}")
+        return {}
 
 async def fetch_company_news(symbol: str) -> list[dict]:
     """
