@@ -162,13 +162,25 @@ async def get_report_content(file_id: str):
 @router.get("/tickers/{group_key}")
 async def get_tickers_by_group(group_key: str):
     """
-    특정 지수 그룹(sp500, qqq, kospi200, kosdaq150, krx300)의 구성 종목 티커 리스트를 반환합니다.
+    특정 지수 그룹(sp500, qqq, kospi200, kosdaq150, krx300)의 구성 종목 티커 리스트와 종목명 매핑을 반환합니다.
     """
-    from services.data_collector import fetch_tickers_for_group
+    from services.data_collector import fetch_tickers_for_group, get_ticker_name_map
     try:
         tickers = await fetch_tickers_for_group(group_key)
-        return {"status": "ok", "group": group_key, "tickers": tickers}
+        all_names = get_ticker_name_map()
+        
+        # 현재 수집된 티커들에 대한 매핑 정보만 추출하여 반환
+        group_names = {t: all_names[t] for t in tickers if t in all_names}
+        
+        return {
+            "status": "ok", 
+            "group": group_key, 
+            "tickers": tickers,
+            "names": group_names
+        }
     except Exception as e:
         logger.error(f"[RouterReport] Tickers fetch failed for group {group_key}: {e}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("router_get_tickers_by_group", e, {"group_key": group_key})
         raise HTTPException(status_code=500, detail=str(e))
 

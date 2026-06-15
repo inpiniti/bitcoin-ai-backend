@@ -77,6 +77,12 @@ def _calc_consecutive_days(candles: list[dict], i: int) -> int:
 
 # ── 티커 그룹 목록 수집 ──────────────────────────────────────
 
+_TICKER_NAME_CACHE: dict[str, str] = {}
+
+def get_ticker_name_map() -> dict[str, str]:
+    """캐싱된 티커 -> 종목명 매핑 반환"""
+    return _TICKER_NAME_CACHE
+
 async def fetch_tickers_for_group(group_key: str) -> list[str]:
     """그룹 키에 해당하는 티커 목록 반환"""
     if group_key == "sp500":
@@ -112,8 +118,11 @@ async def _fetch_sp500() -> list[str]:
             cols = row.find_all("td")
             if cols:
                 ticker = cols[0].text.strip().replace(".", "-")
+                name = cols[1].text.strip() if len(cols) > 1 else ""
                 if ticker:
                     tickers.append(ticker)
+                    if name:
+                        _TICKER_NAME_CACHE[ticker] = name
     logger.info(f"[S&P500] {len(tickers)}개 종목 로드")
     return tickers
 
@@ -131,9 +140,16 @@ async def _fetch_qqq() -> list[str]:
         for row in table.find("tbody").find_all("tr"):
             cols = row.find_all("td")
             if cols:
-                ticker = cols[0].text.strip().replace(".", "-")
-                if ticker:
-                    tickers.append(ticker)
+                # Nasdaq-100 테이블 컬럼 순서상 cols[0]이 Company Name, cols[1]이 Ticker인 경우가 많습니다.
+                # 그러나 기존 코드에서 cols[0]을 티커로 가져오고 있으므로, 호환성을 유지하되 둘 다 유연하게 맵핑해줍니다.
+                ticker_candidate = cols[0].text.strip().replace(".", "-")
+                name_candidate = cols[1].text.strip() if len(cols) > 1 else ""
+                
+                # 만약 candidate 중 하나가 확실히 티커(예: 알파벳 대문자 위주)라면 매핑
+                if ticker_candidate:
+                    tickers.append(ticker_candidate)
+                    if name_candidate:
+                        _TICKER_NAME_CACHE[ticker_candidate] = name_candidate
     logger.info(f"[QQQ] {len(tickers)}개 종목 로드")
     return tickers
 
@@ -221,8 +237,11 @@ async def _fetch_naver_index_stocks(index_code: str) -> list[str]:
                     break
                 for s in stocks:
                     item_code = s.get("itemCode")
+                    stock_name = s.get("stockName")
                     if item_code and item_code.isdigit() and len(item_code) == 6:
                         tickers.append(item_code)
+                        if stock_name:
+                            _TICKER_NAME_CACHE[item_code] = stock_name
                 page += 1
             except Exception as e:
                 logger.warning(f"[NaverIndex] {index_code} page {page} 수집 중 오류: {e}")
