@@ -391,7 +391,8 @@ async def fetch_stock_history_yf(ticker: str, days: int) -> list[dict]:
 # ── 52주 최고가 및 현재가 벌크 수집 및 캐싱 ──────────────────────
 
 def _fetch_52w_prices_bulk(tickers: list[str]) -> dict[str, dict]:
-    """yfinance를 사용하여 여러 티커의 52주 최고가 및 현재가를 벌크 조회합니다."""
+    """TradingView Screener API를 활용하여 여러 티커의 52주 최고가 및 현재가를 벌크 조회하고,
+    TradingView에서 누락된 주식은 yfinance 우회 세션으로 보완합니다."""
     import yfinance as yf
     import pandas as pd
     import time
@@ -400,72 +401,161 @@ def _fetch_52w_prices_bulk(tickers: list[str]) -> dict[str, dict]:
     
     ssl._create_default_https_context = ssl._create_unverified_context
     
-    yf_tickers = []
-    ticker_map = {}
+    us_tickers = []
+    kr_tickers = []
+    
     for t in tickers:
         t_upper = t.upper().strip()
         if t_upper.isdigit() and len(t_upper) == 6:
-            yf_t_ks = f"{t_upper}.KS"
-            yf_t_kq = f"{t_upper}.KQ"
-            yf_tickers.extend([yf_t_ks, yf_t_kq])
-            ticker_map[yf_t_ks] = t_upper
-            ticker_map[yf_t_kq] = t_upper
+            kr_tickers.append(t_upper)
         else:
-            yf_tickers.append(t_upper)
-            ticker_map[t_upper] = t_upper
+            us_tickers.append(t_upper)
             
-    if not yf_tickers:
-        return {}
-        
     prices_map = {}
-    try:
-        session = requests.Session()
-        session.verify = False
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-        })
-        # 52주(1년)간의 종가 데이터를 벌크 다운로드
-        data = yf.download(yf_tickers, period="1y", group_by="ticker", progress=False, session=session)
-        if data is None or data.empty:
-            return {}
+    
+    # 1. TradingView 미국 주식 벌크 조회
+    if us_tickers:
+        try:
+            url_us = "https://scanner.tradingview.com/america/scan"
+            payload_us = {
+                "filter": [],
+                "options": { "lang": "en" },
+                "markets": ["america"],
+                "symbols": {
+                    "tickers": [f"NASDAQ:{t}" for t in us_tickers] +
+                               [f"NYSE:{t}" for t in us_tickers] +
+                               [f"AMEX:{t}" for t in us_tickers]
+                },
+                "columns": ["close", "price_52_week_high"],
+                "sort": { "sortBy": "market_cap_basic", "sortOrder": "desc" },
+                "range": [0, len(us_tickers) * 3]
+            }
+            resp = requests.post(url_us, json=payload_us, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                for item in data:
+                    s_parts = item.get("s", "").split(":")
+                    if len(s_parts) == 2:
+                        _, ticker = s_parts
+                        ticker = ticker.upper()
+                        vals = item.get("d", [])
+                        if len(vals) >= 2:
+                            current = float(vals[0]) if vals[0] is not None else 0.0
+                            high52 = float(vals[1]) if vals[1] is not None else 0.0
+                            if current > 0 and high52 > 0:
+                                prices_map[ticker] = {
+                                    "high52": high52,
+                                    "current": current,
+                                    "updated_at": time.time()
+                                }
+                logger.info(f"[PriceCollector] TradingView US bulk fetch: {len(prices_map)} tickers resolved")
+        except Exception as e:
+            logger.error(f"[PriceCollector] TradingView US bulk fetch failed: {e}")
             
-        for yf_t in yf_tickers:
+    # 2. TradingView 한국 주식 벌크 조회
+    if kr_tickers:
+        try:
+            url_kr = "https://scanner.tradingview.com/korea/scan"
+            payload_kr = {
+                "filter": [],
+                "options": { "lang": "en" },
+                "markets": ["korea"],
+                "symbols": {
+                    "tickers": [f"KRX:{t}" for t in kr_tickers]
+                },
+                "columns": ["close", "price_52_week_high"],
+                "sort": { "sortBy": "market_cap_basic", "sortOrder": "desc" },
+                "range": [0, len(kr_tickers)]
+            }
+            resp = requests.post(url_kr, json=payload_kr, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                for item in data:
+                    s_parts = item.get("s", "").split(":")
+                    if len(s_parts) == 2:
+                        _, ticker = s_parts
+                        ticker = ticker.upper()
+                        vals = item.get("d", [])
+                        if len(vals) >= 2:
+                            current = float(vals[0]) if vals[0] is not None else 0.0
+                            high52 = float(vals[1]) if vals[1] is not None else 0.0
+                            if current > 0 and high52 > 0:
+                                prices_map[ticker] = {
+                                    "high52": high52,
+                                    "current": current,
+                                    "updated_at": time.time()
+                                }
+                logger.info(f"[PriceCollector] TradingView KR bulk fetch: {len(prices_map) - len([k for k in prices_map if k not in kr_tickers])} tickers resolved")
+        except Exception as e:
+            logger.error(f"[PriceCollector] TradingView KR bulk fetch failed: {e}")
+
+    # 3. TradingView에서 누락된 주식들 식별하여 yfinance 폴백으로 보완
+    missing_tickers = [t for t in tickers if t.upper().strip() not in prices_map]
+    if missing_tickers:
+        logger.info(f"[PriceCollector] TradingView missed {len(missing_tickers)} tickers. Falling back to yfinance session bypass...")
+        yf_tickers = []
+        ticker_map = {}
+        for t in missing_tickers:
+            t_upper = t.upper().strip()
+            if t_upper.isdigit() and len(t_upper) == 6:
+                yf_t_ks = f"{t_upper}.KS"
+                yf_t_kq = f"{t_upper}.KQ"
+                yf_tickers.extend([yf_t_ks, yf_t_kq])
+                ticker_map[yf_t_ks] = t_upper
+                ticker_map[yf_t_kq] = t_upper
+            else:
+                yf_tickers.append(t_upper)
+                ticker_map[t_upper] = t_upper
+                
+        if yf_tickers:
             try:
-                orig_t = ticker_map[yf_t]
-                if len(yf_tickers) > 1:
-                    if yf_t not in data.columns.levels[0]:
-                        continue
-                    ticker_data = data[yf_t]
-                else:
-                    ticker_data = data
-                    
-                if ticker_data.empty:
-                    continue
-                    
-                close_series = ticker_data["Close"].dropna()
-                high_series = ticker_data["High"].dropna()
+                session = requests.Session()
+                session.verify = False
+                session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                })
+                # 52주(1년)간의 종가 데이터를 벌크 다운로드
+                data = yf.download(yf_tickers, period="1y", group_by="ticker", progress=False, session=session)
+                if data is not None and not data.empty:
+                    for yf_t in yf_tickers:
+                        try:
+                            orig_t = ticker_map[yf_t]
+                            if len(yf_tickers) > 1:
+                                if yf_t not in data.columns.levels[0]:
+                                    continue
+                                ticker_data = data[yf_t]
+                            else:
+                                ticker_data = data
+                                
+                            if ticker_data.empty:
+                                continue
+                                
+                            close_series = ticker_data["Close"].dropna()
+                            high_series = ticker_data["High"].dropna()
+                            
+                            if close_series.empty or high_series.empty:
+                                continue
+                                
+                            high52 = float(high_series.max())
+                            current = float(close_series.iloc[-1])
+                            
+                            if high52 > 0:
+                                # 중복된 한국 주식 중 정상인 것 우선순위 (KS가 KQ보다 우선)
+                                if orig_t in prices_map and yf_t.endswith(".KQ") and prices_map[orig_t]["high52"] > 0:
+                                    continue
+                                prices_map[orig_t] = {
+                                    "high52": high52,
+                                    "current": current,
+                                    "updated_at": time.time()
+                                }
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.error(f"[PriceCollector] Fallback bulk price download failed: {e}")
                 
-                if close_series.empty or high_series.empty:
-                    continue
-                    
-                high52 = float(high_series.max())
-                current = float(close_series.iloc[-1])
-                
-                if high52 > 0:
-                    # 중복된 한국 주식 중 정상인 것 우선순위 (KS가 KQ보다 우선)
-                    if orig_t in prices_map and yf_t.endswith(".KQ") and prices_map[orig_t]["high52"] > 0:
-                        continue
-                    prices_map[orig_t] = {
-                        "high52": high52,
-                        "current": current,
-                        "updated_at": time.time()
-                    }
-            except Exception:
-                continue
-    except Exception as e:
-        logger.error(f"[PriceCollector] Bulk price download failed: {e}")
+    return prices_map
         
     return prices_map
 
