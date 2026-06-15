@@ -3,6 +3,7 @@ import logging
 import re
 from datetime import datetime
 import pytz
+import httpx
 from supabase import create_client
 from services import auth_service
 from services.company_analysis_service import run_company_analysis
