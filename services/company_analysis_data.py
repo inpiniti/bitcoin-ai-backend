@@ -266,15 +266,133 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
     logger.info(f"[Naver] {symbol} ({stock_name}) 데이터 바인딩 완료")
     return profile
 
+async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
+    """
+    네이버 금융 API를 사용하여 미국(해외) 주식의 상세 정보를 조회하고 기존 야후 파이낸스 스키마로 변환합니다.
+    """
+    symbol_upper = symbol.upper().strip()
+    candidates = [symbol_upper] if "." in symbol_upper else [f"{symbol_upper}.O", f"{symbol_upper}.N", f"{symbol_upper}.K"]
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://m.stock.naver.com/",
+    }
+    
+    basic_data = None
+    integration_data = None
+    resolved_symbol = None
+    
+    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+        for cand in candidates:
+            basic_url = f"https://api.stock.naver.com/stock/{cand}/basic"
+            try:
+                resp = await client.get(basic_url, headers=headers)
+                if resp.status_code == 200:
+                    basic_data = resp.json()
+                    resolved_symbol = cand
+                    break
+            except Exception as e:
+                logger.warning(f"[NaverUS] Basic API failed for {cand}: {e}")
+                
+        if not basic_data or not resolved_symbol:
+            logger.warning(f"[NaverUS] Could not resolve basic data for US symbol: {symbol}")
+            return {}
+            
+        integration_url = f"https://api.stock.naver.com/stock/{resolved_symbol}/integration"
+        try:
+            resp_int = await client.get(integration_url, headers=headers)
+            if resp_int.status_code == 200:
+                integration_data = resp_int.json()
+        except Exception as e:
+            logger.warning(f"[NaverUS] Integration API failed for {resolved_symbol}: {e}")
+
+    # 데이터 추출 및 기존 스키마 매핑
+    stock_name = basic_data.get("stockName", symbol)
+    stock_exchange = basic_data.get("stockExchangeName", "US")
+    current_price_str = basic_data.get("closePrice", "0")
+    current_price = clean_float(current_price_str)
+    
+    # stockItemTotalInfos 파싱
+    total_infos = basic_data.get("stockItemTotalInfos", [])
+    info_map = {item.get("code"): item.get("value") for item in total_infos if item.get("code")}
+    
+    low_52_str = info_map.get("lowPriceOf52Weeks", "N/A")
+    high_52_str = info_map.get("highPriceOf52Weeks", "N/A")
+    low_52 = clean_float(low_52_str)
+    high_52 = clean_float(high_52_str)
+    
+    # 시가총액 파싱: "2조 4,060억 USD"
+    market_cap_str = info_map.get("marketValue", "N/A")
+    market_cap_num = 0.0
+    try:
+        clean_cap = market_cap_str.replace(" USD", "").strip()
+        market_cap_num = parse_market_cap(clean_cap)
+    except Exception:
+        pass
+        
+    per_str = info_map.get("per", "N/A")
+    eps_str = info_map.get("eps", "N/A")
+    pbr_str = info_map.get("pbr", "N/A")
+    bps_str = info_map.get("bps", "N/A")
+    
+    # integration 데이터에서 기업 개요 및 기타 재무 지표 추출
+    business_summary = "정보가 제공되지 않습니다."
+    if integration_data:
+        business_summary = integration_data.get("corporateOverview", business_summary)
+        
+    profile = {
+        "assetProfile": {
+            "sector": basic_data.get("industryCodeType", {}).get("industryGroupKor", "US Stock"),
+            "industry": stock_exchange,
+            "longBusinessSummary": business_summary,
+            "companyOfficers": [{"name": f"{stock_name} Management"}]
+        },
+        "financialData": {
+            "currentPrice": {"raw": current_price, "fmt": f"${current_price_str}"},
+            "totalRevenue": {"raw": 0, "fmt": "N/A"},
+            "freeCashflow": {"raw": 0, "fmt": "N/A"},
+            "operatingMargins": {"raw": 0, "fmt": "N/A"},
+            "returnOnEquity": {"raw": 0, "fmt": "N/A"},
+            "debtToEquity": {"raw": 0, "fmt": "N/A"},
+            "revenueGrowth": {"raw": 0, "fmt": "N/A"},
+            "grossProfits": {"raw": 0, "fmt": "N/A"},
+            "ebitda": {"raw": 0, "fmt": "N/A"},
+            "profitMargins": {"raw": 0, "fmt": "N/A"}
+        },
+        "defaultKeyStatistics": {
+            "forwardPE": {"raw": clean_float(per_str), "fmt": f"{per_str}"},
+            "pegRatio": {"raw": 0, "fmt": "N/A"},
+            "trailingEps": {"raw": clean_float(eps_str), "fmt": f"{eps_str}"},
+            "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
+            "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
+            "beta": {"raw": 0, "fmt": "N/A"}
+        },
+        "summaryDetail": {
+            "fiftyTwoWeekLow": {"raw": low_52, "fmt": low_52_str},
+            "fiftyTwoWeekHigh": {"raw": high_52, "fmt": high_52_str},
+            "marketCap": {"raw": market_cap_num, "fmt": market_cap_str},
+            "trailingPE": {"raw": clean_float(per_str), "fmt": f"{per_str}"}
+        },
+        "earnings": {}
+    }
+    logger.info(f"[NaverUS] {symbol} ({stock_name}) 데이터 바인딩 완료")
+    return profile
+
 async def fetch_company_profile_and_financials(symbol: str) -> dict:
     """
     Yahoo Finance quoteSummary API를 활용하여 기업 프로필 및 재무 데이터를 가져옵니다 (쿠키/크럼 캐싱 적용).
     단, 한국 주식은 네이버 금융 연동을 통해 수집하여 차단 문제를 우회합니다.
+    야후 파이낸스 조회가 실패하거나 429 등으로 차단될 경우, 네이버 해외 주식 API로 폴백합니다.
     """
     if is_korean_stock(symbol):
         return await fetch_company_profile_and_financials_naver(symbol)
 
     global _cached_cookies, _cached_crumb
+    
+    yahoo_success = False
+    result_profile = {}
     
     for attempt in range(2):
         if not _cached_crumb:
@@ -282,7 +400,7 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
             
         if not _cached_crumb:
             logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패로 인해 조회 불가")
-            return {}
+            break
             
         url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings&crumb={_cached_crumb}"
         headers = get_headers()
@@ -299,7 +417,7 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
                 
             if resp.status_code == 404:
                 logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 404 (존재하지 않는 심볼)")
-                return {}
+                break
                 
             if resp.status_code != 200:
                 logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
@@ -313,12 +431,19 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
                 await asyncio.sleep(1)
                 continue
                 
-            return result[0]
+            result_profile = result[0]
+            yahoo_success = True
+            break
         except Exception as e:
             logger.error(f"[Yahoo] {symbol} quoteSummary 조회 중 에러 (시도 {attempt+1}): {e}")
             await asyncio.sleep(1)
             
-    return {}
+    if yahoo_success and result_profile:
+        return result_profile
+        
+    # 야후 파이낸스 조회 실패 시 네이버 해외 주식 API로 폴백
+    logger.info(f"[Yahoo-Fallback] 야후 파이낸스 차단 또는 조회 실패로 네이버 해외 주식 API 폴백 실행: {symbol}")
+    return await fetch_company_profile_and_financials_naver_us(symbol)
 
 async def fetch_company_news(symbol: str) -> list[dict]:
     """
