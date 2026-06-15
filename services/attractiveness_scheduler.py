@@ -188,6 +188,8 @@ async def run_hourly_macro_analysis(supabase, year: int, month: int, day: int, h
         logger.info(f"[Scheduler] 글로벌 거시경제 분석 적재 완료 (주식: {stock}%, 현금: {cash}%)")
     except Exception as e:
         logger.error(f"[Scheduler] 글로벌 거시경제 분석 스케줄링 적재 실패: {e}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("macro_analysis_scheduler", e, {"year": year, "month": month, "day": day, "hour": hour})
 
 async def get_google_access_token(client_id: str, client_secret: str, refresh_token: str) -> str:
     url = "https://oauth2.googleapis.com/token"
@@ -217,7 +219,15 @@ async def upload_text_to_drive(filename: str, content: str, folder_id: str | Non
     refresh_token = os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN")
     
     if not all([client_id, client_secret, refresh_token]):
-        logger.warning("[GoogleDrive] credentials(ID, Secret, Refresh Token)가 env에 설정되지 않았습니다. 업로드를 스킵합니다.")
+        err = ValueError(
+            f"Google Drive credentials missing in environment variables. "
+            f"client_id: {'Set' if client_id else 'Missing'}, "
+            f"client_secret: {'Set' if client_secret else 'Missing'}, "
+            f"refresh_token: {'Set' if refresh_token else 'Missing'}"
+        )
+        logger.warning(f"[GoogleDrive] {err}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("google_drive_upload_init", err, {"filename": filename})
         return None
         
     try:
@@ -249,6 +259,8 @@ async def upload_text_to_drive(filename: str, content: str, folder_id: str | Non
             return res_data.get("id")
     except Exception as e:
         logger.error(f"[GoogleDrive] 파일 업로드 중 오류 발생: {e}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("google_drive_upload", e, {"filename": filename})
         return None
 
 
@@ -273,88 +285,103 @@ async def run_daily_attractiveness_analysis():
     month = now_kst.month
     day = now_kst.day
     
-    # A. 글로벌 거시경제 분석 우선 실행 및 적재 (매일 1회 실행)
-    await run_hourly_macro_analysis(supabase, year, month, day, now_kst.hour)
-    
-    # 2. 지수 그룹별 종목 리스트 수집 및 통합 (sp500, qqq, kospi200, kosdaq150, krx300)
-    from services.data_collector import fetch_tickers_for_group
-    
-    groups = ["sp500", "qqq", "kospi200", "kosdaq150", "krx300"]
-    all_tickers_set = set()
-    
-    for g in groups:
+    try:
+        # A. 글로벌 거시경제 분석 우선 실행 및 적재 (매일 1회 실행)
         try:
-            tickers_in_group = await fetch_tickers_for_group(g)
-            for t in tickers_in_group:
-                clean_t = str(t or "").upper().strip()
-                if clean_t:
-                    all_tickers_set.add(clean_t)
+            await run_hourly_macro_analysis(supabase, year, month, day, now_kst.hour)
         except Exception as e:
-            logger.error(f"[Scheduler] 지수 그룹 {g} 수집 실패: {e}")
-            
-    tickers = sorted(list(all_tickers_set))
-    if not tickers:
-        logger.info("[Scheduler] 분석 대상 종목이 없어 작업을 종료합니다.")
-        return
+            logger.error(f"[Scheduler] 글로벌 거시경제 분석 실패: {e}")
+            from services.error_log_service import log_error_to_db
+            log_error_to_db("daily_macro_analysis", e, {"year": year, "month": month, "day": day})
+
+        # 2. 지수 그룹별 종목 리스트 수집 및 통합 (sp500, qqq, kospi200, kosdaq150, krx300)
+        from services.data_collector import fetch_tickers_for_group
         
-    logger.info(f"[Scheduler] 총 분석 대상 종목 ({len(tickers)}개): {tickers}")
-    
-    import os
-    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-    
-    # 3. 1분 간격으로 종목마다 순차 분석 실행
-    for idx, ticker in enumerate(tickers):
-        if idx > 0:
-            logger.info(f"[Scheduler] 다음 분석 전 60초 대기 중... ({idx}/{len(tickers)})")
-            await asyncio.sleep(60)
-            
-        logger.info(f"[Scheduler] [{ticker}] AI 종합 분석 시작 ({year}-{month:02d}-{day:02d})")
+        groups = ["sp500", "qqq", "kospi200", "kosdaq150", "krx300"]
+        all_tickers_set = set()
         
-        success = False
-        max_retries = 3
-        for attempt in range(max_retries):
+        for g in groups:
             try:
-                # comprehensive AI 기업분석 리포트 실행
-                result = await run_company_analysis(ticker, "comprehensive")
-                if result.get("status") != "ok":
-                    raise Exception(result.get("message") or "분석 실패")
-                    
-                report = result.get("report", "")
-                score = extract_attractiveness(report)
-                if score is None:
-                    raise Exception("보고서 본문에서 매력도 점수를 추출하지 못했습니다.")
-                    
-                # 구글 드라이브에 마크다운 보고서 파일 업로드
-                filename = f"report_{ticker}_{year}{month:02d}{day:02d}.md"
-                drive_file_id = await upload_text_to_drive(filename, report, folder_id)
-                
-                # DB 저장 (upsert)
-                payload = {
-                    "year": year,
-                    "month": month,
-                    "day": day,
-                    "ticker": ticker,
-                    "attractiveness": score,
-                    "reason_link": drive_file_id
-                }
-                
-                # Supabase upsert 호출 (unique 제약 조건에 의해 충돌 시 업데이트됨)
-                supabase.table("ticker_attractiveness").upsert(
-                    payload,
-                    on_conflict="year,month,day,ticker"
-                ).execute()
-                
-                logger.info(f"[Scheduler] [{ticker}] 분석 및 저장 완료: {score}점, 드라이브 ID: {drive_file_id}")
-                success = True
-                break
-                
+                tickers_in_group = await fetch_tickers_for_group(g)
+                for t in tickers_in_group:
+                    clean_t = str(t or "").upper().strip()
+                    if clean_t:
+                        all_tickers_set.add(clean_t)
             except Exception as e:
-                logger.warning(f"[Scheduler] [{ticker}] 시도 {attempt + 1}/{max_retries} 실패: {e}")
-                if attempt < max_retries - 1:
-                    # 429 완화 및 잠시 대기 후 재시도
-                    await asyncio.sleep(5)
-                    
-        if not success:
-            logger.error(f"[Scheduler] [{ticker}] {max_retries}회 재시도 모두 실패")
+                logger.error(f"[Scheduler] 지수 그룹 {g} 수집 실패: {e}")
+                from services.error_log_service import log_error_to_db
+                log_error_to_db("daily_attractiveness_fetch_tickers", e, {"group": g})
+                
+        tickers = sorted(list(all_tickers_set))
+        if not tickers:
+            logger.info("[Scheduler] 분석 대상 종목이 없어 작업을 종료합니다.")
+            return
             
-    logger.info("[Scheduler] 일별 투자 매력도 분석 스케줄러 완료")
+        logger.info(f"[Scheduler] 총 분석 대상 종목 ({len(tickers)}개): {tickers}")
+        
+        import os
+        folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+        
+        # 3. 1분 간격으로 종목마다 순차 분석 실행
+        for idx, ticker in enumerate(tickers):
+            if idx > 0:
+                logger.info(f"[Scheduler] 다음 분석 전 60초 대기 중... ({idx}/{len(tickers)})")
+                await asyncio.sleep(60)
+                
+            logger.info(f"[Scheduler] [{ticker}] AI 종합 분석 시작 ({year}-{month:02d}-{day:02d})")
+            
+            success = False
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # comprehensive AI 기업분석 리포트 실행
+                    result = await run_company_analysis(ticker, "comprehensive")
+                    if result.get("status") != "ok":
+                        raise Exception(result.get("message") or "분석 실패")
+                        
+                    report = result.get("report", "")
+                    score = extract_attractiveness(report)
+                    if score is None:
+                        raise Exception("보고서 본문에서 매력도 점수를 추출하지 못했습니다.")
+                        
+                    # 구글 드라이브에 마크다운 보고서 파일 업로드
+                    filename = f"report_{ticker}_{year}{month:02d}{day:02d}.md"
+                    drive_file_id = await upload_text_to_drive(filename, report, folder_id)
+                    
+                    # DB 저장 (upsert)
+                    payload = {
+                        "year": year,
+                        "month": month,
+                        "day": day,
+                        "ticker": ticker,
+                        "attractiveness": score,
+                        "reason_link": drive_file_id
+                    }
+                    
+                    # Supabase upsert 호출 (unique 제약 조건에 의해 충돌 시 업데이트됨)
+                    supabase.table("ticker_attractiveness").upsert(
+                        payload,
+                        on_conflict="year,month,day,ticker"
+                    ).execute()
+                    
+                    logger.info(f"[Scheduler] [{ticker}] 분석 및 저장 완료: {score}점, 드라이브 ID: {drive_file_id}")
+                    success = True
+                    break
+                    
+                except Exception as e:
+                    logger.warning(f"[Scheduler] [{ticker}] 시도 {attempt + 1}/{max_retries} 실패: {e}")
+                    if attempt < max_retries - 1:
+                        # 429 완화 및 잠시 대기 후 재시도
+                        await asyncio.sleep(5)
+                        
+            if not success:
+                err_msg = f"[Scheduler] [{ticker}] {max_retries}회 재시도 모두 실패했습니다."
+                logger.error(err_msg)
+                from services.error_log_service import log_error_to_db
+                log_error_to_db("daily_attractiveness_loop_ticker_fail", Exception(err_msg), {"ticker": ticker, "year": year, "month": month, "day": day})
+                
+        logger.info("[Scheduler] 일별 투자 매력도 분석 스케줄러 완료")
+    except Exception as global_err:
+        logger.error(f"[Scheduler] 일별 투자 매력도 분석 스케줄러 글로벌 치명적 오류: {global_err}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("daily_attractiveness_scheduler_global", global_err, {"year": year, "month": month, "day": day})

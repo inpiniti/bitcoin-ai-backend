@@ -41,18 +41,27 @@ async def analyze_company(req: CompanyAnalysisRequest):
       - `moat`: 해자 분석 및 AI 준비도
       - `risk`: 리스크 및 경고 신호 감지
     """
-    result = await run_company_analysis(req.ticker, req.analysis_type)
-    if result.get("status") == "error":
-        raise HTTPException(status_code=500, detail=result.get("message"))
-        
-    return CompanyAnalysisResponse(
-        status=result["status"],
-        ticker=result["ticker"],
-        analysis_type=result["analysis_type"],
-        analysis_date=result["analysis_date"],
-        report=result["report"],
-        macro_data=result.get("macro_data")
-    )
+    try:
+        result = await run_company_analysis(req.ticker, req.analysis_type)
+        if result.get("status") == "error":
+            err = Exception(result.get("message") or "분석 실패")
+            from services.error_log_service import log_error_to_db
+            log_error_to_db("router_analyze_company_status_error", err, {"ticker": req.ticker, "analysis_type": req.analysis_type})
+            raise HTTPException(status_code=500, detail=result.get("message"))
+            
+        return CompanyAnalysisResponse(
+            status=result["status"],
+            ticker=result["ticker"],
+            analysis_type=result["analysis_type"],
+            analysis_date=result["analysis_date"],
+            report=result["report"],
+            macro_data=result.get("macro_data")
+        )
+    except Exception as e:
+        if not isinstance(e, HTTPException):
+            from services.error_log_service import log_error_to_db
+            log_error_to_db("router_analyze_company_exception", e, {"ticker": req.ticker, "analysis_type": req.analysis_type})
+        raise e
 
 @router.get("/macro-data")
 async def get_macro_data():
@@ -65,6 +74,8 @@ async def get_macro_data():
         return {"status": "ok", "macro_data": data}
     except Exception as e:
         logger.error(f"[CompanyAnalysis] Macro data fetching error: {e}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("router_get_macro_data", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/macro", response_model=MacroAnalysisResponse)
@@ -72,26 +83,40 @@ async def analyze_macro():
     """
     글로벌 거시경제 분석 리포트 및 자산배분 비중 가이드를 생성합니다.
     """
-    from services.company_analysis_service import run_macro_analysis
-    result = await run_macro_analysis()
-    if result.get("status") == "error":
-        raise HTTPException(status_code=500, detail=result.get("message"))
-        
-    return MacroAnalysisResponse(
-        status=result["status"],
-        analysis_date=result["analysis_date"],
-        report=result["report"],
-        macro_data=result["macro_data"]
-    )
+    try:
+        from services.company_analysis_service import run_macro_analysis
+        result = await run_macro_analysis()
+        if result.get("status") == "error":
+            err = Exception(result.get("message") or "거시경제 분석 실패")
+            from services.error_log_service import log_error_to_db
+            log_error_to_db("router_analyze_macro_status_error", err)
+            raise HTTPException(status_code=500, detail=result.get("message"))
+            
+        return MacroAnalysisResponse(
+            status=result["status"],
+            analysis_date=result["analysis_date"],
+            report=result["report"],
+            macro_data=result["macro_data"]
+        )
+    except Exception as e:
+        if not isinstance(e, HTTPException):
+            from services.error_log_service import log_error_to_db
+            log_error_to_db("router_analyze_macro_exception", e)
+        raise e
 
 @router.post("/trigger-scheduled-attractiveness")
 async def trigger_scheduled_attractiveness(background_tasks: BackgroundTasks):
     """
     일별 관심 종목 투자 매력도 분석 스케줄러를 즉시 백그라운드에서 실행합니다.
     """
-    from services.attractiveness_scheduler import run_daily_attractiveness_analysis
-    background_tasks.add_task(run_daily_attractiveness_analysis)
-    return {"status": "triggered", "message": "일별 투자 매력도 분석 작업이 백그라운드에서 시작되었습니다."}
+    try:
+        from services.attractiveness_scheduler import run_daily_attractiveness_analysis
+        background_tasks.add_task(run_daily_attractiveness_analysis)
+        return {"status": "triggered", "message": "일별 투자 매력도 분석 작업이 백그라운드에서 시작되었습니다."}
+    except Exception as e:
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("router_trigger_scheduled_attractiveness", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/report-content/{file_id}")
 async def get_report_content(file_id: str):
@@ -107,7 +132,15 @@ async def get_report_content(file_id: str):
     refresh_token = os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN")
     
     if not all([client_id, client_secret, refresh_token]):
-        raise HTTPException(status_code=500, detail="Google Drive credentials are not configured in environment variables.")
+        err_msg = (
+            f"Google Drive credentials are not configured in environment variables. "
+            f"client_id: {'Set' if client_id else 'Missing'}, "
+            f"client_secret: {'Set' if client_secret else 'Missing'}, "
+            f"refresh_token: {'Set' if refresh_token else 'Missing'}"
+        )
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("router_get_report_content_init", ValueError(err_msg), {"file_id": file_id})
+        raise HTTPException(status_code=500, detail=err_msg)
         
     try:
         access_token = await get_google_access_token(client_id, client_secret, refresh_token)
@@ -122,6 +155,8 @@ async def get_report_content(file_id: str):
             return {"status": "ok", "content": resp.text}
     except Exception as e:
         logger.error(f"[RouterReport] Google Drive download failed for file {file_id}: {e}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("router_get_report_content", e, {"file_id": file_id})
         raise HTTPException(status_code=500, detail=f"Failed to fetch report content: {str(e)}")
 
 @router.get("/tickers/{group_key}")
