@@ -29,10 +29,10 @@ async def get_yahoo_cookie_and_crumb() -> tuple[dict, str]:
     cookie_url = "https://fc.yahoo.com"
     crumb_url = "https://query2.finance.yahoo.com/v1/test/getcrumb"
     
-    for attempt in range(3):
+    for attempt in range(1):  # 1회만 시도
         headers = get_headers()
         try:
-            async with httpx.AsyncClient(timeout=15, headers=headers, verify=False) as client:
+            async with httpx.AsyncClient(timeout=2, headers=headers, verify=False) as client:  # 타임아웃 2초
                 await client.get(cookie_url)
                 crumb_resp = await client.get(crumb_url)
                 if crumb_resp.status_code == 200:
@@ -42,9 +42,10 @@ async def get_yahoo_cookie_and_crumb() -> tuple[dict, str]:
         except Exception as e:
             logger.error(f"[Yahoo] Cookie 및 Crumb 획득 실패 (시도 {attempt+1}): {e}")
             
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
     
     return {}, ""
+
 
 def clean_float(val_str: str) -> float:
     if not val_str or val_str == "N/A" or val_str == "-":
@@ -284,7 +285,7 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
     integration_data = None
     resolved_symbol = None
     
-    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+    async with httpx.AsyncClient(timeout=3, verify=False) as client:  # 타임아웃 3초로 단축
         for cand in candidates:
             basic_url = f"https://api.stock.naver.com/stock/{cand}/basic"
             try:
@@ -394,7 +395,7 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
     yahoo_success = False
     result_profile = {}
     
-    for attempt in range(2):
+    for attempt in range(1):  # 1회만 시도
         if not _cached_crumb:
             _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
             
@@ -406,7 +407,7 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
         headers = get_headers()
         
         try:
-            async with httpx.AsyncClient(timeout=15, headers=headers, cookies=_cached_cookies, verify=False) as client:
+            async with httpx.AsyncClient(timeout=2, headers=headers, cookies=_cached_cookies, verify=False) as client:  # 타임아웃 2초
                 resp = await client.get(url)
                 
             if resp.status_code == 401:
@@ -421,14 +422,14 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
                 
             if resp.status_code != 200:
                 logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
                 
             data = resp.json()
             result = data.get("quoteSummary", {}).get("result")
             if not result:
                 logger.warning(f"[Yahoo] {symbol} quoteSummary result empty (시도 {attempt+1})")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
                 
             result_profile = result[0]
@@ -436,7 +437,7 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
             break
         except Exception as e:
             logger.error(f"[Yahoo] {symbol} quoteSummary 조회 중 에러 (시도 {attempt+1}): {e}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             
     if yahoo_success and result_profile:
         return result_profile
