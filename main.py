@@ -139,6 +139,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"실시간 감지 자동 시작 실패: {e}")
 
+    # ── 지수 그룹 종목명 캐시 웜업 ──────────────────────
+    async def _warmup_caches():
+        import asyncio
+        logger.info("종목명 캐시 웜업 시작...")
+        from services.data_collector import fetch_tickers_for_group
+        for group in ["sp500", "qqq", "kospi200", "kosdaq150", "krx300"]:
+            try:
+                await fetch_tickers_for_group(group)
+                logger.info(f"지수 그룹 '{group}' 웜업 완료")
+            except Exception as e:
+                logger.warning(f"지수 그룹 '{group}' 웜업 중 오류: {e}")
+        logger.info("종목명 캐시 웜업 완료")
+
+    import asyncio
+    asyncio.create_task(_warmup_caches())
+
     yield
 
     # ── 실시간 매매 감지 종료 (전체) ──────────────────

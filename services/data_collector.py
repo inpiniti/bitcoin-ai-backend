@@ -229,7 +229,7 @@ async def _fetch_naver_index_stocks(index_code: str) -> list[str]:
     """
     tickers = []
     page = 1
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, verify=False) as client:
         while page <= 25:
             url = f"https://m.stock.naver.com/api/index/{index_code}/enrollStocks?page={page}"
             try:
@@ -237,7 +237,8 @@ async def _fetch_naver_index_stocks(index_code: str) -> list[str]:
                 if resp.status_code != 200:
                     break
                 data = resp.json()
-                stocks = data.get("stocks") or []
+                # 네이버 API 응답은 종목 객체들이 담긴 list 형태임
+                stocks = data if isinstance(data, list) else []
                 if not stocks:
                     break
                 for s in stocks:
@@ -264,7 +265,7 @@ async def _fetch_kospi200() -> list[str]:
     # 2. 실패 시 위키백과 폴백
     logger.info("[KOSPI200] 네이버 API 실패로 위키백과 폴백 작동")
     url = "https://ko.wikipedia.org/wiki/%EC%BD%94%EC%8A%A4%ED%94%BC_200"
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, verify=False) as client:
         resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     from bs4 import BeautifulSoup
@@ -296,7 +297,7 @@ async def _fetch_kosdaq150() -> list[str]:
     logger.info("[KOSDAQ150] 네이버 API 실패로 위키백과 폴백 작동")
     url = "https://ko.wikipedia.org/wiki/%EC%BD%94%EC%8A%A4%EB%8B%A5_150"
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, verify=False) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         from bs4 import BeautifulSoup
