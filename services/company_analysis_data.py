@@ -497,131 +497,305 @@ async def fetch_company_news(symbol: str) -> list[dict]:
 
 async def fetch_macro_indicators() -> dict:
     """
-    글로벌 매크로 지표(주식 지수, 금리, 환율, 원자재, 공포지수 등)의 최근 수치 및 전일대비 변동률 데이터를 야후 파이낸스 API를 통해 일괄 수집합니다.
+    글로벌 매크로 지표(주식 지수, 금리, 환율, 원자재, 공포지수 등)의 최근 수치 및 전일대비 변동률 데이터를 
+    야후 파이낸스 Chart API(쿠키/크럼 미필요)를 통해 우선 수집하고, 실패 시 네이버 금융 및 디폴트 값으로 폴백합니다.
     """
-    global _cached_cookies, _cached_crumb
+    import asyncio
+    import xml.etree.ElementTree as ET
     
     symbols = [
         "^GSPC",       # S&P 500
         "^IXIC",       # 나스닥 종합지수
         "^SOX",        # 필라델피아 반도체지수
         "^KS11",       # 코스피 지수
-        "^TNX",        # 미국 10년물 국채 금리 (수치가 10배 표기됨. 예: 4.15% -> 41.5)
+        "^TNX",        # 미국 10년물 국채 금리
         "USDKRW=X",    # 원·달러 환율
         "CL=F",        # WTI 원유 선물
         "GC=F",        # 국제 금 선물
-        "^VIX",        # CBOE 변동성 지수 (공포지수)
+        "^VIX",        # CBOE 변동성 지수
         "DX-Y.NYB"     # 달러 인덱스
     ]
-    symbols_str = ",".join(symbols)
-    headers = get_headers()
     
-    logger.info("[MacroData] Fetching global macro indicators with cookies and crumb...")
+    # 네이버 금융 폴백 매핑
+    naver_map = {
+        "^GSPC": ("SPI@SPX", "world_index"),
+        "^IXIC": ("NAS@IXIC", "world_index"),
+        "^SOX": ("NAS@SOX", "world_index"),
+        "^KS11": ("KOSPI", "fchart"),
+        "USDKRW=X": ("FX_USDKRW", "marketindex"),
+        "CL=F": ("OIL_CL", "marketindex"),
+        "GC=F": ("CMDT_GC", "marketindex"),
+        "DX-Y.NYB": ("FX_USDX", "marketindex"),
+    }
     
-    for attempt in range(2):
-        if not _cached_crumb:
-            _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
-            
-        if not _cached_crumb:
-            logger.warning("[MacroData] Crumb 획득 실패로 인해 조회 불가")
-            return {}
-            
-        url = f"https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols_str}&crumb={_cached_crumb}"
+    # 최후의 수단 디폴트 값
+    default_fallbacks = {
+        "^TNX": 4.5,
+        "^VIX": 15.0,
+    }
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    }
+    
+    def clean_val(val_str):
+        if isinstance(val_str, (int, float)):
+            return float(val_str)
+        return float(val_str.replace(",", "").replace("N/A", "0"))
+
+    # 1) 네이버 해외지수 크롤러
+    async def fetch_naver_world_index(client, symbol_naver: str) -> dict:
+        tasks = []
+        for page in range(1, 27):
+            url = f"https://finance.naver.com/world/worldDayListJson.nhn?symbol={symbol_naver}&fdtc=0&page={page}"
+            tasks.append(client.get(url, headers=headers))
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
         
-        try:
-            async with httpx.AsyncClient(timeout=15, headers=headers, cookies=_cached_cookies, verify=False) as client:
-                resp = await client.get(url)
-                
-            if resp.status_code == 401:
-                logger.warning("[MacroData] API HTTP 401 (크럼 만료). 캐시 초기화 후 재시도...")
-                _cached_cookies = None
-                _cached_crumb = None
-                continue
-                
-            if resp.status_code != 200:
-                logger.warning(f"[MacroData] API HTTP {resp.status_code} (시도 {attempt+1})")
-                await asyncio.sleep(1)
-                continue
-                
-            data = resp.json()
-            results = data.get("quoteResponse", {}).get("result", [])
+        all_records = []
+        for r in responses:
+            if isinstance(r, httpx.Response) and r.status_code == 200:
+                try:
+                    all_records.extend(r.json())
+                except:
+                    pass
+        
+        if not all_records:
+            raise Exception(f"Naver world index {symbol_naver} returned no data")
             
-            macro_dict = {}
-            name_map = {
-                "^GSPC": "S&P 500",
-                "^IXIC": "NASDAQ",
-                "^SOX": "SOX (필라델피아 반도체)",
-                "^KS11": "KOSPI",
-                "^TNX": "US 10Y Yield (미국 10년 국채금리)",
-                "USDKRW=X": "USD/KRW (원·달러 환율)",
-                "CL=F": "Crude Oil WTI (국제유가)",
-                "GC=F": "Gold (국제 금값)",
-                "^VIX": "CBOE VIX (공포지수)",
-                "DX-Y.NYB": "US Dollar Index (달러인덱스)"
+        valid_records = [r for r in all_records if r.get("clos") is not None]
+        if not valid_records:
+            raise Exception(f"Naver world index {symbol_naver} has no valid close prices")
+            
+        price = float(valid_records[0]["clos"])
+        closes = [float(r["clos"]) for r in reversed(valid_records)]
+        highs = [float(r["high"]) if r.get("high") is not None else float(r["clos"]) for r in reversed(valid_records)]
+        lows = [float(r["low"]) if r.get("low") is not None else float(r["clos"]) for r in reversed(valid_records)]
+        
+        change = float(valid_records[0].get("diff", 0.0))
+        change_percent = float(valid_records[0].get("rate", 0.0))
+        
+        return {
+            "price": price,
+            "closes": closes,
+            "highs": highs,
+            "lows": lows,
+            "change": change,
+            "changePercent": change_percent
+        }
+
+    # 2) 네이버 국내지수 XML 크롤러
+    async def fetch_naver_fchart_index(client, symbol_naver: str) -> dict:
+        url = f"https://fchart.stock.naver.com/sise.nhn?symbol={symbol_naver}&timeframe=day&count=260&requestType=0"
+        resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            raise Exception(f"Naver fchart {symbol_naver} failed with status {resp.status_code}")
+            
+        root = ET.fromstring(resp.text)
+        items = root.findall(".//item")
+        if not items:
+            raise Exception(f"Naver fchart {symbol_naver} returned no items")
+            
+        closes = []
+        highs = []
+        lows = []
+        for item in items:
+            parts = item.attrib.get("data", "").split("|")
+            if len(parts) >= 5:
+                closes.append(float(parts[4]))
+                highs.append(float(parts[2]))
+                lows.append(float(parts[3]))
+                
+        if not closes:
+            raise Exception(f"Naver fchart {symbol_naver} has no valid close prices")
+            
+        price = closes[-1]
+        change = 0.0
+        change_percent = 0.0
+        if len(closes) >= 2:
+            change = closes[-1] - closes[-2]
+            change_percent = (change / closes[-2]) * 100.0
+            
+        return {
+            "price": price,
+            "closes": closes,
+            "highs": highs,
+            "lows": lows,
+            "change": change,
+            "changePercent": change_percent
+        }
+
+    # 3) 네이버 시장지표 JSON 크롤러
+    async def fetch_naver_marketindex_exchange(client, symbol_naver: str) -> dict:
+        url = f"https://api.stock.naver.com/marketindex/exchange/{symbol_naver}/prices?pageSize=260&page=1"
+        resp = await client.get(url, headers={**headers, "Accept": "application/json", "Referer": "https://m.stock.naver.com/"})
+        if resp.status_code != 200:
+            raise Exception(f"Naver marketindex {symbol_naver} failed with status {resp.status_code}")
+            
+        data = resp.json()
+        if not data:
+            raise Exception(f"Naver marketindex {symbol_naver} returned no data")
+            
+        valid_records = [r for r in data if r.get("closePrice") is not None]
+        if not valid_records:
+            raise Exception(f"Naver marketindex {symbol_naver} has no valid close prices")
+            
+        price = clean_val(valid_records[0]["closePrice"])
+        closes = [clean_val(r["closePrice"]) for r in reversed(valid_records)]
+        highs = list(closes)
+        lows = list(closes)
+        
+        change = clean_val(valid_records[0].get("fluctuations", 0.0))
+        flu_type = valid_records[0].get("fluctuationsType", {}).get("name", "")
+        if "FALLING" in flu_type or "FALL" in flu_type:
+            change = -abs(change)
+            
+        change_percent = clean_val(valid_records[0].get("fluctuationsRatio", 0.0))
+        if "FALLING" in flu_type or "FALL" in flu_type:
+            change_percent = -abs(change_percent)
+            
+        return {
+            "price": price,
+            "closes": closes,
+            "highs": highs,
+            "lows": lows,
+            "change": change,
+            "changePercent": change_percent
+        }
+
+    async def fetch_single_indicator(client, symbol: str) -> dict:
+        # 1. Primary: Yahoo Finance chart API
+        url_yahoo = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d"
+        try:
+            r = await client.get(url_yahoo, headers=headers)
+            if r.status_code == 200:
+                data = r.json()
+                result = data.get("chart", {}).get("result", [{}])[0]
+                meta = result.get("meta", {})
+                price = meta.get("regularMarketPrice")
+                
+                quote = result.get("indicators", {}).get("quote", [{}])[0]
+                closes = [c for c in quote.get("close", []) if c is not None]
+                highs = [h for h in quote.get("high", []) if h is not None]
+                lows = [l for l in quote.get("low", []) if l is not None]
+                
+                if len(closes) >= 2 and price is not None:
+                    change = price - closes[-2]
+                    change_percent = (change / closes[-2]) * 100.0
+                    return {
+                        "price": price,
+                        "closes": closes,
+                        "highs": highs,
+                        "lows": lows,
+                        "change": change,
+                        "changePercent": change_percent
+                    }
+        except Exception as e:
+            logger.warning(f"[MacroData] Yahoo Chart API failed for {symbol}: {e}")
+            
+        # 2. Secondary: Naver Finance Fallback
+        if symbol in naver_map:
+            naver_sym, fetch_type = naver_map[symbol]
+            try:
+                logger.info(f"[MacroData] Trying Naver fallback for {symbol} ({naver_sym}, {fetch_type})...")
+                if fetch_type == "world_index":
+                    return await fetch_naver_world_index(client, naver_sym)
+                elif fetch_type == "fchart":
+                    return await fetch_naver_fchart_index(client, naver_sym)
+                elif fetch_type == "marketindex":
+                    return await fetch_naver_marketindex_exchange(client, naver_sym)
+            except Exception as e:
+                logger.error(f"[MacroData] Naver fallback failed for {symbol}: {e}")
+                
+        # 3. Last Resort: Sensible Default values to prevent application crashes
+        if symbol in default_fallbacks:
+            val = default_fallbacks[symbol]
+            logger.warning(f"[MacroData] Using default fallback value for {symbol}: {val}")
+            return {
+                "price": val,
+                "closes": [val] * 250,
+                "highs": [val] * 250,
+                "lows": [val] * 250,
+                "change": 0.0,
+                "changePercent": 0.0
             }
             
-            for item in results:
-                symbol = item.get("symbol")
-                mapped_name = name_map.get(symbol, symbol)
-                
-                price = item.get("regularMarketPrice", 0.0)
-                change_percent = item.get("regularMarketChangePercent", 0.0)
-                change = item.get("regularMarketChange", 0.0)
-                
-                # 중장기 추세 지표 추출
-                fifty_day_avg = item.get("fiftyDayAverage", 0.0)
-                two_hundred_day_avg = item.get("twoHundredDayAverage", 0.0)
-                fifty_two_week_low = item.get("fiftyTwoWeekLow", 0.0)
-                fifty_two_week_high = item.get("fiftyTwoWeekHigh", 0.0)
-                
-                # 미국 10년물 국채 금리의 경우 야후 파이낸스에서는 4.15%가 41.5로 반환되므로 10으로 나누어 보정
-                if symbol == "^TNX":
-                    if price > 0:
-                        price = price / 10.0
-                    if fifty_day_avg > 0:
-                        fifty_day_avg = fifty_day_avg / 10.0
-                    if two_hundred_day_avg > 0:
-                        two_hundred_day_avg = two_hundred_day_avg / 10.0
-                    if fifty_two_week_low > 0:
-                        fifty_two_week_low = fifty_two_week_low / 10.0
-                    if fifty_two_week_high > 0:
-                        fifty_two_week_high = fifty_two_week_high / 10.0
-                
-                # 52주 가격 범위 백분위 (0% ~ 100%)
-                fifty_two_week_percentile = 0.0
-                if fifty_two_week_high and fifty_two_week_low and (fifty_two_week_high - fifty_two_week_low) > 0:
-                    fifty_two_week_percentile = ((price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low)) * 100.0
-                
-                # 50일 및 200일 이동평균선 대비 괴리율 (%)
-                fifty_day_ma_diff = 0.0
-                if fifty_day_avg > 0:
-                    fifty_day_ma_diff = ((price - fifty_day_avg) / fifty_day_avg) * 100.0
-                
-                two_hundred_day_ma_diff = 0.0
-                if two_hundred_day_avg > 0:
-                    two_hundred_day_ma_diff = ((price - two_hundred_day_avg) / two_hundred_day_avg) * 100.0
-                    
-                macro_dict[symbol] = {
-                    "name": mapped_name,
-                    "price": price,
-                    "change": change,
-                    "changePercent": change_percent,
-                    "fiftyDayAverage": fifty_day_avg,
-                    "twoHundredDayAverage": two_hundred_day_avg,
-                    "fiftyTwoWeekLow": fifty_two_week_low,
-                    "fiftyTwoWeekHigh": fifty_two_week_high,
-                    "fiftyTwoWeekPercentile": fifty_two_week_percentile,
-                    "fiftyDayMaDiff": fifty_day_ma_diff,
-                    "twoHundredDayMaDiff": two_hundred_day_ma_diff
-                }
-                
-            return macro_dict
+        logger.error(f"[MacroData] Failed to fetch macro indicator {symbol} and no default is mapped.")
+        return {
+            "price": 100.0,
+            "closes": [100.0] * 250,
+            "highs": [100.0] * 250,
+            "lows": [100.0] * 250,
+            "change": 0.0,
+            "changePercent": 0.0
+        }
+
+    logger.info("[MacroData] Bulk fetching global macro indicators using cookie-free Yahoo Chart API...")
+    
+    async with httpx.AsyncClient(timeout=10, verify=False) as client:
+        tasks = [fetch_single_indicator(client, sym) for sym in symbols]
+        indicator_data = await asyncio.gather(*tasks)
+        
+    macro_dict = {}
+    name_map = {
+        "^GSPC": "S&P 500",
+        "^IXIC": "NASDAQ",
+        "^SOX": "SOX (필라델피아 반도체)",
+        "^KS11": "KOSPI",
+        "^TNX": "US 10Y Yield (미국 10년 국채금리)",
+        "USDKRW=X": "USD/KRW (원·달러 환율)",
+        "CL=F": "Crude Oil WTI (국제유가)",
+        "GC=F": "Gold (국제 금값)",
+        "^VIX": "CBOE VIX (공포지수)",
+        "DX-Y.NYB": "US Dollar Index (달러인덱스)"
+    }
+    
+    for symbol, data in zip(symbols, indicator_data):
+        if not data:
+            continue
             
-        except Exception as e:
-            logger.error(f"[MacroData] 매크로 지표 조회 에러 (시도 {attempt+1}): {e}")
-            await asyncio.sleep(1)
+        mapped_name = name_map.get(symbol, symbol)
+        price = data["price"]
+        closes = data["closes"]
+        highs = data["highs"]
+        lows = data["lows"]
+        
+        # 이동평균 계산
+        fifty_day_avg = sum(closes[-50:]) / min(len(closes), 50) if closes else 0.0
+        two_hundred_day_avg = sum(closes[-200:]) / min(len(closes), 200) if closes else 0.0
+        
+        # 52주 고점/저점 계산
+        fifty_two_week_low = min(lows[-250:]) if lows else 0.0
+        fifty_two_week_high = max(highs[-250:]) if highs else 0.0
+        
+        # 52주 백분위
+        fifty_two_week_percentile = 0.0
+        if fifty_two_week_high and fifty_two_week_low and (fifty_two_week_high - fifty_two_week_low) > 0:
+            fifty_two_week_percentile = ((price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low)) * 100.0
             
-    return {}
+        # MA 괴리율
+        fifty_day_ma_diff = 0.0
+        if fifty_day_avg > 0:
+            fifty_day_ma_diff = ((price - fifty_day_avg) / fifty_day_avg) * 100.0
+            
+        two_hundred_day_ma_diff = 0.0
+        if two_hundred_day_avg > 0:
+            two_hundred_day_ma_diff = ((price - two_hundred_day_avg) / two_hundred_day_avg) * 100.0
+            
+        macro_dict[symbol] = {
+            "name": mapped_name,
+            "price": price,
+            "change": data["change"],
+            "changePercent": data["changePercent"],
+            "fiftyDayAverage": fifty_day_avg,
+            "twoHundredDayAverage": two_hundred_day_avg,
+            "fiftyTwoWeekLow": fifty_two_week_low,
+            "fiftyTwoWeekHigh": fifty_two_week_high,
+            "fiftyTwoWeekPercentile": fifty_two_week_percentile,
+            "fiftyDayMaDiff": fifty_day_ma_diff,
+            "twoHundredDayMaDiff": two_hundred_day_ma_diff
+        }
+        
+    return macro_dict
 
 
 
