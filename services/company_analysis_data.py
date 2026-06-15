@@ -290,10 +290,17 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
             "Accept-Language": "en-US,en;q=0.5",
         })
         ticker = yf.Ticker(symbol, session=session)
-        info = ticker.info
+        try:
+            info = ticker.info
+        except Exception as ticker_err:
+            logger.error(f"[Yahoo-yfinance-thread] {symbol} ticker.info 호출 중 예외: {ticker_err}")
+            raise ticker_err
+
         if not info or (not info.get("currentPrice") and not info.get("regularMarketPrice")):
             # 최소한의 가격 정보마저 안 가져와진 경우
-            raise ValueError("yfinance info fetching failed or rate limited")
+            keys_preview = list(info.keys()) if info else 'None'
+            logger.warning(f"[Yahoo-yfinance-thread] {symbol} 유효한 주가 데이터 누락 (info keys: {keys_preview})")
+            raise ValueError(f"yfinance info fetching failed or rate limited (info is empty or pricing keys missing)")
         return info
 
     try:
@@ -341,7 +348,20 @@ async def fetch_company_profile_and_financials(symbol: str) -> dict:
         logger.info(f"[Yahoo-yfinance] {symbol} 데이터 바인딩 완료")
         return profile
     except Exception as e:
-        logger.error(f"[Yahoo-yfinance] {symbol} 데이터 수집 중 오류: {e}")
+        import traceback
+        err_msg = f"[Yahoo-yfinance] {symbol} 데이터 수집 중 치명적 오류: {str(e)}\n{traceback.format_exc()}"
+        logger.error(err_msg)
+        
+        try:
+            from services.error_log_service import log_error_to_db
+            log_error_to_db(
+                "fetch_company_profile_and_financials_failed", 
+                e, 
+                {"symbol": symbol, "traceback": traceback.format_exc()}
+            )
+        except Exception as log_err:
+            logger.error(f"[Yahoo-yfinance] 에러 로그 적재 실패: {log_err}")
+            
         return {}
 
 async def fetch_company_news(symbol: str) -> list[dict]:
