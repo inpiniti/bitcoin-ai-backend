@@ -9,8 +9,13 @@ import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
 import logging
+import json
+import traceback
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -204,6 +209,107 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── 글로벌 예외 핸들러 (Error DB Logging) ──────────────────
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    payload = {
+        "url": str(request.url),
+        "method": request.method,
+        "headers": dict(request.headers),
+        "query_params": dict(request.query_params),
+        "errors": exc.errors(),
+    }
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            body_str = body_bytes.decode("utf-8", errors="ignore")
+            try:
+                payload["body"] = json.loads(body_str)
+            except Exception:
+                payload["body"] = body_str
+    except Exception:
+        pass
+    try:
+        from services.error_log_service import log_error_to_db
+        log_error_to_db(
+            phase="validation_error",
+            error=Exception(f"Validation Error: {str(exc)}"),
+            payload=payload
+        )
+    except Exception as db_err:
+        logger.error(f"[ValidationExceptionHandler] DB 에러 로그 적재 실패: {db_err}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": exc.body}
+    )
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    payload = {
+        "url": str(request.url),
+        "method": request.method,
+        "headers": dict(request.headers),
+        "query_params": dict(request.query_params),
+        "status_code": exc.status_code,
+    }
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            body_str = body_bytes.decode("utf-8", errors="ignore")
+            try:
+                payload["body"] = json.loads(body_str)
+            except Exception:
+                payload["body"] = body_str
+    except Exception:
+        pass
+    try:
+        from services.error_log_service import log_error_to_db
+        log_error_to_db(
+            phase=f"http_error_{exc.status_code}",
+            error=Exception(f"HTTP {exc.status_code}: {exc.detail}"),
+            payload=payload
+        )
+    except Exception as db_err:
+        logger.error(f"[HTTPExceptionHandler] DB 에러 로그 적재 실패: {db_err}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    error_message = str(exc)
+    payload = {
+        "url": str(request.url),
+        "method": request.method,
+        "headers": dict(request.headers),
+        "query_params": dict(request.query_params),
+    }
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            body_str = body_bytes.decode("utf-8", errors="ignore")
+            try:
+                payload["body"] = json.loads(body_str)
+            except Exception:
+                payload["body"] = body_str
+    except Exception:
+        pass
+    try:
+        from services.error_log_service import log_error_to_db
+        log_error_to_db(
+            phase="api_unhandled_error",
+            error=exc,
+            payload=payload
+        )
+    except Exception as db_err:
+        logger.error(f"[GlobalExceptionHandler] DB 에러 로그 적재 실패: {db_err}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error", "message": error_message}
+    )
+
 
 app.include_router(forecast.router)
 app.include_router(whale.router)
