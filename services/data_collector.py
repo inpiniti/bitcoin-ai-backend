@@ -78,10 +78,15 @@ def _calc_consecutive_days(candles: list[dict], i: int) -> int:
 # ── 티커 그룹 목록 수집 ──────────────────────────────────────
 
 _TICKER_NAME_CACHE: dict[str, str] = {}
+_STOCK_PRICE_CACHE: dict[str, dict] = {}
 
 def get_ticker_name_map() -> dict[str, str]:
     """캐싱된 티커 -> 종목명 매핑 반환"""
     return _TICKER_NAME_CACHE
+
+def get_stock_price_map() -> dict[str, dict]:
+    """캐싱된 티커 -> {high52, current} 매핑 반환"""
+    return _STOCK_PRICE_CACHE
 
 async def fetch_tickers_for_group(group_key: str) -> list[str]:
     """그룹 키에 해당하는 티커 목록 반환"""
@@ -370,6 +375,87 @@ async def fetch_stock_history_yf(ticker: str, days: int) -> list[dict]:
     except Exception as e:
         logger.warning(f"[YF] {ticker} 수집 실패: {e}")
         return []
+
+
+# ── 52주 최고가 및 현재가 벌크 수집 및 캐싱 ──────────────────────
+
+def _fetch_52w_prices_bulk(tickers: list[str]) -> dict[str, dict]:
+    """yfinance를 사용하여 여러 티커의 52주 최고가 및 현재가를 벌크 조회합니다."""
+    import yfinance as yf
+    import pandas as pd
+    import time
+    
+    yf_tickers = []
+    ticker_map = {}
+    for t in tickers:
+        t_upper = t.upper().strip()
+        if t_upper.isdigit() and len(t_upper) == 6:
+            yf_t_ks = f"{t_upper}.KS"
+            yf_t_kq = f"{t_upper}.KQ"
+            yf_tickers.extend([yf_t_ks, yf_t_kq])
+            ticker_map[yf_t_ks] = t_upper
+            ticker_map[yf_t_kq] = t_upper
+        else:
+            yf_tickers.append(t_upper)
+            ticker_map[t_upper] = t_upper
+            
+    if not yf_tickers:
+        return {}
+        
+    prices_map = {}
+    try:
+        # 52주(1년)간의 종가 데이터를 벌크 다운로드
+        data = yf.download(yf_tickers, period="1y", group_by="ticker", progress=False)
+        if data is None or data.empty:
+            return {}
+            
+        for yf_t in yf_tickers:
+            try:
+                orig_t = ticker_map[yf_t]
+                if len(yf_tickers) > 1:
+                    if yf_t not in data.columns.levels[0]:
+                        continue
+                    ticker_data = data[yf_t]
+                else:
+                    ticker_data = data
+                    
+                if ticker_data.empty:
+                    continue
+                    
+                close_series = ticker_data["Close"].dropna()
+                high_series = ticker_data["High"].dropna()
+                
+                if close_series.empty or high_series.empty:
+                    continue
+                    
+                high52 = float(high_series.max())
+                current = float(close_series.iloc[-1])
+                
+                if high52 > 0:
+                    # 중복된 한국 주식 중 정상인 것 우선순위 (KS가 KQ보다 우선)
+                    if orig_t in prices_map and yf_t.endswith(".KQ") and prices_map[orig_t]["high52"] > 0:
+                        continue
+                    prices_map[orig_t] = {
+                        "high52": high52,
+                        "current": current,
+                        "updated_at": time.time()
+                    }
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"[PriceCollector] Bulk price download failed: {e}")
+        
+    return prices_map
+
+async def update_stock_prices_cache(tickers: list[str]):
+    """주어진 티커 목록에 대해 52주 최고가 및 현재가 캐시를 업데이트합니다."""
+    if not tickers:
+        return
+    loop = asyncio.get_event_loop()
+    prices_map = await loop.run_in_executor(None, _fetch_52w_prices_bulk, tickers)
+    if prices_map:
+        _STOCK_PRICE_CACHE.update(prices_map)
+        logger.info(f"[PriceCollector] {len(prices_map)}개 종목의 주가 및 52주 최고가 캐시 갱신 완료")
 
 
 # ── 피처 엔지니어링 ───────────────────────────────────────────

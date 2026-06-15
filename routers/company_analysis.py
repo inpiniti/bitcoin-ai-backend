@@ -159,12 +159,59 @@ async def get_report_content(file_id: str):
         log_error_to_db("router_get_report_content", e, {"file_id": file_id})
         raise HTTPException(status_code=500, detail=f"Failed to fetch report content: {str(e)}")
 
+class PriceRequest(BaseModel):
+    tickers: list[str]
+
+@router.post("/prices")
+async def get_prices_by_tickers(req: PriceRequest, background_tasks: BackgroundTasks):
+    """
+    주어진 티커 목록에 대한 52주 최고가 및 현재가 캐시 정보를 반환합니다.
+    캐싱되지 않았거나 만료(12시간 기준)된 데이터는 백그라운드에서 수집을 시작합니다.
+    """
+    from services.data_collector import get_stock_price_map, update_stock_prices_cache
+    import time
+    try:
+        tickers = [t.upper().strip() for t in req.tickers if t]
+        prices_cache = get_stock_price_map()
+        group_prices = {}
+        missing_tickers = []
+        
+        current_time = time.time()
+        CACHE_EXPIRY = 12 * 3600
+        
+        for t in tickers:
+            if t in prices_cache:
+                cache_data = prices_cache[t]
+                updated_at = cache_data.get("updated_at", 0)
+                if current_time - updated_at < CACHE_EXPIRY:
+                    group_prices[t] = {
+                        "high52": cache_data["high52"],
+                        "current": cache_data["current"]
+                    }
+                    continue
+            missing_tickers.append(t)
+            
+        if missing_tickers:
+            background_tasks.add_task(update_stock_prices_cache, missing_tickers)
+            
+        return {
+            "status": "ok",
+            "prices": group_prices
+        }
+    except Exception as e:
+        logger.error(f"[RouterReport] Prices fetch failed: {e}")
+        from services.error_log_service import log_error_to_db
+        log_error_to_db("router_get_prices_by_tickers", e, {"tickers_count": len(req.tickers)})
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/tickers/{group_key}")
-async def get_tickers_by_group(group_key: str):
+async def get_tickers_by_group(group_key: str, background_tasks: BackgroundTasks):
     """
-    특정 지수 그룹(sp500, qqq, kospi200, kosdaq150, krx300)의 구성 종목 티커 리스트와 종목명 매핑을 반환합니다.
+    특정 지수 그룹(sp500, qqq, kospi200, kosdaq150, krx300)의 구성 종목 티커 리스트, 종목명 매핑 및 52주 최고가/현재가 정보를 반환합니다.
+    캐싱되지 않았거나 만료(12시간 기준)된 데이터는 백그라운드에서 수집을 시작합니다.
     """
-    from services.data_collector import fetch_tickers_for_group, get_ticker_name_map
+    from services.data_collector import fetch_tickers_for_group, get_ticker_name_map, get_stock_price_map, update_stock_prices_cache
+    import time
     try:
         tickers = await fetch_tickers_for_group(group_key)
         all_names = get_ticker_name_map()
@@ -172,11 +219,37 @@ async def get_tickers_by_group(group_key: str):
         # 현재 수집된 티커들에 대한 매핑 정보만 추출하여 반환
         group_names = {t: all_names[t] for t in tickers if t in all_names}
         
+        # 주가 캐시 조회
+        prices_cache = get_stock_price_map()
+        group_prices = {}
+        missing_tickers = []
+        
+        current_time = time.time()
+        CACHE_EXPIRY = 12 * 3600  # 12시간 기준 캐시 만료
+        
+        for t in tickers:
+            if t in prices_cache:
+                cache_data = prices_cache[t]
+                updated_at = cache_data.get("updated_at", 0)
+                # 캐시 만료 여부 확인
+                if current_time - updated_at < CACHE_EXPIRY:
+                    group_prices[t] = {
+                        "high52": cache_data["high52"],
+                        "current": cache_data["current"]
+                    }
+                    continue
+            missing_tickers.append(t)
+            
+        # 캐시에 없는 종목이 있거나 만료된 경우 백그라운드에서 yfinance 수집 처리
+        if missing_tickers:
+            background_tasks.add_task(update_stock_prices_cache, missing_tickers)
+            
         return {
             "status": "ok", 
             "group": group_key, 
             "tickers": tickers,
-            "names": group_names
+            "names": group_names,
+            "prices": group_prices
         }
     except Exception as e:
         logger.error(f"[RouterReport] Tickers fetch failed for group {group_key}: {e}")
