@@ -166,7 +166,7 @@ class PriceRequest(BaseModel):
 async def get_prices_by_tickers(req: PriceRequest, background_tasks: BackgroundTasks):
     """
     주어진 티커 목록에 대한 52주 최고가 및 현재가 캐시 정보를 반환합니다.
-    캐싱되지 않았거나 만료(12시간 기준)된 데이터는 백그라운드에서 수집을 시작합니다.
+    캐싱되지 않았거나 만료(12시간 기준)된 데이터는 동기식으로 수집하여 반환합니다.
     """
     from services.data_collector import get_stock_price_map, update_stock_prices_cache
     import time
@@ -192,7 +192,15 @@ async def get_prices_by_tickers(req: PriceRequest, background_tasks: BackgroundT
             missing_tickers.append(t)
             
         if missing_tickers:
-            background_tasks.add_task(update_stock_prices_cache, missing_tickers)
+            await update_stock_prices_cache(missing_tickers)
+            prices_cache = get_stock_price_map()
+            for t in missing_tickers:
+                if t in prices_cache:
+                    cache_data = prices_cache[t]
+                    group_prices[t] = {
+                        "high52": cache_data["high52"],
+                        "current": cache_data["current"]
+                    }
             
         return {
             "status": "ok",
@@ -208,7 +216,7 @@ async def get_prices_by_tickers(req: PriceRequest, background_tasks: BackgroundT
 async def get_tickers_by_group(group_key: str, background_tasks: BackgroundTasks):
     """
     특정 지수 그룹(sp500, qqq, kospi200, kosdaq150, krx300)의 구성 종목 티커 리스트, 종목명 매핑 및 52주 최고가/현재가 정보를 반환합니다.
-    캐싱되지 않았거나 만료(12시간 기준)된 데이터는 백그라운드에서 수집을 시작합니다.
+    캐싱되지 않았거나 만료(12시간 기준)된 데이터는 동기식으로 수집하여 반환합니다.
     """
     from services.data_collector import fetch_tickers_for_group, get_ticker_name_map, get_stock_price_map, update_stock_prices_cache
     import time
@@ -240,9 +248,17 @@ async def get_tickers_by_group(group_key: str, background_tasks: BackgroundTasks
                     continue
             missing_tickers.append(t)
             
-        # 캐시에 없는 종목이 있거나 만료된 경우 백그라운드에서 yfinance 수집 처리
+        # 캐시에 없는 종목이 있거나 만료된 경우 동기식으로 yfinance/TradingView 수집 처리
         if missing_tickers:
-            background_tasks.add_task(update_stock_prices_cache, missing_tickers)
+            await update_stock_prices_cache(missing_tickers)
+            prices_cache = get_stock_price_map()
+            for t in missing_tickers:
+                if t in prices_cache:
+                    cache_data = prices_cache[t]
+                    group_prices[t] = {
+                        "high52": cache_data["high52"],
+                        "current": cache_data["current"]
+                    }
             
         return {
             "status": "ok", 

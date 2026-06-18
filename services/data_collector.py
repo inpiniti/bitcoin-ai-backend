@@ -430,7 +430,7 @@ def _fetch_52w_prices_bulk(tickers: list[str]) -> dict[str, dict]:
                 "sort": { "sortBy": "market_cap_basic", "sortOrder": "desc" },
                 "range": [0, len(us_tickers) * 3]
             }
-            resp = requests.post(url_us, json=payload_us, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            resp = requests.post(url_us, json=payload_us, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, verify=False)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 for item in data:
@@ -467,7 +467,7 @@ def _fetch_52w_prices_bulk(tickers: list[str]) -> dict[str, dict]:
                 "sort": { "sortBy": "market_cap_basic", "sortOrder": "desc" },
                 "range": [0, len(kr_tickers)]
             }
-            resp = requests.post(url_kr, json=payload_kr, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            resp = requests.post(url_kr, json=payload_kr, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, verify=False)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 for item in data:
