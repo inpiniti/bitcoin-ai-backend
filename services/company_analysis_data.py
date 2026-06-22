@@ -250,6 +250,7 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
         "defaultKeyStatistics": {
             "forwardPE": {"raw": clean_float(forward_pe_str), "fmt": f"{forward_pe_str}배"},
             "pegRatio": {"raw": 0, "fmt": "N/A"},
+            "priceToBook": {"raw": clean_float(pbr_str), "fmt": f"{pbr_str}배"},
             "trailingEps": {"raw": clean_float(eps_str), "fmt": f"{eps_str}원"},
             "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
             "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
@@ -259,7 +260,8 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
             "fiftyTwoWeekLow": {"raw": low_52, "fmt": low_52_str},
             "fiftyTwoWeekHigh": {"raw": high_52, "fmt": high_52_str},
             "marketCap": {"raw": market_cap_num, "fmt": market_cap_str},
-            "trailingPE": {"raw": clean_float(per_str), "fmt": f"{per_str}배"}
+            "trailingPE": {"raw": clean_float(per_str), "fmt": f"{per_str}배"},
+            "dividendYield": {"raw": clean_float(dividend_yield_str) / 100.0, "fmt": f"{dividend_yield_str}%"}
         },
         "earnings": {}
     }
@@ -365,6 +367,7 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
         "defaultKeyStatistics": {
             "forwardPE": {"raw": clean_float(per_str), "fmt": f"{per_str}"},
             "pegRatio": {"raw": 0, "fmt": "N/A"},
+            "priceToBook": {"raw": clean_float(pbr_str), "fmt": f"{pbr_str}"},
             "trailingEps": {"raw": clean_float(eps_str), "fmt": f"{eps_str}"},
             "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
             "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
