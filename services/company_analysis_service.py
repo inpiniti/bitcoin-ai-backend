@@ -499,18 +499,21 @@ async def call_gemini(prompt: str, api_key: str | None = None) -> str:
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
             elif resp.status_code in (429, 503, 504):
-                if resp.status_code == 429 and current_key:
+                if current_key:
+                    # 429: Rate Limit → 60초 블럭 / 503, 504: 서버 오류 → 1시간 블럭
+                    cooldown = 60 if resp.status_code == 429 else 3600
                     try:
-                        get_key_manager().mark_rate_limited(current_key, cooldown_seconds=60)
+                        get_key_manager().mark_rate_limited(current_key, cooldown_seconds=cooldown)
+                        logger.warning(f"[Gemini] {resp.status_code} 오류로 키 {current_key[:8]}... 를 {cooldown}초 블럭 처리합니다.")
                     except Exception:
                         pass
-                
+
                 retry_after = base_delay * (2 ** attempt)
                 logger.warning(
                     f"[Gemini] {resp.status_code} 오류 발생. "
                     f"{retry_after}초 후 재시도합니다 (시도 {attempt+1}/{max_retries})."
                 )
-                
+
                 # 호출 시 고정 키가 전달되지 않았다면 재시도마다 사용 키 로테이션 시도
                 if not api_key:
                     try:
