@@ -47,6 +47,83 @@ def build_earnings_trend(profile: dict) -> str:
         return "- (연도별 실적 데이터 파싱 불가)"
 
 
+def build_verdict_prompt(symbol: str, profile: dict, macro_data: dict, advices: list[dict]) -> str:
+    """
+    13인 거장의 개별 조언을 모두 검토하여 최종 종합 판결을 내리는 '수석 투자 판결관' 프롬프트.
+    advices: [{"name": 거장명, "title": 도서명, "content": 조언 본문}, ...]
+    거장들의 상충하는 주장을 공정히 조율해 '단 하나의 명확한 결론'을 도출하는 것이 목적.
+    """
+    fin_data = profile.get("financialData", {})
+    detail = profile.get("summaryDetail", {})
+    stats = profile.get("defaultKeyStatistics", {})
+
+    snapshot = f"""
+    - 현재가: {fin_data.get('currentPrice', {}).get('fmt', 'N/A')}
+    - Trailing PE: {detail.get('trailingPE', {}).get('fmt', 'N/A')} / Forward PE: {stats.get('forwardPE', {}).get('fmt', 'N/A')} / PEG: {stats.get('pegRatio', {}).get('fmt', 'N/A')}
+    - ROE: {fin_data.get('returnOnEquity', {}).get('fmt', 'N/A')} / 영업이익률: {fin_data.get('operatingMargins', {}).get('fmt', 'N/A')} / 순이익률: {fin_data.get('profitMargins', {}).get('fmt', 'N/A')}
+    - 매출성장(YoY): {fin_data.get('revenueGrowth', {}).get('fmt', 'N/A')} / 부채비율(D/E): {fin_data.get('debtToEquity', {}).get('fmt', 'N/A')}
+    """
+
+    macro_context = "\n".join([
+        f"- {info['name']}: {info['price']} ({info['changePercent']:.2f}%)"
+        for info in macro_data.values()
+    ])
+
+    opinions = "\n\n".join([
+        f"### {a['name']} — 《{a['title']}》\n{a['content']}"
+        for a in advices
+    ])
+
+    today_str = datetime.now(timezone.utc).strftime("%Y년 %m월 %d일")
+
+    return f"""
+    당신은 수많은 투자 거장들의 의견을 최종적으로 조율하는 '수석 투자 판결관(Chief Investment Judge)'입니다.
+    아래는 {symbol} 종목에 대해 {len(advices)}인의 전설적 투자 거장이 각자의 철학으로 내놓은 독립적인 분석 의견입니다.
+    이들은 마치 법정의 변호인과 검사처럼 저마다 합리적이지만 서로 상충하는 주장을 펼치고 있습니다.
+    당신의 임무는 이 모든 주장을 공정하게 검토하여, 일반 투자자가 '단 하나의 명확한 결론'을 얻을 수 있도록 최종 판결을 내리는 것입니다.
+
+    [보고서 작성일]
+    {today_str}
+
+    [분석 종목 핵심 지표]
+    {snapshot}
+
+    [글로벌 매크로 환경]
+    {macro_context}
+
+    [{len(advices)}인 거장의 개별 의견]
+    {opinions}
+
+    ---
+    위 의견들을 종합하여, 반드시 한국어 + 마크다운으로 아래 구조에 맞춰 '최종 판결문'을 작성하십시오.
+    특정 거장의 문장을 그대로 옮기지 말고, 판결관으로서 당신의 독립적 판단으로 종합·중재하십시오.
+    추상적 원론이 아니라 위 재무 지표와 거장들의 구체적 논거에 근거해 단호하게 결론지으십시오.
+
+    ## ⚖️ 최종 판결: {symbol}
+
+    ### 1. 한 줄 평결
+    - **종합 투자의견**: (적극 매수 / 매수 / 보유 / 매도 / 적극 매도 중 하나를 굵게) — 신뢰도(상/중/하) 표기
+    - 핵심 결론을 한 문장으로.
+
+    ### 2. 거장들의 대립 구도
+    - **매수(낙관) 측 핵심 논거**: 어느 거장이 어떤 근거로 긍정적인지 2~3가지로 요약.
+    - **매도·신중(비관) 측 핵심 논거**: 어느 거장이 어떤 근거로 부정적·신중한지 2~3가지로 요약.
+    - **공통 합의점**: 대부분의 거장이 동의하는 사실.
+
+    ### 3. 판결 근거
+    - 위 대립에서 어느 쪽 논리가 더 설득력 있는지, 재무 지표와 매크로 환경에 비추어 판단한 이유.
+
+    ### 4. 주요 리스크 / 반대 시나리오
+    - 이 판결이 틀릴 수 있는 핵심 조건 1~2가지.
+
+    ### 5. 투자자 유형별 행동 지침
+    - **공격적 투자자** / **보수적 투자자** / **장기 투자자**별로 구체적 행동(비중, 진입 타이밍, 손절·익절 관점)을 제시.
+
+    ### 6. 체크포인트
+    - 향후 이 판단을 재검토해야 할 트리거(실적, 금리, 특정 가격대 등) 2~3개.
+    """
+
+
 def build_guru_prompt(guru_id: str, symbol: str, profile: dict, news: list[dict], macro_data: dict) -> str:
     """
     각 투자 거장의 투자 철학과 서재 요약본을 토대로 맞춤형 프롬프트 생성
@@ -347,32 +424,56 @@ async def generate_advice_stream(ticker: str):
         yield f"data: {json.dumps({'event': 'status', 'step': 'company', 'status': 'error', 'message': f'기업 정보 및 뉴스 수집 중 오류: {str(e)}'}, ensure_ascii=False)}\n\n"
         return
 
-    # ── 3단계: 거장 9인의 심층 조언 생성 ──
-    logger.info(f"[AdviceService] [Step 3/3] Starting AI analysis for 9 investment gurus")
+    # ── 3단계: 거장 13인의 심층 조언 생성 ──
     total = len(GURUS)
-    
+    logger.info(f"[AdviceService] [Step 3/4] Starting AI analysis for {total} investment gurus")
+
+    # 4단계(최종 판결)에 넘길 거장별 조언 수집
+    collected_advices: list[dict] = []
+
     for i, guru in enumerate(GURUS, 1):
         guru_id = guru["id"]
         guru_name = guru["name"]
-        
+
         logger.info(f"[AdviceService] [Guru {i}/{total}] {guru_name} is generating advice for {resolved_symbol}...")
         # 1) 대가가 분석을 시작했음을 전송 (thinking)
         yield f"data: {json.dumps({'event': 'advice', 'guru': guru_id, 'status': 'thinking', 'step': i, 'total': total}, ensure_ascii=False)}\n\n"
-        
+
         prompt = build_guru_prompt(guru_id, resolved_symbol, profile, news, macro_data)
-        
+
         try:
             # 키 분산 및 과부하 방지를 위해 호출 전 짧은 딜레이 주입
             await asyncio.sleep(0.5)
             # Gemini 호출
             content = await call_gemini(prompt)
-            
+
             logger.info(f"[AdviceService] [Guru {i}/{total}] {guru_name} successfully generated advice. Content len: {len(content)}")
+            collected_advices.append({"name": guru_name, "title": guru["title"], "content": content})
             # 2) 대가의 분석 결과 전송 (done)
             yield f"data: {json.dumps({'event': 'advice', 'guru': guru_id, 'status': 'done', 'content': content, 'step': i, 'total': total}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error(f"[AdviceService] [Guru {i}/{total}] {guru_name} failed to generate advice: {e}")
             # 3) 에러 시 전송
             yield f"data: {json.dumps({'event': 'advice', 'guru': guru_id, 'status': 'error', 'message': f'분석 실패: {str(e)}', 'step': i, 'total': total}, ensure_ascii=False)}\n\n"
-            
-    logger.info(f"[AdviceService] Completed all 9 gurus advice streaming for {clean_ticker}")
+
+    logger.info(f"[AdviceService] [Step 3/4] Completed all {total} gurus advice streaming for {clean_ticker}")
+
+    # ── 4단계: 거장 의견 종합 최종 판결 ──
+    logger.info(f"[AdviceService] [Step 4/4] Generating final verdict from {len(collected_advices)} collected opinions")
+    yield f"data: {json.dumps({'event': 'verdict', 'status': 'thinking'}, ensure_ascii=False)}\n\n"
+
+    if not collected_advices:
+        # 모든 거장이 실패한 경우 종합할 의견 자체가 없음
+        logger.warning("[AdviceService] [Step 4/4] No advices collected — skipping verdict.")
+        yield f"data: {json.dumps({'event': 'verdict', 'status': 'error', 'message': '종합할 거장 의견이 없어 최종 판결을 생성할 수 없습니다.'}, ensure_ascii=False)}\n\n"
+    else:
+        try:
+            verdict_prompt = build_verdict_prompt(resolved_symbol, profile, macro_data, collected_advices)
+            verdict_content = await call_gemini(verdict_prompt)
+            logger.info(f"[AdviceService] [Step 4/4] Final verdict generated. Content len: {len(verdict_content)}")
+            yield f"data: {json.dumps({'event': 'verdict', 'status': 'done', 'content': verdict_content}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error(f"[AdviceService] [Step 4/4] Failed to generate final verdict: {e}")
+            yield f"data: {json.dumps({'event': 'verdict', 'status': 'error', 'message': f'최종 판결 생성 실패: {str(e)}'}, ensure_ascii=False)}\n\n"
+
+    logger.info(f"[AdviceService] Completed full advice + verdict pipeline for {clean_ticker}")
