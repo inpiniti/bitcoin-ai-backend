@@ -498,20 +498,26 @@ async def call_gemini(prompt: str, api_key: str | None = None) -> str:
             if resp.status_code == 200:
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
-            elif resp.status_code in (429, 503, 504):
+            elif resp.status_code in (403, 429, 503, 504):
                 if current_key:
-                    # 429: Rate Limit → 60초 블럭 / 503, 504: 서버 오류 → 1시간 블럭
-                    cooldown = 60 if resp.status_code == 429 else 3600
+                    # 403: 프로젝트 접근 거부 → 24시간 블럭 / 429: Rate Limit → 60초 / 503,504: 서버 오류 → 1시간
+                    if resp.status_code == 403:
+                        cooldown = 86400
+                    elif resp.status_code == 429:
+                        cooldown = 60
+                    else:
+                        cooldown = 3600
                     try:
                         get_key_manager().mark_rate_limited(current_key, cooldown_seconds=cooldown)
                         logger.warning(f"[Gemini] {resp.status_code} 오류로 키 {current_key[:8]}... 를 {cooldown}초 블럭 처리합니다.")
                     except Exception:
                         pass
 
-                retry_after = base_delay * (2 ** attempt)
+                # 403은 즉시 키 교체 후 재시도 (대기 없음), 그 외는 지수 백오프
+                retry_after = 0 if resp.status_code == 403 else base_delay * (2 ** attempt)
                 logger.warning(
                     f"[Gemini] {resp.status_code} 오류 발생. "
-                    f"{retry_after}초 후 재시도합니다 (시도 {attempt+1}/{max_retries})."
+                    f"{'즉시' if retry_after == 0 else f'{retry_after}초 후'} 재시도합니다 (시도 {attempt+1}/{max_retries})."
                 )
 
                 # 호출 시 고정 키가 전달되지 않았다면 재시도마다 사용 키 로테이션 시도
@@ -521,8 +527,9 @@ async def call_gemini(prompt: str, api_key: str | None = None) -> str:
                         logger.info(f"[Gemini] 재시도 시 다른 API 키로 교체합니다.")
                     except Exception as ke:
                         logger.warning(f"[Gemini] 재시도 시 새 API 키 획득 실패: {ke}")
-                        
-                await asyncio.sleep(retry_after)
+
+                if retry_after > 0:
+                    await asyncio.sleep(retry_after)
                 continue
             else:
                 raise Exception(f"Gemini API 에러: {resp.status_code} - {resp.text}")
