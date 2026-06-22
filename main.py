@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test, realtime, auth, account, company_analysis
+from routers import forecast, whale, xgb, market_cap, auto_trade, train_ws, gemini, youtube, rl, sp500, portfolio, test, realtime, auth, account, company_analysis, advice
 
 logging.basicConfig(
     level=logging.INFO,
@@ -326,6 +326,7 @@ app.include_router(realtime.router)
 app.include_router(auth.router)
 app.include_router(account.router)
 app.include_router(company_analysis.router)
+app.include_router(advice.router)
 app.include_router(test.router)
 
 
