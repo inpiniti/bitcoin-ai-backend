@@ -11,6 +11,8 @@ services:
       - PORT=7860
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
     # 개발 시: uvicorn --reload 로 코드 변경 자동 반영
     command: uvicorn main:app --host 0.0.0.0 --port 7860 --reload
     restart: unless-stopped
