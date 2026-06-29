@@ -112,7 +112,11 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
     단일 (ticker, earnings_date) 이벤트를 yfinance 로 구성해 upsert.
     earnings_date 미지정 시 가장 최근 과거 실적일을 사용.
     """
+    import time
     import yfinance as yf
+
+    # rate limit 회피
+    time.sleep(0.3)
 
     try:
         tk = yf.Ticker(ticker)
@@ -216,12 +220,17 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
 
 def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
     """여러 종목의 과거 실적 이벤트를 적재(초기 1회). 종목별 최근 max_per_ticker 분기."""
+    import time
     import yfinance as yf
 
     total = 0
     failed = []
-    for t in tickers:
+    for i, t in enumerate(tickers):
         try:
+            # yfinance rate limit 회피: 각 호출 사이 0.5초 대기
+            if i > 0:
+                time.sleep(0.5)
+
             tk = yf.Ticker(t)
             sector = (tk.info or {}).get("sector")
             edf = tk.get_earnings_dates(limit=max_per_ticker)
