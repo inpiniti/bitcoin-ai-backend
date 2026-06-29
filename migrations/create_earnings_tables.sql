@@ -10,6 +10,7 @@
 --   2) earnings_predictions  이벤트별 예측 결과
 --   3) earnings_positions    현재 보유 포지션
 --   4) earnings_dashboard    대시보드용 VIEW (시작가/예측가/경과%)
+--   5) earnings_api_logs     실적발표 API 로깅 테이블
 --   * 모델 아티팩트는 기존 ml_models 테이블을 재사용한다 (신규 생성 안 함).
 -- ============================================================
 
@@ -158,15 +159,35 @@ LEFT JOIN LATERAL (
 
 
 -- ============================================================
+-- 5. earnings_api_logs — API 통신 이력 로깅 테이블
+-- ============================================================
+CREATE TABLE IF NOT EXISTS earnings_api_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    api VARCHAR(255) NOT NULL,
+    payload JSONB,
+    response JSONB,
+    inout VARCHAR(5) NOT NULL CHECK (inout IN ('in', 'out')), -- in (외부 요청 들어옴), out (서버가 외부 호출함)
+    status VARCHAR(10) NOT NULL, -- success, error, empty (빈배열 리턴)
+    error_message TEXT -- 에러/빈배열 사유 기록
+);
+
+CREATE INDEX IF NOT EXISTS idx_earnings_api_logs_created ON earnings_api_logs(created_at DESC);
+
+
+-- ============================================================
 -- RLS — sp500_daily_impact와 동일 정책 (ENABLE + anon 전체 허용)
 -- ============================================================
 ALTER TABLE earnings_events      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE earnings_predictions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE earnings_positions   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE earnings_api_logs    ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Allow all for anon" ON earnings_events
   FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for anon" ON earnings_predictions
   FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for anon" ON earnings_positions
+  FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all for anon" ON earnings_api_logs
   FOR ALL USING (true) WITH CHECK (true);
