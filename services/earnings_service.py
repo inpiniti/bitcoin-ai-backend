@@ -217,23 +217,30 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
     import asyncio
     from services.tradingview_earnings_service import fetch_earnings_calendar
 
+    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목, max_per_ticker={max_per_ticker}")
+
     # 트레이딩뷰에서 과거 365일 실적 캘린더 조회
     date_from = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%d")
     date_to = datetime.utcnow().strftime("%Y-%m-%d")
+    logger.info(f"[earnings] TradeingView 조회 범위: {date_from} ~ {date_to}")
 
     try:
         loop = asyncio.get_event_loop()
+        logger.debug(f"[earnings] 기존 이벤트 루프 사용")
     except RuntimeError:
+        logger.debug(f"[earnings] 새로운 이벤트 루프 생성")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
     try:
         # 비동기로 트레이딩뷰 데이터 조회
+        logger.debug(f"[earnings] fetch_earnings_calendar 호출 시작")
         tv_events = loop.run_until_complete(
             fetch_earnings_calendar(date_from, date_to, limit=500)
         )
+        logger.info(f"[earnings] TradeingView API 반환: {len(tv_events)}개 이벤트")
     except Exception as e:
-        logger.error(f"[earnings] TradeingView 조회 실패: {e}")
+        logger.error(f"[earnings] ❌ TradeingView 조회 실패: {type(e).__name__} {e}", exc_info=True)
         return {"collected": 0, "tickers": 0, "failed": tickers}
 
     # ticker별로 그룹화
@@ -242,18 +249,26 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
         if ev.ticker in tickers:
             by_ticker.setdefault(ev.ticker, []).append(ev)
 
+    logger.info(f"[earnings] 필터링 완료: {len(by_ticker)}개 종목에 데이터 있음")
+
     total = 0
     failed = []
     for ticker in tickers:
         try:
             events = by_ticker.get(ticker, [])[:max_per_ticker]
+            if not events:
+                logger.debug(f"[earnings] {ticker}: TV 데이터 없음")
+                continue
+
             for ev in events:
                 if collect_event(ticker, earnings_date=ev.date, tv_event=ev):
                     total += 1
+            logger.debug(f"[earnings] {ticker}: {len(events)}개 이벤트 처리 완료")
         except Exception as e:
-            logger.warning(f"[earnings] history {ticker} 실패: {e}")
+            logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
             failed.append(ticker)
 
+    logger.info(f"[earnings] ✅ collect_history 완료: {total}개 수집, {len(failed)}개 실패")
     return {"collected": total, "tickers": len(tickers), "failed": failed}
 
 

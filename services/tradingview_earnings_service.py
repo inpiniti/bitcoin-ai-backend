@@ -55,7 +55,7 @@ async def fetch_earnings_calendar(
     if not date_to:
         date_to = (datetime.utcnow() + timedelta(days=90)).strftime("%Y-%m-%d")
 
-    logger.info(f"[TV Earnings] {date_from} ~ {date_to} 실적 캘린더 조회")
+    logger.info(f"[TV Earnings] API 호출 시작: {date_from} ~ {date_to} (limit={limit})")
 
     try:
         params = {
@@ -64,7 +64,10 @@ async def fetch_earnings_calendar(
             "limit": limit,
         }
 
+        logger.debug(f"[TV Earnings] 파라미터: {params}")
+
         async with httpx.AsyncClient(timeout=15) as client:
+            logger.debug(f"[TV Earnings] GET {TV_EARNINGS_API}")
             resp = await client.get(
                 TV_EARNINGS_API,
                 params=params,
@@ -73,15 +76,22 @@ async def fetch_earnings_calendar(
                 }
             )
 
+        logger.info(f"[TV Earnings] HTTP {resp.status_code}")
+
         if resp.status_code != 200:
-            logger.warning(f"[TV Earnings] API 요청 실패: HTTP {resp.status_code}")
+            logger.error(f"[TV Earnings] API 요청 실패: HTTP {resp.status_code} - {resp.text[:200]}")
             return []
 
         data = resp.json()
+        logger.debug(f"[TV Earnings] API 응답 키: {list(data.keys())}")
+
         events = []
 
         # API 응답 구조: {"data": [...]}
-        for item in data.get("data", []):
+        items = data.get("data", [])
+        logger.info(f"[TV Earnings] API 응답 항목 수: {len(items)}")
+
+        for item in items:
             try:
                 ticker = item.get("symbol", "").upper()
                 date_str = item.get("date", "")
@@ -100,11 +110,11 @@ async def fetch_earnings_calendar(
             except Exception as e:
                 logger.debug(f"[TV Earnings] 행 파싱 스킵: {e}")
 
-        logger.info(f"[TV Earnings] {len(events)}개 실적 발표 로드 완료")
+        logger.info(f"[TV Earnings] ✅ {len(events)}개 실적 발표 로드 완료")
         return events
 
     except Exception as e:
-        logger.error(f"[TV Earnings] 스크래핑 실패: {e}")
+        logger.error(f"[TV Earnings] ❌ 스크래핑 실패: {type(e).__name__} {e}", exc_info=True)
         return []
 
 
