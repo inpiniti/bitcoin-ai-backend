@@ -22,6 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 import httpx
+from starlette.concurrency import run_in_threadpool
 
 from services import earnings_repo, earnings_service
 from services.earnings_logger import log_earnings_api
@@ -58,12 +59,23 @@ class TrainReq(BaseModel):
 
 # ── 헬퍼 ─────────────────────────────────────────────────────
 
-def _sp500_tickers(limit: int) -> list[tuple[str, str]]:
-    """(ticker, sector) 목록. fetch_sp500_list 는 async 라 동기 래핑."""
+def _sp500_tickers_sync(limit: int) -> list[tuple[str, str]]:
+    """(ticker, sector) 목록. 동기 함수(스레드풀에서 실행)."""
     import asyncio
     from services.sp500_list_service import fetch_sp500_list
-    stocks = asyncio.run(fetch_sp500_list())
-    return [(s.ticker, s.sector) for s in stocks[:limit]]
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        stocks = loop.run_until_complete(fetch_sp500_list())
+        return [(s.ticker, s.sector) for s in stocks[:limit]]
+    finally:
+        if loop:
+            loop.close()
 
 
 # ── 초기 1회 ─────────────────────────────────────────────────
@@ -71,13 +83,18 @@ def _sp500_tickers(limit: int) -> list[tuple[str, str]]:
 @router.post("/earnings/history/collect", summary="과거 실적·주가 배치 적재")
 async def history_collect(req: HistoryCollectReq, request: Request):
     payload = req.dict()
-    tickers = req.tickers or [t for t, _ in _sp500_tickers(req.limit)]
+    # 동기 작업을 스레드풀에서 실행
+    tickers = req.tickers or [t for t, _ in await run_in_threadpool(_sp500_tickers_sync, req.limit)]
     if not tickers:
         raise HTTPException(400, "적재할 종목이 없습니다 (tickers 또는 universe 확인)")
-    
+
     try:
-        # yfinance를 사용하여 실질 수집
-        result = earnings_service.collect_history(tickers, max_per_ticker=req.max_per_ticker)
+        # yfinance 수집도 스레드풀에서 실행
+        result = await run_in_threadpool(
+            earnings_service.collect_history,
+            tickers,
+            req.max_per_ticker
+        )
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
