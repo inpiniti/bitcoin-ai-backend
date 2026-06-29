@@ -384,70 +384,155 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
     logger.info(f"[NaverUS] {symbol} ({stock_name}) 데이터 바인딩 완료")
     return profile
 
+async def fetch_company_via_yahoo_chart(symbol: str) -> dict:
+    """
+    Yahoo Chart v8 API로 기본 가격·지표 조회 (Crumb 불필요).
+    HuggingFace에서 fc.yahoo.com 차단 시 최종 폴백으로 사용.
+    매크로 지표 조회와 동일한 엔드포인트 사용 → HuggingFace에서 정상 작동 확인.
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d&includePrePost=false"
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=False, headers=get_headers()) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                logger.warning(f"[YahooChart] {symbol} HTTP {r.status_code}")
+                return {}
+
+            data = r.json()
+            result_list = data.get("chart", {}).get("result")
+            if not result_list:
+                logger.warning(f"[YahooChart] {symbol} result 없음")
+                return {}
+
+            result = result_list[0]
+            meta = result.get("meta", {})
+
+            price = meta.get("regularMarketPrice") or meta.get("regularMarketPreviousClose", 0) or 0
+            prev_close = meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose") or price
+            low_52 = meta.get("fiftyTwoWeekLow", 0) or 0
+            high_52 = meta.get("fiftyTwoWeekHigh", 0) or 0
+
+            quote = result.get("indicators", {}).get("quote", [{}])[0]
+            closes = [c for c in quote.get("close", []) if c is not None]
+            ma50 = sum(closes[-50:]) / min(len(closes), 50) if closes else price
+            ma200 = sum(closes[-200:]) / min(len(closes), 200) if closes else price
+
+            profile = {
+                "assetProfile": {
+                    "sector": meta.get("exchangeName", "US Stock"),
+                    "industry": meta.get("exchangeName", ""),
+                    "longBusinessSummary": f"{symbol} ({meta.get('exchangeName','')}) — 재무 상세 데이터 제한적 (Yahoo Chart 기본값)",
+                    "companyOfficers": [{"name": f"{symbol} Management"}]
+                },
+                "financialData": {
+                    "currentPrice": {"raw": price, "fmt": f"${price:.2f}"},
+                    "totalRevenue": {"raw": 0, "fmt": "N/A"},
+                    "freeCashflow": {"raw": 0, "fmt": "N/A"},
+                    "operatingMargins": {"raw": 0, "fmt": "N/A"},
+                    "returnOnEquity": {"raw": 0, "fmt": "N/A"},
+                    "debtToEquity": {"raw": 0, "fmt": "N/A"},
+                    "revenueGrowth": {"raw": 0, "fmt": "N/A"},
+                    "grossProfits": {"raw": 0, "fmt": "N/A"},
+                    "ebitda": {"raw": 0, "fmt": "N/A"},
+                    "profitMargins": {"raw": 0, "fmt": "N/A"}
+                },
+                "defaultKeyStatistics": {
+                    "forwardPE": {"raw": 0, "fmt": "N/A"},
+                    "pegRatio": {"raw": 0, "fmt": "N/A"},
+                    "priceToBook": {"raw": 0, "fmt": "N/A"},
+                    "trailingEps": {"raw": 0, "fmt": "N/A"},
+                    "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
+                    "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
+                    "beta": {"raw": meta.get("beta", 0) or 0, "fmt": "N/A"}
+                },
+                "summaryDetail": {
+                    "fiftyTwoWeekLow": {"raw": low_52, "fmt": f"${low_52:.2f}"},
+                    "fiftyTwoWeekHigh": {"raw": high_52, "fmt": f"${high_52:.2f}"},
+                    "marketCap": {"raw": 0, "fmt": "N/A"},
+                    "trailingPE": {"raw": 0, "fmt": "N/A"},
+                    "dividendYield": {"raw": 0, "fmt": "N/A"},
+                    "fiftyDayAverage": {"raw": ma50, "fmt": f"${ma50:.2f}"},
+                    "twoHundredDayAverage": {"raw": ma200, "fmt": f"${ma200:.2f}"},
+                },
+                "earnings": {}
+            }
+            logger.info(f"[YahooChart] {symbol} 폴백 성공 (price={price:.2f}, 52w {low_52:.2f}~{high_52:.2f})")
+            return profile
+
+    except Exception as e:
+        logger.error(f"[YahooChart] {symbol} 조회 실패: {e}")
+        return {}
+
+
 async def fetch_company_profile_and_financials(symbol: str) -> dict:
     """
-    Yahoo Finance quoteSummary API를 활용하여 기업 프로필 및 재무 데이터를 가져옵니다 (쿠키/크럼 캐싱 적용).
-    단, 한국 주식은 네이버 금융 연동을 통해 수집하여 차단 문제를 우회합니다.
-    야후 파이낸스 조회가 실패하거나 429 등으로 차단될 경우, 네이버 해외 주식 API로 폴백합니다.
+    기업 프로필 및 재무 데이터 조회. 3단계 폴백:
+      1. Yahoo quoteSummary (Crumb 없이 먼저 시도 → 있으면 사용)
+      2. 네이버 해외주식 API (한국 주식은 네이버 KR)
+      3. Yahoo Chart v8 (Crumb 불필요 — HuggingFace에서도 동작 확인)
     """
     if is_korean_stock(symbol):
         return await fetch_company_profile_and_financials_naver(symbol)
 
     global _cached_cookies, _cached_crumb
-    
-    yahoo_success = False
-    result_profile = {}
-    
-    for attempt in range(1):  # 1회만 시도
-        if not _cached_crumb:
-            _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
-            
-        if not _cached_crumb:
-            logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패로 인해 조회 불가")
-            break
-            
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings&crumb={_cached_crumb}"
-        headers = get_headers()
-        
+
+    # ── 1단계: Yahoo quoteSummary (Crumb 없이 먼저 시도) ──────────────────
+    async def _try_quote_summary(crumb: str | None, cookies: dict | None) -> dict:
+        crumb_param = f"&crumb={crumb}" if crumb else ""
+        url = (
+            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+            f"?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings"
+            f"{crumb_param}"
+        )
         try:
-            async with httpx.AsyncClient(timeout=2, headers=headers, cookies=_cached_cookies, verify=False) as client:  # 타임아웃 2초
+            async with httpx.AsyncClient(
+                timeout=5, headers=get_headers(),
+                cookies=cookies or {}, verify=False
+            ) as client:
                 resp = await client.get(url)
-                
+
             if resp.status_code == 401:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 401 (크럼 만료). 캐시 초기화 후 재시도...")
-                _cached_cookies = None
-                _cached_crumb = None
-                continue
-                
-            if resp.status_code == 404:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 404 (존재하지 않는 심볼)")
-                break
-                
+                return {"__need_crumb_refresh": True}
             if resp.status_code != 200:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
-                await asyncio.sleep(0.5)
-                continue
-                
+                return {}
+
             data = resp.json()
             result = data.get("quoteSummary", {}).get("result")
-            if not result:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary result empty (시도 {attempt+1})")
-                await asyncio.sleep(0.5)
-                continue
-                
-            result_profile = result[0]
-            yahoo_success = True
-            break
+            if result:
+                logger.info(f"[Yahoo] {symbol} quoteSummary 성공")
+                return result[0]
         except Exception as e:
-            logger.error(f"[Yahoo] {symbol} quoteSummary 조회 중 에러 (시도 {attempt+1}): {e}")
-            await asyncio.sleep(0.5)
-            
-    if yahoo_success and result_profile:
-        return result_profile
-        
-    # 야후 파이낸스 조회 실패 시 네이버 해외 주식 API로 폴백
-    logger.info(f"[Yahoo-Fallback] 야후 파이낸스 차단 또는 조회 실패로 네이버 해외 주식 API 폴백 실행: {symbol}")
-    return await fetch_company_profile_and_financials_naver_us(symbol)
+            logger.warning(f"[Yahoo] {symbol} quoteSummary 에러: {e}")
+        return {}
+
+    # Crumb 없이 먼저 시도
+    profile = await _try_quote_summary(None, None)
+    if profile and "__need_crumb_refresh" not in profile:
+        return profile
+
+    # Crumb 획득 후 재시도
+    if not _cached_crumb:
+        _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
+
+    if _cached_crumb:
+        profile = await _try_quote_summary(_cached_crumb, _cached_cookies)
+        if profile and "__need_crumb_refresh" not in profile:
+            return profile
+        # 크럼 만료 시 캐시 초기화
+        _cached_cookies = None
+        _cached_crumb = None
+    else:
+        logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패 (HuggingFace IP 차단 가능성)")
+
+    # ── 2단계: 네이버 해외주식 폴백 ──────────────────────────────────────
+    logger.info(f"[Fallback-2] {symbol} 네이버 해외주식 API 시도")
+    naver_result = await fetch_company_profile_and_financials_naver_us(symbol)
+    if naver_result:
+        return naver_result
+
+    # ── 3단계: Yahoo Chart v8 (Crumb 불필요 — 최종 폴백) ────────────────
+    logger.info(f"[Fallback-3] {symbol} Yahoo Chart v8 API 시도 (Crumb 불필요)")
+    return await fetch_company_via_yahoo_chart(symbol)
 
 async def fetch_company_news(symbol: str) -> list[dict]:
     """
