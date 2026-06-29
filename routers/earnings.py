@@ -27,6 +27,9 @@ from services import earnings_repo, earnings_service
 from services.earnings_logger import log_earnings_api
 from services.supabase_service import SUPABASE_URL, _headers, _check_config
 
+# 미사용 import 제거 (이미 위에서 정의됨)
+# import httpx
+
 logger = logging.getLogger("earnings_router")
 router = APIRouter(prefix="/api", tags=["earnings"])
 
