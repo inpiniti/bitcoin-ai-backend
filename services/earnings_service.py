@@ -110,18 +110,15 @@ def _build_features_from_info(info: dict) -> dict:
 def collect_event(ticker: str, earnings_date: Optional[str] = None,
                   sector: Optional[str] = None, tv_event: Optional[object] = None) -> Optional[dict]:
     """
-    단일 (ticker, earnings_date) 이벤트를 수집해 upsert.
-    tv_event: TradeingView에서 가져온 EarningsEvent 객체 (선택)
+    단일 (ticker, earnings_date) 이벤트를 yfinance로 구성해 upsert.
+    earnings_date 미지정 시 가장 최근 과거 실적일을 사용.
     """
     import yfinance as yf
 
     # earnings_date 확인
     if not earnings_date:
-        if tv_event:
-            earnings_date = tv_event.date
-        else:
-            logger.info(f"[earnings] {ticker} 실적일 미지정")
-            return None
+        logger.debug(f"[earnings] {ticker} 실적일 미지정")
+        return None
 
     try:
         tk = yf.Ticker(ticker)
@@ -130,29 +127,37 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
         logger.warning(f"[earnings] {ticker} info 조회 실패: {e}")
         info = {}
 
-    # 실적일 + EPS 서프라이즈 (트레이딩뷰 우선) ----------------------------------
+    # 실적일 + EPS 서프라이즈 --------------------------------------------------
     eps_est = eps_act = eps_surprise = None
     next_earnings_date = None
-
-    # 1. 트레이딩뷰에서 EPS 가져오기
-    if tv_event:
-        eps_est = tv_event.eps_estimate
-        eps_act = tv_event.eps_actual
-        if eps_est and eps_act:
-            eps_surprise = (eps_act - eps_est) / abs(eps_est) if eps_est != 0 else None
-
-    # 2. yfinance에서 다음 발표일만 조회 (rate limit 회피)
     try:
         edf = tk.get_earnings_dates(limit=12)
-        if edf is not None and not edf.empty:
-            edf = edf.sort_index()
-            idx_dates = [d.date() for d in edf.index]
-            target = datetime.strptime(earnings_date, "%Y-%m-%d").date()
-            future = [d for d in idx_dates if d > target]
-            if future:
-                next_earnings_date = future[0].strftime("%Y-%m-%d")
     except Exception:
-        pass  # yfinance 조회 실패는 무시
+        edf = None
+
+    if edf is not None and not edf.empty:
+        edf = edf.sort_index()
+        idx_dates = [d.date() for d in edf.index]
+        target = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+
+        # 다음 발표일 찾기
+        future = [d for d in idx_dates if d > target]
+        if future:
+            next_earnings_date = future[0].strftime("%Y-%m-%d")
+
+        # 현재 발표일의 EPS 데이터
+        try:
+            row = edf[[d.date() == target for d in edf.index]]
+            if not row.empty:
+                r = row.iloc[0]
+                eps_est = _f(r.get("EPS Estimate"))
+                eps_act = _f(r.get("Reported EPS"))
+                sp = r.get("Surprise(%)")
+                eps_surprise = _f(sp) if sp is not None else None
+                if eps_surprise is None and eps_est not in (None, 0):
+                    eps_surprise = (eps_act - eps_est) / abs(eps_est) if eps_est != 0 else None
+        except Exception as e:
+            logger.debug(f"[earnings] {ticker} 서프라이즈 파싱 스킵: {e}")
 
     if not earnings_date:
         logger.info(f"[earnings] {ticker} 실적일을 찾지 못함 → 스킵")
@@ -212,64 +217,58 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
 def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
     """
     여러 종목의 과거 실적 이벤트를 적재(초기 1회).
-    TradeingView 실적 캘린더에서 날짜를 가져옴 (yfinance rate limit 회피).
+    yfinance 직접 조회 (TradeingView API 대신).
+    Rate limit 회피: 30초당 1개 종목 조회.
     """
-    import asyncio
-    from services.tradingview_earnings_service import fetch_earnings_calendar
+    import time
+    import yfinance as yf
 
-    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목, max_per_ticker={max_per_ticker}")
-
-    # 트레이딩뷰에서 과거 365일 실적 캘린더 조회
-    date_from = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%d")
-    date_to = datetime.utcnow().strftime("%Y-%m-%d")
-    logger.info(f"[earnings] TradeingView 조회 범위: {date_from} ~ {date_to}")
-
-    try:
-        loop = asyncio.get_event_loop()
-        logger.debug(f"[earnings] 기존 이벤트 루프 사용")
-    except RuntimeError:
-        logger.debug(f"[earnings] 새로운 이벤트 루프 생성")
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    try:
-        # 비동기로 트레이딩뷰 데이터 조회
-        logger.debug(f"[earnings] fetch_earnings_calendar 호출 시작")
-        tv_events = loop.run_until_complete(
-            fetch_earnings_calendar(date_from, date_to, limit=500)
-        )
-        logger.info(f"[earnings] TradeingView API 반환: {len(tv_events)}개 이벤트")
-    except Exception as e:
-        logger.error(f"[earnings] ❌ TradeingView 조회 실패: {type(e).__name__} {e}", exc_info=True)
-        return {"collected": 0, "tickers": 0, "failed": tickers}
-
-    # ticker별로 그룹화
-    by_ticker: dict[str, list] = {}
-    for ev in tv_events:
-        if ev.ticker in tickers:
-            by_ticker.setdefault(ev.ticker, []).append(ev)
-
-    logger.info(f"[earnings] 필터링 완료: {len(by_ticker)}개 종목에 데이터 있음")
+    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목, "
+                f"max_per_ticker={max_per_ticker}, 예상 소요시간={len(tickers)*30//60}분")
 
     total = 0
     failed = []
-    for ticker in tickers:
+
+    for i, ticker in enumerate(tickers):
         try:
-            events = by_ticker.get(ticker, [])[:max_per_ticker]
-            if not events:
-                logger.debug(f"[earnings] {ticker}: TV 데이터 없음")
+            # Rate limit 회피: 30초 대기
+            if i > 0:
+                wait_sec = 30
+                logger.info(f"[earnings] {ticker} 수집 전 {wait_sec}초 대기 ({i}/{len(tickers)})")
+                time.sleep(wait_sec)
+
+            logger.info(f"[earnings] {ticker} yfinance 조회 시작")
+            tk = yf.Ticker(ticker)
+            sector = (tk.info or {}).get("sector")
+
+            edf = tk.get_earnings_dates(limit=max_per_ticker)
+            if edf is None or edf.empty:
+                logger.debug(f"[earnings] {ticker}: 실적일 데이터 없음")
+                failed.append(ticker)
                 continue
 
-            for ev in events:
-                if collect_event(ticker, earnings_date=ev.date, tv_event=ev):
+            dates = [d.date().strftime("%Y-%m-%d") for d in edf.index]
+            logger.info(f"[earnings] {ticker}: {len(dates)}개 실적일 발견")
+
+            collected_count = 0
+            for d in dates:
+                if collect_event(ticker, earnings_date=d, sector=sector):
+                    collected_count += 1
                     total += 1
-            logger.debug(f"[earnings] {ticker}: {len(events)}개 이벤트 처리 완료")
+
+            logger.info(f"[earnings] ✅ {ticker}: {collected_count}개 이벤트 수집 완료")
+
         except Exception as e:
             logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
             failed.append(ticker)
 
     logger.info(f"[earnings] ✅ collect_history 완료: {total}개 수집, {len(failed)}개 실패")
-    return {"collected": total, "tickers": len(tickers), "failed": failed}
+    return {
+        "collected": total,
+        "processed_tickers": len(tickers),
+        "total_inserted": total,
+        "failed": failed
+    }
 
 
 # ─────────────────────────────────────────────
