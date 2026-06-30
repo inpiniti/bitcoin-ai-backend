@@ -474,30 +474,133 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
     return saved
 
 
-def collect_history(
+def _collect_one_ticker(ticker: str, max_per_ticker: int, sector: Optional[str]) -> tuple[int, str]:
+    """
+    단일 종목 과거 실적 적재. (저장 개수, 상태) 반환.
+      상태: ok | no_price | no_sec | no_eps
+    데이터 소스 (모두 무인증):
+      - SEC EDGAR companyfacts: EPS + 발표일(10-Q filed) + 재무제표
+      - Yahoo Chart v8: px_pre/post/next_pre
+    """
+    from datetime import timezone as _tz
+
+    # ── 1. 가격 데이터 (Chart API) ──────────────────────────
+    chart_data = _fetch_yahoo_chart_sync(ticker, "2y")
+    result_list = chart_data.get("chart", {}).get("result")
+    if not result_list:
+        logger.warning(f"[earnings] {ticker} 차트 데이터 없음")
+        return 0, "no_price"
+
+    res = result_list[0]
+    timestamps = res.get("timestamp", [])
+    closes_raw = (res.get("indicators", {})
+                  .get("quote", [{}])[0]
+                  .get("close", []))
+    date_close: dict = {}
+    for ts, c in zip(timestamps, closes_raw):
+        if ts is not None and c is not None:
+            date_close[datetime.fromtimestamp(int(ts), tz=_tz.utc).date()] = float(c)
+
+    if not date_close:
+        logger.warning(f"[earnings] {ticker} 가격 데이터 없음")
+        return 0, "no_price"
+
+    # ── 2. SEC companyfacts (EPS + 발표일 + 재무제표) ────────
+    us_gaap = _fetch_sec_companyfacts(ticker)
+    if not us_gaap:
+        logger.warning(f"[earnings] {ticker} SEC companyfacts 없음")
+        return 0, "no_sec"
+
+    sec_events = _extract_eps_quarters(us_gaap, ticker, max_per_ticker)
+    if not sec_events:
+        logger.warning(f"[earnings] {ticker} EPS 분기 데이터 없음")
+        return 0, "no_eps"
+
+    # 발표일(filed) 오름차순 정렬 + 동일 발표일 중복 제거
+    #   → next_earnings_date를 미래로 정확히 연결
+    sec_events = sorted(sec_events, key=lambda e: e["filed"])
+    _dedup: dict = {}
+    for _ev in sec_events:
+        _dedup[_ev["filed"]] = _ev   # 같은 발표일은 최신 분기말만 유지
+    sec_events = sorted(_dedup.values(), key=lambda e: e["filed"])
+
+    fin_by_period = _extract_financials(us_gaap)   # {end_str: {재무피처}}
+
+    # ── 3. 이벤트별 저장 ──────────────────────────────────
+    saved_count = 0
+    for idx, ev in enumerate(sec_events):
+        try:
+            ann_date = ev["filed"]   # 10-Q 제출일 ≈ 발표일
+            ed_str = ann_date.strftime("%Y-%m-%d")
+            fiscal_end_str = ev["fiscal_end"].strftime("%Y-%m-%d")
+
+            next_ed_str = None
+            if idx + 1 < len(sec_events):
+                next_ed_str = sec_events[idx + 1]["filed"].strftime("%Y-%m-%d")
+
+            px_pre = _close_nearby(date_close, ann_date, direction=-1)
+            px_post = _close_nearby(date_close, ann_date, direction=+1)
+            px_next_pre = None
+            if next_ed_str:
+                next_ann_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
+                px_next_pre = _close_nearby(date_close, next_ann_date, direction=-1)
+
+            eps_act = _f(ev.get("eps_act"))
+            ret_event = _ratio(
+                (px_post - px_pre) if px_pre and px_post else None, px_pre
+            )
+            ret_hold = _ratio(
+                (px_next_pre - px_post) if px_post and px_next_pre else None, px_post
+            )
+
+            fin = fin_by_period.get(fiscal_end_str, {})   # 분기말 기준 재무 피처
+
+            row = {k: v for k, v in {
+                "ticker": ticker,
+                "gics_sector": sector,
+                "earnings_date": ed_str,
+                "next_earnings_date": next_ed_str,
+                "px_pre": px_pre,
+                "px_post": px_post,
+                "px_next_pre": px_next_pre,
+                "eps_act": eps_act,
+                "ret_event": ret_event,
+                "ret_hold": ret_hold,
+                **fin,
+            }.items() if v is not None}
+            row["ticker"] = ticker
+
+            earnings_repo.upsert_event(row)
+            saved_count += 1
+
+        except Exception as e:
+            logger.warning(f"[earnings] {ticker} 이벤트 처리 실패: {e}")
+
+    logger.info(
+        f"[earnings] ✅ {ticker}: {saved_count}/{len(sec_events)}개 저장 "
+        f"(재무 {len(fin_by_period)}분기, 섹터={sector or '없음'})"
+    )
+    return saved_count, "ok"
+
+
+def collect_history_iter(
     tickers: list[str],
     max_per_ticker: int = 8,
     sector_map: Optional[dict] = None,
-) -> dict:
+):
     """
-    과거 실적 이벤트 적재.
+    과거 실적 적재 — 진행 상황을 종목마다 yield 하는 제너레이터 (SSE용).
 
-    전략 (모두 무인증 — HuggingFace IP 차단 없음):
-      1) EPS + 발표일 + 재무제표: SEC EDGAR companyfacts (1회 호출로 전부)
-         - eps_act: 분기 EPS (누적값 제외)
-         - earnings_date: 10-Q filed 날짜 (≈ 실적 발표일)
-         - 재무 피처: gross_margin, net_margin, roe, roc, sga_to_gross,
-                      debt_to_ni, retained_earnings, cash_sti
-      2) 가격(px_pre/post/next_pre): Yahoo Chart v8 API
-
-    Args:
-        sector_map: {ticker: gics_sector} — S&P500 섹터 정보
+    yield 형식:
+      진행: {"current": i, "total": n, "ticker": t, "saved": k, "status": "ok"}
+      완료: {"done": True, "collected": N, "processed_tickers": n,
+             "total_inserted": N, "failed": [...]}
     """
     import time
-    from datetime import timezone as _tz
 
     sector_map = sector_map or {}
-    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목 (SEC EDGAR + Yahoo Chart)")
+    n = len(tickers)
+    logger.info(f"[earnings] collect_history 시작: {n}개 종목 (SEC EDGAR + Yahoo Chart)")
 
     _get_sec_ticker_cik()   # CIK 매핑 사전 로드
 
@@ -507,124 +610,52 @@ def collect_history(
     for i, ticker in enumerate(tickers):
         if i > 0:
             time.sleep(1)
-
-        logger.info(f"[earnings] {ticker} 수집 ({i+1}/{len(tickers)})")
+        logger.info(f"[earnings] {ticker} 수집 ({i+1}/{n})")
         try:
-            # ── 1. 가격 데이터 (Chart API) ──────────────────────────
-            chart_data = _fetch_yahoo_chart_sync(ticker, "2y")
-            result_list = chart_data.get("chart", {}).get("result")
-            if not result_list:
-                logger.warning(f"[earnings] {ticker} 차트 데이터 없음")
-                failed.append(ticker)
-                continue
-
-            res = result_list[0]
-            timestamps = res.get("timestamp", [])
-            closes_raw = (res.get("indicators", {})
-                          .get("quote", [{}])[0]
-                          .get("close", []))
-            date_close: dict = {}
-            for ts, c in zip(timestamps, closes_raw):
-                if ts is not None and c is not None:
-                    date_close[datetime.fromtimestamp(int(ts), tz=_tz.utc).date()] = float(c)
-
-            if not date_close:
-                logger.warning(f"[earnings] {ticker} 가격 데이터 없음")
-                failed.append(ticker)
-                continue
-
-            # ── 2. SEC companyfacts (EPS + 발표일 + 재무제표) ────────
-            us_gaap = _fetch_sec_companyfacts(ticker)
-            if not us_gaap:
-                logger.warning(f"[earnings] {ticker} SEC companyfacts 없음")
-                failed.append(ticker)
-                continue
-
-            sec_events = _extract_eps_quarters(us_gaap, ticker, max_per_ticker)
-            if not sec_events:
-                logger.warning(f"[earnings] {ticker} EPS 분기 데이터 없음")
-                failed.append(ticker)
-                continue
-
-            # 발표일(filed) 오름차순 정렬 + 동일 발표일 중복 제거
-            #   → next_earnings_date를 미래로 정확히 연결
-            sec_events = sorted(sec_events, key=lambda e: e["filed"])
-            _dedup: dict = {}
-            for _ev in sec_events:
-                _dedup[_ev["filed"]] = _ev   # 같은 발표일은 최신 분기말만 유지
-            sec_events = sorted(_dedup.values(), key=lambda e: e["filed"])
-
-            fin_by_period = _extract_financials(us_gaap)   # {end_str: {재무피처}}
-            sector = sector_map.get(ticker)
-
-            # ── 3. 이벤트별 저장 ──────────────────────────────────
-            saved_count = 0
-            for idx, ev in enumerate(sec_events):
-                try:
-                    ann_date = ev["filed"]   # 10-Q 제출일 ≈ 발표일
-                    ed_str = ann_date.strftime("%Y-%m-%d")
-                    fiscal_end_str = ev["fiscal_end"].strftime("%Y-%m-%d")
-
-                    next_ed_str = None
-                    if idx + 1 < len(sec_events):
-                        next_ed_str = sec_events[idx + 1]["filed"].strftime("%Y-%m-%d")
-
-                    px_pre = _close_nearby(date_close, ann_date, direction=-1)
-                    px_post = _close_nearby(date_close, ann_date, direction=+1)
-                    px_next_pre = None
-                    if next_ed_str:
-                        next_ann_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
-                        px_next_pre = _close_nearby(date_close, next_ann_date, direction=-1)
-
-                    eps_act = _f(ev.get("eps_act"))
-                    ret_event = _ratio(
-                        (px_post - px_pre) if px_pre and px_post else None, px_pre
-                    )
-                    ret_hold = _ratio(
-                        (px_next_pre - px_post) if px_post and px_next_pre else None, px_post
-                    )
-
-                    # 분기말 기준 재무 피처
-                    fin = fin_by_period.get(fiscal_end_str, {})
-
-                    row = {k: v for k, v in {
-                        "ticker": ticker,
-                        "gics_sector": sector,
-                        "earnings_date": ed_str,
-                        "next_earnings_date": next_ed_str,
-                        "px_pre": px_pre,
-                        "px_post": px_post,
-                        "px_next_pre": px_next_pre,
-                        "eps_act": eps_act,
-                        "ret_event": ret_event,
-                        "ret_hold": ret_hold,
-                        **fin,
-                    }.items() if v is not None}
-                    row["ticker"] = ticker
-
-                    earnings_repo.upsert_event(row)
-                    saved_count += 1
-                    total += 1
-
-                except Exception as e:
-                    logger.warning(f"[earnings] {ticker} 이벤트 처리 실패: {e}")
-
-            logger.info(
-                f"[earnings] ✅ {ticker}: {saved_count}/{len(sec_events)}개 저장 "
-                f"(재무 {len(fin_by_period)}분기, 섹터={sector or '없음'})"
-            )
-
+            saved, status = _collect_one_ticker(ticker, max_per_ticker, sector_map.get(ticker))
         except Exception as e:
             logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
+            saved, status = 0, "error"
+
+        if status == "ok":
+            total += saved
+        else:
             failed.append(ticker)
 
+        yield {
+            "current": i + 1,
+            "total": n,
+            "ticker": ticker,
+            "saved": saved,
+            "status": status,
+        }
+
     logger.info(f"[earnings] ✅ collect_history 완료: {total}개 수집, {len(failed)}개 실패")
-    return {
+    yield {
+        "done": True,
         "collected": total,
-        "processed_tickers": len(tickers),
+        "processed_tickers": n,
         "total_inserted": total,
         "failed": failed,
     }
+
+
+def collect_history(
+    tickers: list[str],
+    max_per_ticker: int = 8,
+    sector_map: Optional[dict] = None,
+) -> dict:
+    """과거 실적 적재 (일괄). 진행 제너레이터를 소비해 최종 집계만 반환."""
+    result = {
+        "collected": 0,
+        "processed_tickers": len(tickers),
+        "total_inserted": 0,
+        "failed": [],
+    }
+    for ev in collect_history_iter(tickers, max_per_ticker, sector_map):
+        if ev.get("done"):
+            result = {k: v for k, v in ev.items() if k != "done"}
+    return result
 
 
 # ─────────────────────────────────────────────

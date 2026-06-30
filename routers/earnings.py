@@ -15,14 +15,16 @@ Postman: trends/실적발표_자동매매_API.postman_collection.json
   GET  /api/positions                  대시보드(시작가/현재가/예측가/위치%/경과%)
   GET  /api/earnings/api-logs          API 통신 이력 로그 조회
 """
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
-from starlette.concurrency import run_in_threadpool
+from starlette.concurrency import run_in_threadpool, iterate_in_threadpool
 
 from services import earnings_repo, earnings_service
 from services.earnings_logger import log_earnings_api
@@ -120,6 +122,63 @@ async def history_collect(req: HistoryCollectReq, request: Request):
             error_message=str(e)
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/earnings/history/collect/stream", summary="과거 적재 (SSE 실시간 진행률)")
+async def history_collect_stream(req: HistoryCollectReq, request: Request):
+    """
+    503개 전체를 한 번에 수집하되, 종목마다 진행 상황을 SSE로 푸시.
+    타임아웃 없이 0 → N 진행률을 실시간 표시.
+
+    SSE 이벤트(각 줄 `data: {json}\\n\\n`):
+      진행: {"current":1,"total":503,"ticker":"MMM","saved":7,"status":"ok"}
+      완료: {"done":true,"collected":3500,"total_inserted":3500,"failed":[...]}
+    """
+    payload = req.dict()
+    sector_map: dict = {}
+    if req.tickers:
+        tickers = req.tickers
+    else:
+        pairs = await run_in_threadpool(_sp500_tickers_sync, req.limit)
+        tickers = [t for t, _ in pairs]
+        sector_map = {t: s for t, s in pairs}
+    if not tickers:
+        raise HTTPException(400, "적재할 종목이 없습니다 (tickers 또는 universe 확인)")
+
+    async def event_stream():
+        final = None
+        try:
+            # 동기 제너레이터를 스레드풀에서 비동기로 소비
+            sync_gen = earnings_service.collect_history_iter(
+                tickers, req.max_per_ticker, sector_map
+            )
+            async for ev in iterate_in_threadpool(sync_gen):
+                if ev.get("done"):
+                    final = ev
+                yield f"data: {json.dumps(ev)}\n\n"
+        except Exception as e:
+            logger.error(f"[earnings] SSE 수집 실패: {e}", exc_info=True)
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            # 최종 결과를 통신 로그에 기록 (스트림 종료 후)
+            await log_earnings_api(
+                api=str(request.url.path),
+                inout="in",
+                payload=payload,
+                response=final,
+                status="success" if final else "error",
+                error_message=None if final else "스트림 중단",
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",   # 프록시 버퍼링 비활성화 (실시간 전달)
+        },
+    )
 
 
 # ── 일일 루프 ────────────────────────────────────────────────
