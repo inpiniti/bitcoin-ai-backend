@@ -234,7 +234,7 @@ def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 8) -> 
 
     cutoff = _d.today() - timedelta(days=730)
     seen: dict = {}
-    for f in sorted(eps_facts, key=lambda x: x.get("filed", "")):
+    for f in sorted(eps_facts, key=lambda x: x.get("filed", "")):  # filed 오름차순
         if f.get("form") not in ("10-Q", "10-K"):
             continue
         filed = f.get("filed")
@@ -245,7 +245,12 @@ def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 8) -> 
             continue
         if not _is_quarterly_period(f):   # 분기값만 (누적 제외)
             continue
-        seen[end] = {"eps_act": _f(f.get("val")), "filed": filed}  # 최신 filed가 덮어씀
+        # filed = 최초 제출일(=실제 발표일) 고정 / eps_act = 최신값(restated 반영)
+        # 수정 제출(amended)이 발표일을 미래로 덮어쓰는 버그 방지
+        if end not in seen:
+            seen[end] = {"eps_act": _f(f.get("val")), "filed": filed}
+        else:
+            seen[end]["eps_act"] = _f(f.get("val"))
 
     recent_ends = sorted(seen.keys())[-max_quarters:]
     return [
@@ -526,6 +531,9 @@ def collect_history(
                 logger.warning(f"[earnings] {ticker} EPS 분기 데이터 없음")
                 failed.append(ticker)
                 continue
+
+            # 발표일(filed) 오름차순 정렬 — next_earnings_date를 미래로 정확히 연결
+            sec_events = sorted(sec_events, key=lambda e: e["filed"])
 
             fin_by_period = _extract_financials(us_gaap)   # {end_str: {재무피처}}
             sector = sector_map.get(ticker)
