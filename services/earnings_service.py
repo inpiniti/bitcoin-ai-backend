@@ -90,35 +90,110 @@ def _close_nearby(date_close: dict, target_date, direction: int) -> Optional[flo
 
 
 def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y") -> dict:
-    """
-    Yahoo Chart v8 API 직접 호출 — Crumb 불필요.
-    HuggingFace에서도 정상 동작 확인 (macro 지표 조회와 동일 엔드포인트).
-    """
+    """Yahoo Chart v8 API — Crumb 불필요, HuggingFace 정상 동작."""
     import httpx
-    # events=div,split,earn 형식이 표준 (earn = 실적 이벤트)
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        f"?range={range_str}&interval=1d&events=div%2Csplit%2Cearn"
+        f"?range={range_str}&interval=1d"
     )
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json",
     }
     try:
         with httpx.Client(timeout=15, verify=False, headers=headers) as client:
             r = client.get(url)
         if r.status_code == 200:
-            data = r.json()
-            # 응답 구조 디버깅
-            result_list = data.get("chart", {}).get("result", [])
-            if result_list:
-                ev_keys = list(result_list[0].get("events", {}).keys())
-                logger.debug(f"[YahooChart] {ticker} events 키: {ev_keys}")
-            return data
-        logger.warning(f"[YahooChart] {ticker} HTTP {r.status_code}: {r.text[:100]}")
+            return r.json()
+        logger.warning(f"[YahooChart] {ticker} HTTP {r.status_code}")
     except Exception as e:
         logger.warning(f"[YahooChart] {ticker} 조회 실패: {e}")
     return {}
+
+
+def _fetch_earnings_qs_sync(ticker: str, max_quarters: int = 8) -> list[dict]:
+    """
+    Yahoo quoteSummary earningsHistory — Crumb 없이 직접 요청 시도.
+    반환: [{"fiscal_end": date, "eps_est": float|None, "eps_act": float|None}, ...]
+    fiscal_end = 분기말 날짜 (실발표일이 아님, _find_announcement_date로 추정)
+    """
+    import httpx
+    from datetime import timezone as _tz
+
+    url = (
+        f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+        f"?modules=earningsHistory"
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        with httpx.Client(timeout=15, verify=False, headers=headers) as client:
+            r = client.get(url)
+        logger.info(f"[YahooQS] {ticker} earningsHistory HTTP {r.status_code}")
+        if r.status_code == 200:
+            data = r.json()
+            qs = data.get("quoteSummary", {})
+            if qs.get("error"):
+                logger.warning(f"[YahooQS] {ticker} 오류: {qs['error']}")
+                return []
+            hist = (
+                (qs.get("result") or [{}])[0]
+                .get("earningsHistory", {})
+                .get("history", [])
+            )
+            out = []
+            for h in hist[-max_quarters:]:
+                ts = (h.get("quarter") or {}).get("raw")
+                if not ts:
+                    continue
+                fiscal_end = datetime.fromtimestamp(int(ts), tz=_tz.utc).date()
+                out.append({
+                    "fiscal_end": fiscal_end,
+                    "eps_est": (h.get("epsEstimate") or {}).get("raw"),
+                    "eps_act": (h.get("epsActual") or {}).get("raw"),
+                })
+            logger.info(f"[YahooQS] {ticker} {len(out)}개 분기 수신")
+            return out
+        logger.warning(f"[YahooQS] {ticker} HTTP {r.status_code} — Crumb 필요 가능성")
+    except Exception as e:
+        logger.warning(f"[YahooQS] {ticker} 실패: {e}")
+    return []
+
+
+def _find_announcement_date(date_close: dict, fiscal_end) -> object:
+    """
+    분기말 이후 5~60일 내 가장 큰 일일 등락이 있는 날을 발표일로 추정.
+    실적 발표는 통상 분기 마감 후 2~8주 사이에 발생.
+    """
+    window_start = fiscal_end + timedelta(days=5)
+    window_end = fiscal_end + timedelta(days=60)
+
+    max_move = 0.0
+    best_date = fiscal_end + timedelta(days=30)  # 기본값
+
+    # 탐색 직전 마지막 종가
+    prev_close = None
+    for d in sorted(date_close.keys()):
+        if d < window_start:
+            prev_close = date_close[d]
+        else:
+            break
+
+    for d in sorted(d for d in date_close if window_start <= d <= window_end):
+        c = date_close.get(d)
+        if prev_close and prev_close > 0 and c:
+            move = abs(c / prev_close - 1)
+            if move > max_move:
+                max_move = move
+                best_date = d
+        prev_close = c
+
+    return best_date
 
 
 # ─────────────────────────────────────────────
@@ -260,90 +335,94 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
 
 def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
     """
-    Yahoo Chart v8 API로 과거 실적 이벤트 적재 (Crumb 불필요).
-    yfinance 대신 직접 HTTP 호출 → HuggingFace IP 차단 우회.
+    과거 실적 이벤트 적재.
+
+    전략:
+      1) 가격 데이터: Yahoo Chart v8 API (Crumb 불필요 — HuggingFace 확인됨)
+      2) EPS 데이터:  Yahoo quoteSummary earningsHistory (Crumb 없이 시도)
+      3) 발표일 추정: 분기말 이후 5~60일 내 최대 일일 등락 날짜
     """
     import time
-    from datetime import timezone as tz
+    from datetime import timezone as _tz
 
-    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목 (Yahoo Chart v8)")
+    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목")
 
     total = 0
     failed = []
 
     for i, ticker in enumerate(tickers):
         if i > 0:
-            time.sleep(1)  # Chart API는 rate limit 여유로움
+            time.sleep(1)
 
         logger.info(f"[earnings] {ticker} 수집 ({i+1}/{len(tickers)})")
         try:
-            data = _fetch_yahoo_chart_sync(ticker, "2y")
-            result_list = data.get("chart", {}).get("result")
+            # ── 1. 가격 데이터 (Chart API) ──────────────────────────
+            chart_data = _fetch_yahoo_chart_sync(ticker, "2y")
+            result_list = chart_data.get("chart", {}).get("result")
             if not result_list:
                 logger.warning(f"[earnings] {ticker} 차트 데이터 없음")
                 failed.append(ticker)
                 continue
 
-            result = result_list[0]
-
-            # date → close 매핑
-            timestamps = result.get("timestamp", [])
-            closes_raw = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            res = result_list[0]
+            timestamps = res.get("timestamp", [])
+            closes_raw = (res.get("indicators", {})
+                          .get("quote", [{}])[0]
+                          .get("close", []))
             date_close: dict = {}
             for ts, c in zip(timestamps, closes_raw):
                 if ts is not None and c is not None:
-                    date_close[datetime.fromtimestamp(int(ts), tz=tz.utc).date()] = float(c)
+                    date_close[datetime.fromtimestamp(int(ts), tz=_tz.utc).date()] = float(c)
 
-            # 실적 이벤트 (키 이름이 'earnings' 또는 'earn'일 수 있음)
-            events_dict = result.get("events", {})
-            events_raw = events_dict.get("earnings") or events_dict.get("earn") or {}
-            if not events_raw:
-                logger.warning(
-                    f"[earnings] {ticker} 실적 이벤트 없음 "
-                    f"(events 키: {list(events_dict.keys())}, "
-                    f"result 키: {list(result.keys())})"
-                )
+            if not date_close:
+                logger.warning(f"[earnings] {ticker} 가격 데이터 없음")
                 failed.append(ticker)
                 continue
 
-            # 날짜순 정렬 후 최근 max_per_ticker개
-            sorted_evs = sorted(events_raw.values(), key=lambda e: e.get("date", 0))
-            recent_evs = sorted_evs[-max_per_ticker:]
-            logger.info(f"[earnings] {ticker}: {len(recent_evs)}개 실적 이벤트 발견")
+            # ── 2. EPS 데이터 (quoteSummary — Crumb 없이 시도) ──────
+            qs_events = _fetch_earnings_qs_sync(ticker, max_per_ticker)
+            if not qs_events:
+                logger.warning(f"[earnings] {ticker} EPS 데이터 없음 (quoteSummary 차단 또는 빈값)")
+                failed.append(ticker)
+                continue
 
+            # ── 3. 이벤트별 저장 ──────────────────────────────────
             saved_count = 0
-            for idx, ev in enumerate(recent_evs):
+            for idx, ev in enumerate(qs_events):
                 try:
-                    ed_ts = ev.get("date")
-                    if not ed_ts:
-                        continue
-                    ed = datetime.fromtimestamp(int(ed_ts), tz=tz.utc).date()
-                    ed_str = ed.strftime("%Y-%m-%d")
+                    fiscal_end = ev["fiscal_end"]  # date
 
-                    # 다음 발표일
+                    # 발표일 추정: 분기말 이후 가장 큰 일일 등락
+                    ann_date = _find_announcement_date(date_close, fiscal_end)
+                    ed_str = ann_date.strftime("%Y-%m-%d")
+
+                    # 다음 분기 발표일 추정
                     next_ed_str = None
-                    if idx + 1 < len(recent_evs):
-                        next_ts = recent_evs[idx + 1].get("date")
-                        if next_ts:
-                            next_ed = datetime.fromtimestamp(int(next_ts), tz=tz.utc).date()
-                            next_ed_str = next_ed.strftime("%Y-%m-%d")
+                    if idx + 1 < len(qs_events):
+                        next_ann = _find_announcement_date(
+                            date_close, qs_events[idx + 1]["fiscal_end"]
+                        )
+                        next_ed_str = next_ann.strftime("%Y-%m-%d")
 
-                    # 발표 전날 / 발표 다음날 종가
-                    px_pre = _close_nearby(date_close, ed, direction=-1)
-                    px_post = _close_nearby(date_close, ed, direction=+1)
+                    px_pre = _close_nearby(date_close, ann_date, direction=-1)
+                    px_post = _close_nearby(date_close, ann_date, direction=+1)
                     px_next_pre = None
                     if next_ed_str:
-                        next_ed_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
-                        px_next_pre = _close_nearby(date_close, next_ed_date, direction=-1)
+                        next_ann_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
+                        px_next_pre = _close_nearby(date_close, next_ann_date, direction=-1)
 
-                    ret_event = _ratio((px_post - px_pre) if px_pre and px_post else None, px_pre)
-                    ret_hold = _ratio((px_next_pre - px_post) if px_post and px_next_pre else None, px_post)
-
-                    eps_est = _f(ev.get("epsEstimate"))
-                    eps_act = _f(ev.get("epsActual"))
+                    eps_est = _f(ev.get("eps_est"))
+                    eps_act = _f(ev.get("eps_act"))
                     eps_surprise = None
-                    if eps_est is not None and eps_act is not None and eps_est != 0:
+                    if eps_est and eps_act and eps_est != 0:
                         eps_surprise = (eps_act - eps_est) / abs(eps_est)
+
+                    ret_event = _ratio(
+                        (px_post - px_pre) if px_pre and px_post else None, px_pre
+                    )
+                    ret_hold = _ratio(
+                        (px_next_pre - px_post) if px_post and px_next_pre else None, px_post
+                    )
 
                     row = {k: v for k, v in {
                         "ticker": ticker,
@@ -367,7 +446,7 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                 except Exception as e:
                     logger.warning(f"[earnings] {ticker} 이벤트 처리 실패: {e}")
 
-            logger.info(f"[earnings] ✅ {ticker}: {saved_count}/{len(recent_evs)}개 저장")
+            logger.info(f"[earnings] ✅ {ticker}: {saved_count}/{len(qs_events)}개 저장")
 
         except Exception as e:
             logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
@@ -378,7 +457,7 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
         "collected": total,
         "processed_tickers": len(tickers),
         "total_inserted": total,
-        "failed": failed
+        "failed": failed,
     }
 
 
