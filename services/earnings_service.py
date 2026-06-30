@@ -245,6 +245,12 @@ def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 8) -> 
             continue
         if not _is_quarterly_period(f):   # 분기값만 (누적 제외)
             continue
+        # 당분기 보고만 인정 — 같은 filing에 끼어든 '전년 동기 비교값' 제외
+        # (당분기: filed가 분기말 직후 ~40일 / 비교값: filed가 분기말 +1년 이상)
+        gap = (datetime.strptime(filed, "%Y-%m-%d").date()
+               - datetime.strptime(end, "%Y-%m-%d").date()).days
+        if gap < 0 or gap > 100:
+            continue
         # filed = 최초 제출일(=실제 발표일) 고정 / eps_act = 최신값(restated 반영)
         # 수정 제출(amended)이 발표일을 미래로 덮어쓰는 버그 방지
         if end not in seen:
@@ -532,8 +538,13 @@ def collect_history(
                 failed.append(ticker)
                 continue
 
-            # 발표일(filed) 오름차순 정렬 — next_earnings_date를 미래로 정확히 연결
+            # 발표일(filed) 오름차순 정렬 + 동일 발표일 중복 제거
+            #   → next_earnings_date를 미래로 정확히 연결
             sec_events = sorted(sec_events, key=lambda e: e["filed"])
+            _dedup: dict = {}
+            for _ev in sec_events:
+                _dedup[_ev["filed"]] = _ev   # 같은 발표일은 최신 분기말만 유지
+            sec_events = sorted(_dedup.values(), key=lambda e: e["filed"])
 
             fin_by_period = _extract_financials(us_gaap)   # {end_str: {재무피처}}
             sector = sector_map.get(ticker)
