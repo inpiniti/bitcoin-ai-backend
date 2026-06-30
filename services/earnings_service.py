@@ -223,8 +223,16 @@ def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 8) -> 
     """
     from datetime import date as _d
 
+    # EPS 태그 — 표준 우선, 없으면 '계속영업 EPS' 등 폴백
+    #   (ABNB 등 일부 종목은 EarningsPerShareDiluted 대신 다른 태그로 보고)
     eps_facts = []
-    for key in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+    for key in (
+        "EarningsPerShareDiluted",
+        "EarningsPerShareBasic",
+        "IncomeLossFromContinuingOperationsPerDilutedShare",
+        "IncomeLossFromContinuingOperationsPerBasicShare",
+        "EarningsPerShareBasicAndDiluted",
+    ):
         eps_facts = us_gaap.get(key, {}).get("units", {}).get("USD/shares", [])
         if eps_facts:
             break
