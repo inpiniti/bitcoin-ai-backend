@@ -112,88 +112,127 @@ def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y") -> dict:
     return {}
 
 
-def _fetch_earnings_qs_sync(ticker: str, max_quarters: int = 8) -> list[dict]:
-    """
-    Yahoo quoteSummary earningsHistory — Crumb 없이 직접 요청 시도.
-    반환: [{"fiscal_end": date, "eps_est": float|None, "eps_act": float|None}, ...]
-    fiscal_end = 분기말 날짜 (실발표일이 아님, _find_announcement_date로 추정)
-    """
-    import httpx
-    from datetime import timezone as _tz
+# ─────────────────────────────────────────────
+# SEC EDGAR XBRL API (무인증 정부 공개 API)
+# ─────────────────────────────────────────────
 
-    url = (
-        f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        f"?modules=earningsHistory"
-    )
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+_sec_ticker_cik: dict = {}
+
+
+def _get_sec_ticker_cik() -> dict:
+    """SEC EDGAR 전체 ticker→CIK10 매핑 (1회 로드, 프로세스 캐시)."""
+    global _sec_ticker_cik
+    if _sec_ticker_cik:
+        return _sec_ticker_cik
+    import httpx
     try:
-        with httpx.Client(timeout=15, verify=False, headers=headers) as client:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        headers = {"User-Agent": "EarningsCollector contact@example.com"}
+        with httpx.Client(timeout=30, verify=False, headers=headers) as client:
             r = client.get(url)
-        logger.info(f"[YahooQS] {ticker} earningsHistory HTTP {r.status_code}")
         if r.status_code == 200:
             data = r.json()
-            qs = data.get("quoteSummary", {})
-            if qs.get("error"):
-                logger.warning(f"[YahooQS] {ticker} 오류: {qs['error']}")
-                return []
-            hist = (
-                (qs.get("result") or [{}])[0]
-                .get("earningsHistory", {})
-                .get("history", [])
-            )
-            out = []
-            for h in hist[-max_quarters:]:
-                ts = (h.get("quarter") or {}).get("raw")
-                if not ts:
-                    continue
-                fiscal_end = datetime.fromtimestamp(int(ts), tz=_tz.utc).date()
-                out.append({
-                    "fiscal_end": fiscal_end,
-                    "eps_est": (h.get("epsEstimate") or {}).get("raw"),
-                    "eps_act": (h.get("epsActual") or {}).get("raw"),
-                })
-            logger.info(f"[YahooQS] {ticker} {len(out)}개 분기 수신")
-            return out
-        logger.warning(f"[YahooQS] {ticker} HTTP {r.status_code} — Crumb 필요 가능성")
-    except Exception as e:
-        logger.warning(f"[YahooQS] {ticker} 실패: {e}")
-    return []
-
-
-def _find_announcement_date(date_close: dict, fiscal_end) -> object:
-    """
-    분기말 이후 5~60일 내 가장 큰 일일 등락이 있는 날을 발표일로 추정.
-    실적 발표는 통상 분기 마감 후 2~8주 사이에 발생.
-    """
-    window_start = fiscal_end + timedelta(days=5)
-    window_end = fiscal_end + timedelta(days=60)
-
-    max_move = 0.0
-    best_date = fiscal_end + timedelta(days=30)  # 기본값
-
-    # 탐색 직전 마지막 종가
-    prev_close = None
-    for d in sorted(date_close.keys()):
-        if d < window_start:
-            prev_close = date_close[d]
+            _sec_ticker_cik = {
+                v["ticker"].upper(): str(v["cik_str"]).zfill(10)
+                for v in data.values()
+            }
+            logger.info(f"[SEC] ticker→CIK {len(_sec_ticker_cik)}개 로드 완료")
         else:
-            break
+            logger.warning(f"[SEC] company_tickers.json HTTP {r.status_code}")
+    except Exception as e:
+        logger.warning(f"[SEC] CIK 로드 실패: {e}")
+    return _sec_ticker_cik
 
-    for d in sorted(d for d in date_close if window_start <= d <= window_end):
-        c = date_close.get(d)
-        if prev_close and prev_close > 0 and c:
-            move = abs(c / prev_close - 1)
-            if move > max_move:
-                max_move = move
-                best_date = d
-        prev_close = c
 
-    return best_date
+def _fetch_earnings_sec_sync(ticker: str, max_quarters: int = 8) -> list[dict]:
+    """
+    SEC EDGAR XBRL API — 분기 실적 발표일 + EPS 실제치.
+
+    장점:
+      - 무인증 (미국 정부 공개 API) — HuggingFace IP 차단 없음
+      - 10-Q 제출일(filed) = 실적 발표 당일/익영업일
+
+    한계:
+      - eps_est (애널리스트 추정치) 없음 → eps_surprise_pct = None
+
+    반환: [{"filed": date, "fiscal_end": date, "eps_act": float|None}, ...]
+    """
+    import httpx
+    from datetime import date as _d
+
+    cik_map = _get_sec_ticker_cik()
+    cik = cik_map.get(ticker.upper())
+    if not cik:
+        logger.warning(f"[SEC] {ticker} CIK 없음")
+        return []
+
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    headers = {"User-Agent": "EarningsCollector contact@example.com"}
+
+    try:
+        with httpx.Client(timeout=60, verify=False, headers=headers) as client:
+            r = client.get(url)
+
+        if r.status_code != 200:
+            logger.warning(f"[SEC] {ticker} HTTP {r.status_code}")
+            return []
+
+        us_gaap = r.json().get("facts", {}).get("us-gaap", {})
+
+        # EPS Diluted 우선, 없으면 Basic
+        eps_facts = []
+        for key in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+            eps_facts = us_gaap.get(key, {}).get("units", {}).get("USD/shares", [])
+            if eps_facts:
+                break
+
+        if not eps_facts:
+            logger.warning(f"[SEC] {ticker} EPS 데이터 없음")
+            return []
+
+        # 10-Q (분기) 필터, 최근 2년
+        cutoff = _d.today() - timedelta(days=730)
+        quarterly = [
+            f for f in eps_facts
+            if f.get("form") == "10-Q"
+            and f.get("filed")
+            and datetime.strptime(f["filed"], "%Y-%m-%d").date() > cutoff
+        ]
+        if not quarterly:  # 10-K (연간) 폴백
+            quarterly = [
+                f for f in eps_facts
+                if f.get("form") == "10-K"
+                and f.get("filed")
+                and datetime.strptime(f["filed"], "%Y-%m-%d").date() > cutoff
+            ]
+
+        # 동일 분기 중복 제거 — end 기준 최초 제출본
+        seen: dict = {}
+        for f in sorted(quarterly, key=lambda x: x.get("filed", "")):
+            end = f.get("end", "")
+            if end not in seen:
+                seen[end] = f
+
+        recent = sorted(seen.values(), key=lambda x: x.get("end", ""))[-max_quarters:]
+
+        out = []
+        for f in recent:
+            filed_str = f.get("filed")
+            end_str = f.get("end")
+            if not filed_str or not end_str:
+                continue
+            out.append({
+                "filed": datetime.strptime(filed_str, "%Y-%m-%d").date(),
+                "fiscal_end": datetime.strptime(end_str, "%Y-%m-%d").date(),
+                "eps_act": _f(f.get("val")),
+            })
+
+        logger.info(f"[SEC] {ticker} {len(out)}개 분기 수신 (CIK={cik})")
+        return out
+
+    except Exception as e:
+        logger.warning(f"[SEC] {ticker} 실패: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────
@@ -338,14 +377,17 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
     과거 실적 이벤트 적재.
 
     전략:
-      1) 가격 데이터: Yahoo Chart v8 API (Crumb 불필요 — HuggingFace 확인됨)
-      2) EPS 데이터:  Yahoo quoteSummary earningsHistory (Crumb 없이 시도)
-      3) 발표일 추정: 분기말 이후 5~60일 내 최대 일일 등락 날짜
+      1) EPS + 발표일: SEC EDGAR XBRL API (무인증, 정부 API — HuggingFace IP 차단 없음)
+         10-Q filed 날짜 = 실적 발표 당일/익영업일
+      2) 가격 데이터: Yahoo Chart v8 API (Crumb 불필요)
     """
     import time
     from datetime import timezone as _tz
 
-    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목")
+    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목 (SEC EDGAR + Yahoo Chart)")
+
+    # CIK 매핑 사전 로드
+    _get_sec_ticker_cik()
 
     total = 0
     failed = []
@@ -379,29 +421,23 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                 failed.append(ticker)
                 continue
 
-            # ── 2. EPS 데이터 (quoteSummary — Crumb 없이 시도) ──────
-            qs_events = _fetch_earnings_qs_sync(ticker, max_per_ticker)
-            if not qs_events:
-                logger.warning(f"[earnings] {ticker} EPS 데이터 없음 (quoteSummary 차단 또는 빈값)")
+            # ── 2. EPS + 발표일 (SEC EDGAR) ─────────────────────────
+            sec_events = _fetch_earnings_sec_sync(ticker, max_per_ticker)
+            if not sec_events:
+                logger.warning(f"[earnings] {ticker} SEC 데이터 없음")
                 failed.append(ticker)
                 continue
 
             # ── 3. 이벤트별 저장 ──────────────────────────────────
             saved_count = 0
-            for idx, ev in enumerate(qs_events):
+            for idx, ev in enumerate(sec_events):
                 try:
-                    fiscal_end = ev["fiscal_end"]  # date
-
-                    # 발표일 추정: 분기말 이후 가장 큰 일일 등락
-                    ann_date = _find_announcement_date(date_close, fiscal_end)
+                    ann_date = ev["filed"]   # 10-Q 제출일 ≈ 발표일
                     ed_str = ann_date.strftime("%Y-%m-%d")
 
-                    # 다음 분기 발표일 추정
                     next_ed_str = None
-                    if idx + 1 < len(qs_events):
-                        next_ann = _find_announcement_date(
-                            date_close, qs_events[idx + 1]["fiscal_end"]
-                        )
+                    if idx + 1 < len(sec_events):
+                        next_ann = sec_events[idx + 1]["filed"]
                         next_ed_str = next_ann.strftime("%Y-%m-%d")
 
                     px_pre = _close_nearby(date_close, ann_date, direction=-1)
@@ -411,12 +447,7 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                         next_ann_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
                         px_next_pre = _close_nearby(date_close, next_ann_date, direction=-1)
 
-                    eps_est = _f(ev.get("eps_est"))
                     eps_act = _f(ev.get("eps_act"))
-                    eps_surprise = None
-                    if eps_est and eps_act and eps_est != 0:
-                        eps_surprise = (eps_act - eps_est) / abs(eps_est)
-
                     ret_event = _ratio(
                         (px_post - px_pre) if px_pre and px_post else None, px_pre
                     )
@@ -431,9 +462,7 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                         "px_pre": px_pre,
                         "px_post": px_post,
                         "px_next_pre": px_next_pre,
-                        "eps_est": eps_est,
                         "eps_act": eps_act,
-                        "eps_surprise_pct": eps_surprise,
                         "ret_event": ret_event,
                         "ret_hold": ret_hold,
                     }.items() if v is not None}
@@ -446,7 +475,7 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                 except Exception as e:
                     logger.warning(f"[earnings] {ticker} 이벤트 처리 실패: {e}")
 
-            logger.info(f"[earnings] ✅ {ticker}: {saved_count}/{len(qs_events)}개 저장")
+            logger.info(f"[earnings] ✅ {ticker}: {saved_count}/{len(sec_events)}개 저장")
 
         except Exception as e:
             logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
