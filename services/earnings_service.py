@@ -93,22 +93,29 @@ def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y") -> dict:
     """
     Yahoo Chart v8 API 직접 호출 — Crumb 불필요.
     HuggingFace에서도 정상 동작 확인 (macro 지표 조회와 동일 엔드포인트).
-    earnings, dividends 이벤트 포함.
     """
     import httpx
+    # events=div,split,earn 형식이 표준 (earn = 실적 이벤트)
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        f"?range={range_str}&interval=1d&events=earnings,dividends&includePrePost=false"
+        f"?range={range_str}&interval=1d&events=div%2Csplit%2Cearn"
     )
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json",
     }
     try:
         with httpx.Client(timeout=15, verify=False, headers=headers) as client:
             r = client.get(url)
         if r.status_code == 200:
-            return r.json()
-        logger.warning(f"[YahooChart] {ticker} HTTP {r.status_code}")
+            data = r.json()
+            # 응답 구조 디버깅
+            result_list = data.get("chart", {}).get("result", [])
+            if result_list:
+                ev_keys = list(result_list[0].get("events", {}).keys())
+                logger.debug(f"[YahooChart] {ticker} events 키: {ev_keys}")
+            return data
+        logger.warning(f"[YahooChart] {ticker} HTTP {r.status_code}: {r.text[:100]}")
     except Exception as e:
         logger.warning(f"[YahooChart] {ticker} 조회 실패: {e}")
     return {}
@@ -287,10 +294,15 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                 if ts is not None and c is not None:
                     date_close[datetime.fromtimestamp(int(ts), tz=tz.utc).date()] = float(c)
 
-            # 실적 이벤트
-            events_raw = result.get("events", {}).get("earnings", {})
+            # 실적 이벤트 (키 이름이 'earnings' 또는 'earn'일 수 있음)
+            events_dict = result.get("events", {})
+            events_raw = events_dict.get("earnings") or events_dict.get("earn") or {}
             if not events_raw:
-                logger.debug(f"[earnings] {ticker} 실적 이벤트 없음")
+                logger.warning(
+                    f"[earnings] {ticker} 실적 이벤트 없음 "
+                    f"(events 키: {list(events_dict.keys())}, "
+                    f"result 키: {list(result.keys())})"
+                )
                 failed.append(ticker)
                 continue
 
