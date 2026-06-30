@@ -77,6 +77,43 @@ def _close_on_or_after(hist, date) -> Optional[float]:
     return _f(sub["Close"].iloc[0])
 
 
+def _close_nearby(date_close: dict, target_date, direction: int) -> Optional[float]:
+    """
+    date_close(date→close 딕셔너리)에서 target_date 기준으로
+    direction=-1이면 이전, +1이면 이후 가장 가까운 거래일 종가 반환 (최대 7일 탐색).
+    """
+    for delta in range(1, 8):
+        d = target_date + timedelta(days=delta * direction)
+        if d in date_close:
+            return date_close[d]
+    return None
+
+
+def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y") -> dict:
+    """
+    Yahoo Chart v8 API 직접 호출 — Crumb 불필요.
+    HuggingFace에서도 정상 동작 확인 (macro 지표 조회와 동일 엔드포인트).
+    earnings, dividends 이벤트 포함.
+    """
+    import httpx
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        f"?range={range_str}&interval=1d&events=earnings,dividends&includePrePost=false"
+    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    try:
+        with httpx.Client(timeout=15, verify=False, headers=headers) as client:
+            r = client.get(url)
+        if r.status_code == 200:
+            return r.json()
+        logger.warning(f"[YahooChart] {ticker} HTTP {r.status_code}")
+    except Exception as e:
+        logger.warning(f"[YahooChart] {ticker} 조회 실패: {e}")
+    return {}
+
+
 # ─────────────────────────────────────────────
 # 수집 (yfinance → earnings_events)
 # ─────────────────────────────────────────────
@@ -216,47 +253,109 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
 
 def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
     """
-    여러 종목의 과거 실적 이벤트를 적재(초기 1회).
-    yfinance 직접 조회 (TradeingView API 대신).
-    Rate limit 회피: 30초당 1개 종목 조회.
+    Yahoo Chart v8 API로 과거 실적 이벤트 적재 (Crumb 불필요).
+    yfinance 대신 직접 HTTP 호출 → HuggingFace IP 차단 우회.
     """
     import time
-    import yfinance as yf
+    from datetime import timezone as tz
 
-    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목, "
-                f"max_per_ticker={max_per_ticker}, 예상 소요시간={len(tickers)*30//60}분")
+    logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목 (Yahoo Chart v8)")
 
     total = 0
     failed = []
 
     for i, ticker in enumerate(tickers):
+        if i > 0:
+            time.sleep(1)  # Chart API는 rate limit 여유로움
+
+        logger.info(f"[earnings] {ticker} 수집 ({i+1}/{len(tickers)})")
         try:
-            # Rate limit 회피: 30초 대기
-            if i > 0:
-                wait_sec = 30
-                logger.info(f"[earnings] {ticker} 수집 전 {wait_sec}초 대기 ({i}/{len(tickers)})")
-                time.sleep(wait_sec)
-
-            logger.info(f"[earnings] {ticker} yfinance 조회 시작")
-            tk = yf.Ticker(ticker)
-            sector = (tk.info or {}).get("sector")
-
-            edf = tk.get_earnings_dates(limit=max_per_ticker)
-            if edf is None or edf.empty:
-                logger.debug(f"[earnings] {ticker}: 실적일 데이터 없음")
+            data = _fetch_yahoo_chart_sync(ticker, "2y")
+            result_list = data.get("chart", {}).get("result")
+            if not result_list:
+                logger.warning(f"[earnings] {ticker} 차트 데이터 없음")
                 failed.append(ticker)
                 continue
 
-            dates = [d.date().strftime("%Y-%m-%d") for d in edf.index]
-            logger.info(f"[earnings] {ticker}: {len(dates)}개 실적일 발견")
+            result = result_list[0]
 
-            collected_count = 0
-            for d in dates:
-                if collect_event(ticker, earnings_date=d, sector=sector):
-                    collected_count += 1
+            # date → close 매핑
+            timestamps = result.get("timestamp", [])
+            closes_raw = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            date_close: dict = {}
+            for ts, c in zip(timestamps, closes_raw):
+                if ts is not None and c is not None:
+                    date_close[datetime.fromtimestamp(int(ts), tz=tz.utc).date()] = float(c)
+
+            # 실적 이벤트
+            events_raw = result.get("events", {}).get("earnings", {})
+            if not events_raw:
+                logger.debug(f"[earnings] {ticker} 실적 이벤트 없음")
+                failed.append(ticker)
+                continue
+
+            # 날짜순 정렬 후 최근 max_per_ticker개
+            sorted_evs = sorted(events_raw.values(), key=lambda e: e.get("date", 0))
+            recent_evs = sorted_evs[-max_per_ticker:]
+            logger.info(f"[earnings] {ticker}: {len(recent_evs)}개 실적 이벤트 발견")
+
+            saved_count = 0
+            for idx, ev in enumerate(recent_evs):
+                try:
+                    ed_ts = ev.get("date")
+                    if not ed_ts:
+                        continue
+                    ed = datetime.fromtimestamp(int(ed_ts), tz=tz.utc).date()
+                    ed_str = ed.strftime("%Y-%m-%d")
+
+                    # 다음 발표일
+                    next_ed_str = None
+                    if idx + 1 < len(recent_evs):
+                        next_ts = recent_evs[idx + 1].get("date")
+                        if next_ts:
+                            next_ed = datetime.fromtimestamp(int(next_ts), tz=tz.utc).date()
+                            next_ed_str = next_ed.strftime("%Y-%m-%d")
+
+                    # 발표 전날 / 발표 다음날 종가
+                    px_pre = _close_nearby(date_close, ed, direction=-1)
+                    px_post = _close_nearby(date_close, ed, direction=+1)
+                    px_next_pre = None
+                    if next_ed_str:
+                        next_ed_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
+                        px_next_pre = _close_nearby(date_close, next_ed_date, direction=-1)
+
+                    ret_event = _ratio((px_post - px_pre) if px_pre and px_post else None, px_pre)
+                    ret_hold = _ratio((px_next_pre - px_post) if px_post and px_next_pre else None, px_post)
+
+                    eps_est = _f(ev.get("epsEstimate"))
+                    eps_act = _f(ev.get("epsActual"))
+                    eps_surprise = None
+                    if eps_est is not None and eps_act is not None and eps_est != 0:
+                        eps_surprise = (eps_act - eps_est) / abs(eps_est)
+
+                    row = {k: v for k, v in {
+                        "ticker": ticker,
+                        "earnings_date": ed_str,
+                        "next_earnings_date": next_ed_str,
+                        "px_pre": px_pre,
+                        "px_post": px_post,
+                        "px_next_pre": px_next_pre,
+                        "eps_est": eps_est,
+                        "eps_act": eps_act,
+                        "eps_surprise_pct": eps_surprise,
+                        "ret_event": ret_event,
+                        "ret_hold": ret_hold,
+                    }.items() if v is not None}
+                    row["ticker"] = ticker
+
+                    earnings_repo.upsert_event(row)
+                    saved_count += 1
                     total += 1
 
-            logger.info(f"[earnings] ✅ {ticker}: {collected_count}개 이벤트 수집 완료")
+                except Exception as e:
+                    logger.warning(f"[earnings] {ticker} 이벤트 처리 실패: {e}")
+
+            logger.info(f"[earnings] ✅ {ticker}: {saved_count}/{len(recent_evs)}개 저장")
 
         except Exception as e:
             logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
