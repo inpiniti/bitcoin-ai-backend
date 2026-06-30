@@ -83,17 +83,24 @@ def _sp500_tickers_sync(limit: int) -> list[tuple[str, str]]:
 @router.post("/earnings/history/collect", summary="과거 실적·주가 배치 적재")
 async def history_collect(req: HistoryCollectReq, request: Request):
     payload = req.dict()
-    # 동기 작업을 스레드풀에서 실행
-    tickers = req.tickers or [t for t, _ in await run_in_threadpool(_sp500_tickers_sync, req.limit)]
+    # 동기 작업을 스레드풀에서 실행 — 섹터 정보도 함께 확보
+    sector_map: dict = {}
+    if req.tickers:
+        tickers = req.tickers
+    else:
+        pairs = await run_in_threadpool(_sp500_tickers_sync, req.limit)
+        tickers = [t for t, _ in pairs]
+        sector_map = {t: s for t, s in pairs}
     if not tickers:
         raise HTTPException(400, "적재할 종목이 없습니다 (tickers 또는 universe 확인)")
 
     try:
-        # yfinance 수집도 스레드풀에서 실행
+        # SEC + Yahoo Chart 수집도 스레드풀에서 실행
         result = await run_in_threadpool(
             earnings_service.collect_history,
             tickers,
-            req.max_per_ticker
+            req.max_per_ticker,
+            sector_map,
         )
         await log_earnings_api(
             api=str(request.url.path),

@@ -144,95 +144,178 @@ def _get_sec_ticker_cik() -> dict:
     return _sec_ticker_cik
 
 
-def _fetch_earnings_sec_sync(ticker: str, max_quarters: int = 8) -> list[dict]:
-    """
-    SEC EDGAR XBRL API — 분기 실적 발표일 + EPS 실제치.
-
-    장점:
-      - 무인증 (미국 정부 공개 API) — HuggingFace IP 차단 없음
-      - 10-Q 제출일(filed) = 실적 발표 당일/익영업일
-
-    한계:
-      - eps_est (애널리스트 추정치) 없음 → eps_surprise_pct = None
-
-    반환: [{"filed": date, "fiscal_end": date, "eps_act": float|None}, ...]
-    """
+def _fetch_sec_companyfacts(ticker: str) -> dict:
+    """SEC companyfacts JSON에서 us-gaap 딕셔너리 반환 (1회 호출)."""
     import httpx
-    from datetime import date as _d
 
-    cik_map = _get_sec_ticker_cik()
-    cik = cik_map.get(ticker.upper())
+    cik = _get_sec_ticker_cik().get(ticker.upper())
     if not cik:
         logger.warning(f"[SEC] {ticker} CIK 없음")
-        return []
+        return {}
 
     url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
     headers = {"User-Agent": "EarningsCollector contact@example.com"}
-
     try:
         with httpx.Client(timeout=60, verify=False, headers=headers) as client:
             r = client.get(url)
-
         if r.status_code != 200:
-            logger.warning(f"[SEC] {ticker} HTTP {r.status_code}")
-            return []
-
-        us_gaap = r.json().get("facts", {}).get("us-gaap", {})
-
-        # EPS Diluted 우선, 없으면 Basic
-        eps_facts = []
-        for key in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
-            eps_facts = us_gaap.get(key, {}).get("units", {}).get("USD/shares", [])
-            if eps_facts:
-                break
-
-        if not eps_facts:
-            logger.warning(f"[SEC] {ticker} EPS 데이터 없음")
-            return []
-
-        # 10-Q (분기) 필터, 최근 2년
-        cutoff = _d.today() - timedelta(days=730)
-        quarterly = [
-            f for f in eps_facts
-            if f.get("form") == "10-Q"
-            and f.get("filed")
-            and datetime.strptime(f["filed"], "%Y-%m-%d").date() > cutoff
-        ]
-        if not quarterly:  # 10-K (연간) 폴백
-            quarterly = [
-                f for f in eps_facts
-                if f.get("form") == "10-K"
-                and f.get("filed")
-                and datetime.strptime(f["filed"], "%Y-%m-%d").date() > cutoff
-            ]
-
-        # 동일 분기 중복 제거 — end 기준 최초 제출본
-        seen: dict = {}
-        for f in sorted(quarterly, key=lambda x: x.get("filed", "")):
-            end = f.get("end", "")
-            if end not in seen:
-                seen[end] = f
-
-        recent = sorted(seen.values(), key=lambda x: x.get("end", ""))[-max_quarters:]
-
-        out = []
-        for f in recent:
-            filed_str = f.get("filed")
-            end_str = f.get("end")
-            if not filed_str or not end_str:
-                continue
-            out.append({
-                "filed": datetime.strptime(filed_str, "%Y-%m-%d").date(),
-                "fiscal_end": datetime.strptime(end_str, "%Y-%m-%d").date(),
-                "eps_act": _f(f.get("val")),
-            })
-
-        logger.info(f"[SEC] {ticker} {len(out)}개 분기 수신 (CIK={cik})")
-        return out
-
+            logger.warning(f"[SEC] {ticker} companyfacts HTTP {r.status_code}")
+            return {}
+        return r.json().get("facts", {}).get("us-gaap", {})
     except Exception as e:
-        logger.warning(f"[SEC] {ticker} 실패: {e}")
+        logger.warning(f"[SEC] {ticker} companyfacts 실패: {e}")
+        return {}
+
+
+def _is_quarterly_period(fact: dict) -> bool:
+    """start~end 기간이 약 1분기(80~100일)인지 — 누적(YTD)값 제외용."""
+    start, end = fact.get("start"), fact.get("end")
+    if not end:
+        return False
+    if not start:
+        return True  # 시점값(balance sheet)은 통과
+    try:
+        days = (datetime.strptime(end, "%Y-%m-%d").date()
+                - datetime.strptime(start, "%Y-%m-%d").date()).days
+    except ValueError:
+        return False
+    return 80 <= days <= 100
+
+
+def _flow_map(us_gaap: dict, *tags: str, unit: str = "USD") -> dict:
+    """
+    손익계산서 항목(매출·이익 등) → {end_str: val}, 분기값(80~100일)만.
+    여러 태그를 순서대로 시도(회사별 태그 차이 대응).
+    """
+    out: dict = {}
+    for tag in tags:
+        facts = us_gaap.get(tag, {}).get("units", {}).get(unit, [])
+        for f in sorted(facts, key=lambda x: x.get("filed", "")):
+            if not _is_quarterly_period(f):
+                continue
+            end = f.get("end")
+            if end:
+                out[end] = _f(f.get("val"))   # 최신 filed가 덮어씀(수정본 반영)
+        if out:
+            break
+    return out
+
+
+def _stock_map(us_gaap: dict, *tags: str, unit: str = "USD") -> dict:
+    """대차대조표 항목(자산·자본 등) → {end_str: val}, 시점값."""
+    out: dict = {}
+    for tag in tags:
+        facts = us_gaap.get(tag, {}).get("units", {}).get(unit, [])
+        for f in sorted(facts, key=lambda x: x.get("filed", "")):
+            end = f.get("end")
+            if end:
+                out[end] = _f(f.get("val"))
+        if out:
+            break
+    return out
+
+
+def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 8) -> list[dict]:
+    """
+    EPS 분기 리스트. 분기값(80~100일)만 골라 누적(6·9개월) EPS 혼입 방지.
+    반환: [{"fiscal_end": date, "filed": date, "eps_act": float|None}, ...] (오래된→최신)
+      filed = 10-Q 제출일 (≈ 실적 발표일)
+    """
+    from datetime import date as _d
+
+    eps_facts = []
+    for key in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+        eps_facts = us_gaap.get(key, {}).get("units", {}).get("USD/shares", [])
+        if eps_facts:
+            break
+    if not eps_facts:
+        logger.warning(f"[SEC] {ticker} EPS 데이터 없음")
         return []
+
+    cutoff = _d.today() - timedelta(days=730)
+    seen: dict = {}
+    for f in sorted(eps_facts, key=lambda x: x.get("filed", "")):
+        if f.get("form") not in ("10-Q", "10-K"):
+            continue
+        filed = f.get("filed")
+        end = f.get("end")
+        if not filed or not end:
+            continue
+        if datetime.strptime(filed, "%Y-%m-%d").date() <= cutoff:
+            continue
+        if not _is_quarterly_period(f):   # 분기값만 (누적 제외)
+            continue
+        seen[end] = {"eps_act": _f(f.get("val")), "filed": filed}  # 최신 filed가 덮어씀
+
+    recent_ends = sorted(seen.keys())[-max_quarters:]
+    return [
+        {
+            "fiscal_end": datetime.strptime(e, "%Y-%m-%d").date(),
+            "filed": datetime.strptime(seen[e]["filed"], "%Y-%m-%d").date(),
+            "eps_act": seen[e]["eps_act"],
+        }
+        for e in recent_ends
+    ]
+
+
+def _extract_financials(us_gaap: dict) -> dict:
+    """
+    분기말(end) → 재무 피처 딕셔너리.
+    SEC companyfacts에서 거장 기반 재무비율 계산.
+    """
+    revenue = _flow_map(
+        us_gaap,
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "SalesRevenueNet",
+    )
+    gross = _flow_map(us_gaap, "GrossProfit")
+    net_income = _flow_map(us_gaap, "NetIncomeLoss")
+    sga = _flow_map(
+        us_gaap,
+        "SellingGeneralAndAdministrativeExpense",
+        "GeneralAndAdministrativeExpense",
+    )
+    equity = _stock_map(
+        us_gaap,
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    )
+    assets = _stock_map(us_gaap, "Assets")
+    lt_debt = _stock_map(
+        us_gaap,
+        "LongTermDebtNoncurrent",
+        "LongTermDebt",
+    )
+    retained = _stock_map(us_gaap, "RetainedEarningsAccumulatedDeficit")
+    cash = _stock_map(
+        us_gaap,
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    )
+
+    # 모든 분기말 키 합집합
+    all_ends = set(revenue) | set(gross) | set(net_income) | set(equity)
+
+    out: dict = {}
+    for end in all_ends:
+        rev = revenue.get(end)
+        gp = gross.get(end)
+        ni = net_income.get(end)
+        feat = {
+            "gross_margin": _ratio(gp, rev),
+            "net_margin": _ratio(ni, rev),
+            "roe": _ratio(ni, equity.get(end)),
+            "roc": _ratio(ni, assets.get(end)),       # ROA 근사
+            "sga_to_gross": _ratio(sga.get(end), gp),
+            "debt_to_ni": _ratio(lt_debt.get(end), ni),
+            "retained_earnings": retained.get(end),
+            "cash_sti": cash.get(end),
+        }
+        # None 만 있는 분기는 스킵
+        if any(v is not None for v in feat.values()):
+            out[end] = {k: v for k, v in feat.items() if v is not None}
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -372,22 +455,32 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
     return saved
 
 
-def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
+def collect_history(
+    tickers: list[str],
+    max_per_ticker: int = 8,
+    sector_map: Optional[dict] = None,
+) -> dict:
     """
     과거 실적 이벤트 적재.
 
-    전략:
-      1) EPS + 발표일: SEC EDGAR XBRL API (무인증, 정부 API — HuggingFace IP 차단 없음)
-         10-Q filed 날짜 = 실적 발표 당일/익영업일
-      2) 가격 데이터: Yahoo Chart v8 API (Crumb 불필요)
+    전략 (모두 무인증 — HuggingFace IP 차단 없음):
+      1) EPS + 발표일 + 재무제표: SEC EDGAR companyfacts (1회 호출로 전부)
+         - eps_act: 분기 EPS (누적값 제외)
+         - earnings_date: 10-Q filed 날짜 (≈ 실적 발표일)
+         - 재무 피처: gross_margin, net_margin, roe, roc, sga_to_gross,
+                      debt_to_ni, retained_earnings, cash_sti
+      2) 가격(px_pre/post/next_pre): Yahoo Chart v8 API
+
+    Args:
+        sector_map: {ticker: gics_sector} — S&P500 섹터 정보
     """
     import time
     from datetime import timezone as _tz
 
+    sector_map = sector_map or {}
     logger.info(f"[earnings] collect_history 시작: {len(tickers)}개 종목 (SEC EDGAR + Yahoo Chart)")
 
-    # CIK 매핑 사전 로드
-    _get_sec_ticker_cik()
+    _get_sec_ticker_cik()   # CIK 매핑 사전 로드
 
     total = 0
     failed = []
@@ -421,12 +514,21 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                 failed.append(ticker)
                 continue
 
-            # ── 2. EPS + 발표일 (SEC EDGAR) ─────────────────────────
-            sec_events = _fetch_earnings_sec_sync(ticker, max_per_ticker)
-            if not sec_events:
-                logger.warning(f"[earnings] {ticker} SEC 데이터 없음")
+            # ── 2. SEC companyfacts (EPS + 발표일 + 재무제표) ────────
+            us_gaap = _fetch_sec_companyfacts(ticker)
+            if not us_gaap:
+                logger.warning(f"[earnings] {ticker} SEC companyfacts 없음")
                 failed.append(ticker)
                 continue
+
+            sec_events = _extract_eps_quarters(us_gaap, ticker, max_per_ticker)
+            if not sec_events:
+                logger.warning(f"[earnings] {ticker} EPS 분기 데이터 없음")
+                failed.append(ticker)
+                continue
+
+            fin_by_period = _extract_financials(us_gaap)   # {end_str: {재무피처}}
+            sector = sector_map.get(ticker)
 
             # ── 3. 이벤트별 저장 ──────────────────────────────────
             saved_count = 0
@@ -434,11 +536,11 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                 try:
                     ann_date = ev["filed"]   # 10-Q 제출일 ≈ 발표일
                     ed_str = ann_date.strftime("%Y-%m-%d")
+                    fiscal_end_str = ev["fiscal_end"].strftime("%Y-%m-%d")
 
                     next_ed_str = None
                     if idx + 1 < len(sec_events):
-                        next_ann = sec_events[idx + 1]["filed"]
-                        next_ed_str = next_ann.strftime("%Y-%m-%d")
+                        next_ed_str = sec_events[idx + 1]["filed"].strftime("%Y-%m-%d")
 
                     px_pre = _close_nearby(date_close, ann_date, direction=-1)
                     px_post = _close_nearby(date_close, ann_date, direction=+1)
@@ -455,8 +557,12 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                         (px_next_pre - px_post) if px_post and px_next_pre else None, px_post
                     )
 
+                    # 분기말 기준 재무 피처
+                    fin = fin_by_period.get(fiscal_end_str, {})
+
                     row = {k: v for k, v in {
                         "ticker": ticker,
+                        "gics_sector": sector,
                         "earnings_date": ed_str,
                         "next_earnings_date": next_ed_str,
                         "px_pre": px_pre,
@@ -465,6 +571,7 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                         "eps_act": eps_act,
                         "ret_event": ret_event,
                         "ret_hold": ret_hold,
+                        **fin,
                     }.items() if v is not None}
                     row["ticker"] = ticker
 
@@ -475,7 +582,10 @@ def collect_history(tickers: list[str], max_per_ticker: int = 8) -> dict:
                 except Exception as e:
                     logger.warning(f"[earnings] {ticker} 이벤트 처리 실패: {e}")
 
-            logger.info(f"[earnings] ✅ {ticker}: {saved_count}/{len(sec_events)}개 저장")
+            logger.info(
+                f"[earnings] ✅ {ticker}: {saved_count}/{len(sec_events)}개 저장 "
+                f"(재무 {len(fin_by_period)}분기, 섹터={sector or '없음'})"
+            )
 
         except Exception as e:
             logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
