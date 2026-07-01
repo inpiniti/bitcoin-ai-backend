@@ -449,27 +449,29 @@ def _build_features_from_info(info: dict) -> dict:
     }
 
 
-def collect_event_sec(ticker: str, earnings_date: str, sector: Optional[str] = None) -> Optional[dict]:
+def collect_event_sec(ticker: str, earnings_date: str, sector: Optional[str] = None) -> tuple[Optional[dict], str]:
     """
     특정 종목의 특정 발표일 데이터 수집 (SEC EDGAR + Yahoo Chart).
     과거 수집(`collect_history`)과 동일한 데이터 품질.
 
-    반환: 저장된 이벤트 dict (없으면 None)
+    반환: (저장된 이벤트 dict, 상태 메시지) — 실패 시 (None, "error reason")
     """
     from datetime import timezone as _tz
 
     try:
         target_date = datetime.strptime(earnings_date, "%Y-%m-%d").date()
     except ValueError:
-        logger.warning(f"[earnings] {ticker} 잘못된 날짜: {earnings_date}")
-        return None
+        msg = f"잘못된 날짜: {earnings_date}"
+        logger.warning(f"[earnings] {ticker} {msg}")
+        return None, msg
 
     # ── 1. 가격 데이터 (Chart API) — 종가 + 장중 고저 ────────
     chart_data = _fetch_yahoo_chart_sync(ticker, "10y")
     result_list = chart_data.get("chart", {}).get("result")
     if not result_list:
-        logger.warning(f"[earnings] {ticker} 차트 데이터 없음")
-        return None
+        msg = "Yahoo 차트 데이터 없음 (종목이나 날짜 확인)"
+        logger.warning(f"[earnings] {ticker} {msg}")
+        return None, msg
 
     res = result_list[0]
     timestamps = res.get("timestamp", [])
@@ -496,19 +498,22 @@ def collect_event_sec(ticker: str, earnings_date: str, sector: Optional[str] = N
             date_low[d] = float(low)
 
     if not date_close:
-        logger.warning(f"[earnings] {ticker} 가격 데이터 없음")
-        return None
+        msg = "Yahoo 가격 데이터 없음 (종목 확인)"
+        logger.warning(f"[earnings] {ticker} {msg}")
+        return None, msg
 
     # ── 2. SEC companyfacts (EPS + 발표일 + 재무제표) ────────
     us_gaap = _fetch_sec_companyfacts(ticker)
     if not us_gaap:
-        logger.warning(f"[earnings] {ticker} SEC companyfacts 없음")
-        return None
+        msg = "SEC EDGAR 데이터 없음 (발표 후 기다려주세요)"
+        logger.warning(f"[earnings] {ticker} {msg}")
+        return None, msg
 
     sec_events = _extract_eps_quarters(us_gaap, ticker, max_quarters=100)
     if not sec_events:
-        logger.warning(f"[earnings] {ticker} EPS 분기 데이터 없음")
-        return None
+        msg = "SEC EPS 데이터 없음"
+        logger.warning(f"[earnings] {ticker} {msg}")
+        return None, msg
 
     # 정렬 + 중복 제거 (과거 수집과 동일)
     sec_events = sorted(sec_events, key=lambda e: e["filed"])
@@ -527,8 +532,9 @@ def collect_event_sec(ticker: str, earnings_date: str, sector: Optional[str] = N
             break
 
     if target_event is None:
-        logger.warning(f"[earnings] {ticker} {earnings_date} SEC 데이터 없음")
-        return None
+        msg = f"{earnings_date} SEC 데이터 없음 (발표 후 기다려주세요)"
+        logger.warning(f"[earnings] {ticker} {msg}")
+        return None, msg
 
     fin_by_period = _extract_financials(us_gaap)
     rate_series = _fetch_rate_series()
@@ -607,11 +613,12 @@ def collect_event_sec(ticker: str, earnings_date: str, sector: Optional[str] = N
 
         result = earnings_repo.upsert_event(row)
         logger.info(f"[earnings] ✅ {ticker} {earnings_date} 수집 완료")
-        return result
+        return result, "ok"
 
     except Exception as e:
-        logger.warning(f"[earnings] {ticker} {earnings_date} 처리 실패: {e}")
-        return None
+        msg = f"처리 중 오류: {e}"
+        logger.warning(f"[earnings] {ticker} {earnings_date} {msg}")
+        return None, msg
 
 
 def collect_event(ticker: str, earnings_date: Optional[str] = None,

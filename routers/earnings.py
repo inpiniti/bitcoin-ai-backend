@@ -430,13 +430,14 @@ async def event_collect(ticker: str, earnings_date: str, request: Request):
             status="success"
         )
 
-        result = earnings_service.collect_event_sec(ticker, earnings_date=earnings_date)
+        event, msg = earnings_service.collect_event_sec(ticker, earnings_date=earnings_date)
         response = {
-            "status": "ok",
+            "status": "ok" if event else "no_data",
             "ticker": ticker,
             "earnings_date": earnings_date,
-            "collected": result is not None,
-            "event": result
+            "collected": event is not None,
+            "event": event,
+            "message": msg
         }
 
         # 수집 후 로깅
