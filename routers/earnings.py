@@ -423,7 +423,9 @@ async def events(
 ):
     payload = {"ticker": ticker, "sector": sector, "limit": limit}
     try:
-        items = earnings_repo.list_events(ticker=ticker, sector=sector, limit=limit)
+        items = await run_in_threadpool(
+            lambda: earnings_repo.list_events(ticker=ticker, sector=sector, limit=limit)
+        )
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
@@ -448,7 +450,9 @@ async def events(
 async def predict(req: PredictReq, request: Request):
     payload = req.dict()
     try:
-        result = earnings_service.predict(scope=req.scope, rate_scenario=req.rate_scenario)
+        result = await run_in_threadpool(
+            earnings_service.predict, req.scope, req.rate_scenario
+        )
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
@@ -475,7 +479,7 @@ async def predict(req: PredictReq, request: Request):
 async def model_train(req: TrainReq, request: Request):
     payload = req.dict()
     try:
-        result = earnings_service.train(min_samples=req.min_samples)
+        result = await run_in_threadpool(earnings_service.train, req.min_samples)
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
@@ -529,8 +533,9 @@ async def model_status(request: Request, limit: int = Query(default=50, ge=1, le
 async def positions(request: Request, limit: int = Query(default=100, ge=1, le=500)):
     payload = {"limit": limit}
     try:
-        items = earnings_service.get_positions(limit)
-        
+        # 동기 DB 조회를 스레드풀에서 실행 (이벤트 루프 블로킹 방지)
+        items = await run_in_threadpool(earnings_service.get_positions, limit)
+
         # 실시간 현재가 변동 시뮬레이션 매핑 추가
         enriched_items = []
         for row in items:

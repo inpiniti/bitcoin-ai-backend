@@ -957,21 +957,10 @@ def _current_price(ticker: str) -> Optional[float]:
 
 def get_positions(limit: int = 100) -> list[dict]:
     """
-    earnings_dashboard(시작가/예측가/경과%) + 실시간 현재가 → 가격 위치% 계산.
-    가격 위치% = (현재가 - 시작가) / (예측가 - 시작가) × 100
+    earnings_dashboard(시작가/예측가/경과%) 반환.
+
+    현재가·가격위치%는 라우터에서 결합한다.
+    (종목별 yfinance 실시간 조회는 HuggingFace에서 느리고 crumb 차단 위험이 커
+     이벤트 루프를 막으므로 여기서 호출하지 않는다.)
     """
-    rows = earnings_repo.list_dashboard(limit)
-    out = []
-    for r in rows:
-        start = _f(r.get("start_price"))
-        predict = _f(r.get("predict_price"))
-        cur = _current_price(r["ticker"]) if r.get("ticker") else None
-        pos_pct = None
-        if start is not None and predict is not None and cur is not None and (predict - start) != 0:
-            pos_pct = round((cur - start) / (predict - start) * 100, 1)
-        out.append({
-            **r,
-            "current_price": cur,
-            "price_position_pct": pos_pct,  # 가격 위치%
-        })
-    return out
+    return earnings_repo.list_dashboard(limit)
