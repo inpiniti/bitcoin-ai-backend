@@ -25,13 +25,24 @@ from services import earnings_repo
 logger = logging.getLogger("earnings_service")
 
 # 학습에 사용하는 수치형 피처 (이 순서를 train/predict 가 공유)
+#   ust10y_change: 보유 구간 금리변동 — 예측 시 시나리오(가정값)로 주입하는 '조건' 피처
 FEATURE_COLUMNS = [
     "eps_surprise_pct", "rev_surprise_pct",
     "gross_margin", "net_margin", "sga_to_gross", "roe", "roc", "earnings_yield",
     "capex_to_ni", "debt_to_ni", "inventory_vs_sales", "eps_yoy",
     "per", "pbr", "ev_ebitda", "peg", "dividend_yield",
-    "fed_funds", "ust10y", "cpi_yoy",
+    "fed_funds", "ust10y", "ust10y_change", "cpi_yoy",
 ]
+
+# 예측 타깃 (다중 출력) — 발표 직후(px_post) 대비 보유 구간 수익률
+#   ret_hold     : 다음 발표 전날까지 종가 수익률
+#   ret_max_up   : 구간 최대 상승폭 (MFE)
+#   ret_max_down : 구간 최대 하락폭 (MAE, 음수)
+TARGET_COLUMNS = ["ret_hold", "ret_max_up", "ret_max_down"]
+
+# 예측 시 금리변동 시나리오 라벨 → ust10y_change 주입값(%p)
+#   현실 범위(3개월 구간): 대략 ±0.1~0.6%p
+RATE_SCENARIOS = {"up": 0.5, "down": -0.5, "flat": 0.0}
 
 
 # ─────────────────────────────────────────────
@@ -750,20 +761,31 @@ def collect_history(
 # 학습 (섹터별 XGBoost)
 # ─────────────────────────────────────────────
 
-def _to_matrix(events: list[dict]):
+def _feature_row(e: dict):
+    """이벤트 → 피처 벡터 (FEATURE_COLUMNS 순서, 결측=nan)."""
+    import numpy as np
+    return [_f(e.get(c)) if _f(e.get(c)) is not None else np.nan
+            for c in FEATURE_COLUMNS]
+
+
+def _to_matrix(events: list[dict], target: str = "ret_hold"):
+    """해당 target 이 채워진 행만 (X, y)로. 타깃별 유효 표본이 다를 수 있음."""
     import numpy as np
     X, y = [], []
     for e in events:
-        if e.get("ret_hold") is None:
+        v = _f(e.get(target))
+        if v is None:
             continue
-        X.append([_f(e.get(c)) if _f(e.get(c)) is not None else np.nan
-                  for c in FEATURE_COLUMNS])
-        y.append(float(e["ret_hold"]))
+        X.append(_feature_row(e))
+        y.append(v)
     return np.array(X, dtype="float32"), np.array(y, dtype="float32")
 
 
 def train(min_samples: int = 30) -> dict:
-    """섹터별로 라벨 완성 행을 모아 XGBoost 회귀 학습 → ml_models 저장."""
+    """
+    섹터 × 타깃별로 라벨 완성 행을 모아 XGBoost 회귀 학습 → ml_models 저장.
+    타깃: ret_hold(종가) / ret_max_up(최대상승) / ret_max_down(최대하락)
+    """
     import numpy as np
     import xgboost as xgb
 
@@ -775,35 +797,39 @@ def train(min_samples: int = 30) -> dict:
 
     results = []
     for sector, rows in by_sector.items():
-        X, y = _to_matrix(rows)
-        if len(y) < min_samples:
-            results.append({"sector": sector, "status": "skipped",
-                            "reason": f"표본 부족({len(y)}<{min_samples})"})
-            continue
+        for target in TARGET_COLUMNS:
+            X, y = _to_matrix(rows, target)
+            if len(y) < min_samples:
+                results.append({"sector": sector, "target": target, "status": "skipped",
+                                "reason": f"표본 부족({len(y)}<{min_samples})"})
+                continue
 
-        model = xgb.XGBRegressor(
-            n_estimators=200, max_depth=4, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8, random_state=42,
-        )
-        model.fit(X, y)
-        pred = model.predict(X)
-        rmse = float(np.sqrt(np.mean((pred - y) ** 2)))
+            model = xgb.XGBRegressor(
+                n_estimators=200, max_depth=4, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8, random_state=42,
+            )
+            model.fit(X, y)
+            pred = model.predict(X)
+            rmse = float(np.sqrt(np.mean((pred - y) ** 2)))
 
-        model_json = json.loads(model.get_booster().save_raw("json").decode("utf-8"))
-        version = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        model_id = earnings_repo.save_earnings_model(
-            sector, model_json,
-            meta={
-                "feature_count": len(FEATURE_COLUMNS),
-                "sample_count": int(len(y)),
-                "stage": 1,
-                "rmse": rmse,
-                "model_version": version,
-            },
-        )
-        results.append({"sector": sector, "status": "trained", "model_id": model_id,
-                        "version": version, "samples": int(len(y)), "rmse": round(rmse, 5)})
-        logger.info(f"[earnings] 학습 완료 sector={sector} n={len(y)} rmse={rmse:.5f}")
+            model_json = json.loads(model.get_booster().save_raw("json").decode("utf-8"))
+            version = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            model_id = earnings_repo.save_earnings_model(
+                sector, model_json,
+                meta={
+                    "feature_count": len(FEATURE_COLUMNS),
+                    "sample_count": int(len(y)),
+                    "stage": 1,
+                    "rmse": rmse,
+                    "model_version": version,
+                },
+                target=target,
+            )
+            results.append({"sector": sector, "target": target, "status": "trained",
+                            "model_id": model_id, "version": version,
+                            "samples": int(len(y)), "rmse": round(rmse, 5)})
+            logger.info(f"[earnings] 학습 완료 sector={sector} target={target} "
+                        f"n={len(y)} rmse={rmse:.5f}")
 
     return {"sectors": results}
 
@@ -829,46 +855,91 @@ def _load_booster(model_row: dict):
     return booster
 
 
-def predict(scope: str = "missing_label") -> dict:
-    """라벨 미완성(ret_hold IS NULL) 이벤트에 예측 주입."""
+def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -> dict:
+    """
+    라벨 미완성(ret_hold IS NULL) 이벤트에 다중 타깃 예측 주입.
+
+    타깃별(ret_hold/ret_max_up/ret_max_down) 섹터 모델로 예측하고
+    px_post 기준 예측가(종가/최대/최저)를 함께 저장.
+
+    Args:
+        rate_scenario: 금리변동 시나리오 ("up"|"down"|"flat" 또는 %p 숫자 문자열).
+            주면 ust10y_change 를 그 값으로 덮어써 조건부 예측(what-if) 수행.
+            None 이면 이벤트의 기존 ust10y_change 사용(최신 이벤트는 결측→nan).
+    """
     import numpy as np
     import xgboost as xgb
+
+    # 금리 시나리오 주입값 결정
+    scenario_val: Optional[float] = None
+    if rate_scenario is not None:
+        if rate_scenario in RATE_SCENARIOS:
+            scenario_val = RATE_SCENARIOS[rate_scenario]
+        else:
+            scenario_val = _f(rate_scenario)
 
     events = earnings_repo.list_unlabeled_events() if scope == "missing_label" \
         else earnings_repo.list_events(limit=500)
 
-    model_by_sector: dict[str, Optional[dict]] = {}
+    # (sector, target) → model row 캐시
+    model_cache: dict[tuple, Optional[dict]] = {}
+
+    def _model(sector: str, target: str):
+        key = (sector, target)
+        if key not in model_cache:
+            model_cache[key] = earnings_repo.latest_earnings_model(sector, target=target)
+        return model_cache[key]
+
     predicted, skipped = 0, 0
+    ci = FEATURE_COLUMNS.index("ust10y_change")
 
     for e in events:
         sector = e.get("gics_sector") or "Unknown"
-        if sector not in model_by_sector:
-            model_by_sector[sector] = earnings_repo.latest_earnings_model(sector)
-        mrow = model_by_sector[sector]
-        if not mrow:
+
+        # 피처 벡터 구성 (+ 금리 시나리오 주입)
+        feat = _feature_row(e)
+        if scenario_val is not None:
+            feat[ci] = scenario_val
+        x = np.array([feat], dtype="float32")
+
+        base = _f(e.get("px_post")) or _f(e.get("px_pre"))
+        preds: dict = {}
+        used_model = None
+        for target in TARGET_COLUMNS:
+            mrow = _model(sector, target)
+            if not mrow:
+                continue
+            used_model = mrow
+            preds[target] = float(_load_booster(mrow).predict(xgb.DMatrix(x))[0])
+
+        if not preds:
             skipped += 1
             continue
 
-        booster = _load_booster(mrow)
-        x = np.array([[_f(e.get(c)) if _f(e.get(c)) is not None else np.nan
-                       for c in FEATURE_COLUMNS]], dtype="float32")
-        ret_hold_pred = float(booster.predict(xgb.DMatrix(x))[0])
+        ret_hold_pred = preds.get("ret_hold")
+        ret_up_pred = preds.get("ret_max_up")
+        ret_down_pred = preds.get("ret_max_down")
 
-        base = _f(e.get("px_post")) or _f(e.get("px_pre"))
-        target_price = round(base * (1 + ret_hold_pred), 2) if base else None
+        def _px(r):
+            return round(base * (1 + r), 2) if (base and r is not None) else None
 
         earnings_repo.upsert_prediction({
             "event_id": e["id"],
             "ticker": e["ticker"],
-            "target_price": target_price,
-            "ret_hold_pred": round(ret_hold_pred, 4),
-            "model_id": mrow["id"],
-            "model_version": mrow.get("model_version") or mrow["id"][:8],
+            "target_price": _px(ret_hold_pred),          # 종가 예측
+            "price_max_pred": _px(ret_up_pred),          # 최대가 예측
+            "price_min_pred": _px(ret_down_pred),        # 최저가 예측
+            "ret_hold_pred": round(ret_hold_pred, 4) if ret_hold_pred is not None else None,
+            "ret_max_up_pred": round(ret_up_pred, 4) if ret_up_pred is not None else None,
+            "ret_max_down_pred": round(ret_down_pred, 4) if ret_down_pred is not None else None,
+            "rate_scenario": rate_scenario or "actual",
+            "model_id": used_model["id"],
+            "model_version": used_model.get("model_version") or used_model["id"][:8],
         })
         predicted += 1
 
     return {"predicted": predicted, "skipped_no_model": skipped,
-            "total_candidates": len(events)}
+            "total_candidates": len(events), "rate_scenario": rate_scenario}
 
 
 # ─────────────────────────────────────────────

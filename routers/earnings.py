@@ -54,7 +54,8 @@ class TodayCollectReq(BaseModel):
 
 
 class PredictReq(BaseModel):
-    scope: str = "missing_label"   # missing_label | all
+    scope: str = "missing_label"          # missing_label | all
+    rate_scenario: Optional[str] = None   # up | down | flat | 숫자(%p) — 금리 시나리오(what-if)
 
 
 class TrainReq(BaseModel):
@@ -447,7 +448,7 @@ async def events(
 async def predict(req: PredictReq, request: Request):
     payload = req.dict()
     try:
-        result = earnings_service.predict(scope=req.scope)
+        result = earnings_service.predict(scope=req.scope, rate_scenario=req.rate_scenario)
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",

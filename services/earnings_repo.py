@@ -126,11 +126,11 @@ def list_unlabeled_events() -> list[dict]:
 # ─────────────────────────────────────────────
 
 def upsert_prediction(row: dict) -> dict:
-    """(event_id, model_version) 기준 upsert."""
+    """(event_id, rate_scenario) 기준 upsert — 금리 시나리오별 예측 공존."""
     res = (
         _sb()
         .table("earnings_predictions")
-        .upsert(row, on_conflict="event_id,model_version")
+        .upsert(row, on_conflict="event_id,rate_scenario")
         .execute()
     )
     return (res.data or [row])[0]
@@ -178,10 +178,13 @@ def list_dashboard(limit: int = 200) -> list[dict]:
 # ml_models (실적 모델 재사용 + 섹터 라우팅)
 # ─────────────────────────────────────────────
 
-def save_earnings_model(sector: str, model_json: dict, meta: dict) -> str:
-    """실적 모델을 ml_models 에 저장(domain='earnings', gics_sector=섹터). id 반환."""
+def save_earnings_model(sector: str, model_json: dict, meta: dict, target: str = "ret_hold") -> str:
+    """
+    실적 모델을 ml_models 에 저장. id 반환.
+    섹터 × 타깃을 name(earnings_{sector}_{target})으로 구분 (스키마 변경 없이).
+    """
     payload = {
-        "name": f"earnings_{sector}",
+        "name": f"earnings_{sector}_{target}",
         "domain": "earnings",
         "gics_sector": sector,
         "model_json": model_json,
@@ -194,14 +197,15 @@ def save_earnings_model(sector: str, model_json: dict, meta: dict) -> str:
     return rows[0]["id"]
 
 
-def latest_earnings_model(sector: str) -> Optional[dict]:
-    """섹터별 최신 실적 모델 1건 (model_version 내림차순)."""
+def latest_earnings_model(sector: str, target: str = "ret_hold") -> Optional[dict]:
+    """섹터 × 타깃별 최신 실적 모델 1건 (model_version 내림차순)."""
     res = (
         _sb()
         .table("ml_models")
         .select("*")
         .eq("domain", "earnings")
         .eq("gics_sector", sector)
+        .eq("name", f"earnings_{sector}_{target}")
         .order("model_version", desc=True)
         .limit(1)
         .execute()
