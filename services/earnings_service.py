@@ -897,7 +897,8 @@ def _load_booster(model_row: dict):
 
 def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -> dict:
     """
-    라벨 미완성(ret_hold IS NULL) 이벤트에 다중 타깃 예측 주입.
+    라벨 미완성(ret_hold IS NULL) & 아직 예측값이 없는 이벤트에만 다중 타깃 예측 주입.
+    (scope="missing_label" 시 해당 rate_scenario 로 이미 예측된 event 는 건너뜀)
 
     타깃별(ret_hold/ret_max_up/ret_max_down) 섹터 모델로 예측하고
     px_post 기준 예측가(종가/최대/최저)를 함께 저장.
@@ -918,8 +919,15 @@ def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -
         else:
             scenario_val = _f(rate_scenario)
 
-    events = earnings_repo.list_unlabeled_events() if scope == "missing_label" \
-        else earnings_repo.list_events(limit=500)
+    if scope == "missing_label":
+        events = earnings_repo.list_unlabeled_events()
+        # 라벨 없음(예측 후보) + 같은 시나리오로 아직 예측되지 않은 행만 남긴다
+        scenario_key = rate_scenario or "actual"
+        done = earnings_repo.predicted_event_ids(scenario_key)
+        if done:
+            events = [e for e in events if e.get("id") not in done]
+    else:
+        events = earnings_repo.list_events(limit=500)
 
     # (sector, target) → model row 캐시
     model_cache: dict[tuple, Optional[dict]] = {}

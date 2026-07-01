@@ -101,24 +101,55 @@ def list_events_for_date(date: str) -> list[dict]:
 
 
 def list_labeled_events(sector: Optional[str] = None) -> list[dict]:
-    """ret_hold 가 채워진(학습 가능) 행."""
-    q = _sb().table("earnings_events").select("*").not_.is_("ret_hold", "null")
-    if sector:
-        q = q.eq("gics_sector", sector)
-    return q.execute().data or []
+    """
+    ret_hold 가 채워진(학습 가능) 행 전체.
+    Supabase 기본 응답 상한(≈1000행)에 잘리지 않도록 range 페이지네이션으로 모두 조회한다.
+    (id 정렬로 페이지 경계에서 누락/중복 방지)
+    """
+    out: list[dict] = []
+    offset, page = 0, 1000
+    while True:
+        q = _sb().table("earnings_events").select("*").not_.is_("ret_hold", "null")
+        if sector:
+            q = q.eq("gics_sector", sector)
+        rows = (
+            q.order("id")
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        out.extend(rows)
+        if len(rows) < page:
+            break
+        offset += page
+    return out
 
 
 def list_unlabeled_events() -> list[dict]:
-    """ret_hold 가 비어있는(예측 대상) 행."""
-    return (
-        _sb()
-        .table("earnings_events")
-        .select("*")
-        .is_("ret_hold", "null")
-        .execute()
-        .data
-        or []
-    )
+    """
+    ret_hold 가 비어있는(예측 대상 후보) 행 전체.
+    Supabase 기본 응답 상한(≈1000행)에 잘리지 않도록 range 페이지네이션으로 모두 조회한다.
+    """
+    out: list[dict] = []
+    offset, page = 0, 1000
+    while True:
+        rows = (
+            _sb()
+            .table("earnings_events")
+            .select("*")
+            .is_("ret_hold", "null")
+            .order("id")
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        out.extend(rows)
+        if len(rows) < page:
+            break
+        offset += page
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -148,6 +179,34 @@ def latest_prediction(event_id: str) -> Optional[dict]:
     )
     rows = res.data or []
     return rows[0] if rows else None
+
+
+def predicted_event_ids(rate_scenario: str = "actual") -> set[str]:
+    """
+    해당 금리 시나리오로 이미 예측이 저장된 event_id 집합 (재예측 제외용).
+    1000행 상한 없이 range 페이지네이션으로 모두 조회한다.
+    """
+    out: set[str] = set()
+    offset, page = 0, 1000
+    while True:
+        rows = (
+            _sb()
+            .table("earnings_predictions")
+            .select("event_id")
+            .eq("rate_scenario", rate_scenario)
+            .order("event_id")
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        for r in rows:
+            if r.get("event_id"):
+                out.add(r["event_id"])
+        if len(rows) < page:
+            break
+        offset += page
+    return out
 
 
 # ─────────────────────────────────────────────
