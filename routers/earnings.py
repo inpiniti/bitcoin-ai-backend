@@ -549,6 +549,8 @@ async def positions(request: Request, limit: int = Query(default=100, ge=1, le=5
         for row in items:
             start_p = _num(row.get("start_price"))
             predict_p = _num(row.get("predict_price"))   # 예측 없으면 None (가짜 생성 안 함)
+            max_p = _num(row.get("price_max_pred"))      # 예상 최고가 (구간 MFE)
+            min_p = _num(row.get("price_min_pred"))      # 예상 최저가 (구간 MAE)
             cur = price_map.get(str(row.get("ticker") or "").upper())
 
             # 가격 위치% — 시작가·예측가·현재가가 모두 있을 때만 (없으면 None='모름')
@@ -561,6 +563,8 @@ async def positions(request: Request, limit: int = Query(default=100, ge=1, le=5
                 "start_price": start_p,
                 "current_price": round(cur, 2) if cur is not None else None,
                 "predict_price": round(predict_p, 2) if predict_p is not None else None,
+                "price_max_pred": round(max_p, 2) if max_p is not None else None,
+                "price_min_pred": round(min_p, 2) if min_p is not None else None,
                 "price_position_pct": price_pos_pct,
             })
 
