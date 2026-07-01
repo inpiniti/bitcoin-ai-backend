@@ -532,31 +532,38 @@ async def model_status(request: Request, limit: int = Query(default=50, ge=1, le
 @router.get("/positions", summary="대시보드용 포지션 목록")
 async def positions(request: Request, limit: int = Query(default=100, ge=1, le=500)):
     payload = {"limit": limit}
+
+    def _num(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     try:
         # 동기 DB 조회를 스레드풀에서 실행 (이벤트 루프 블로킹 방지)
         items = await run_in_threadpool(earnings_service.get_positions, limit)
+        # TradingView 현재가 배치 조회(캐시) — 1회
+        price_map = await run_in_threadpool(earnings_service.fetch_current_prices)
 
-        # 실시간 현재가 변동 시뮬레이션 매핑 추가
         enriched_items = []
         for row in items:
-            start_p = float(row.get("start_price") or 100.0)
-            predict_p = float(row.get("predict_price") or (start_p * 1.15))
-            
-            # 실시간 현재가 시뮬레이션
-            current_p = start_p * (1.0 + (datetime.now(timezone.utc).second % 10 - 3) * 0.01)
-            
-            # 가격 위치% = (현재가 - 시작가) / (예측가 - 시작가) * 100
-            denom = (predict_p - start_p)
-            price_pos_pct = ((current_p - start_p) / denom * 100.0) if denom != 0 else 0.0
-            
+            start_p = _num(row.get("start_price"))
+            predict_p = _num(row.get("predict_price"))   # 예측 없으면 None (가짜 생성 안 함)
+            cur = price_map.get(str(row.get("ticker") or "").upper())
+
+            # 가격 위치% — 시작가·예측가·현재가가 모두 있을 때만 (없으면 None='모름')
+            price_pos_pct = None
+            if start_p is not None and predict_p is not None and cur is not None and (predict_p - start_p) != 0:
+                price_pos_pct = round((cur - start_p) / (predict_p - start_p) * 100.0, 1)
+
             enriched_items.append({
                 **row,
                 "start_price": start_p,
-                "current_price": round(current_p, 2),
-                "predict_price": round(predict_p, 2),
-                "price_position_pct": round(price_pos_pct, 1)
+                "current_price": round(cur, 2) if cur is not None else None,
+                "predict_price": round(predict_p, 2) if predict_p is not None else None,
+                "price_position_pct": price_pos_pct,
             })
-            
+
         result = {"items": enriched_items}
         await log_earnings_api(
             api=str(request.url.path),

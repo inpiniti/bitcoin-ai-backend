@@ -986,21 +986,62 @@ def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -
 # 대시보드 (현재가 결합 + 위치%)
 # ─────────────────────────────────────────────
 
-def _current_price(ticker: str) -> Optional[float]:
-    import yfinance as yf
+_price_cache: dict = {"data": {}, "ts": 0.0}
+
+
+def fetch_current_prices(ttl: int = 60) -> dict:
+    """
+    TradingView 스캐너로 미국 주식 현재가를 '한 번에' 배치 조회 → {TICKER: close}.
+
+    yfinance(종목별 호출 + crumb 차단) 대신 사용.
+    시총 상위 4000종목(=S&P500 전부 포함)을 1회 요청으로 받고 TTL 캐시(기본 60초).
+    실패 시 직전 캐시라도 반환.
+    """
+    import httpx
+    import time
+
+    global _price_cache
+    now = time.time()
+    if _price_cache["data"] and (now - _price_cache["ts"] < ttl):
+        return _price_cache["data"]
+
+    body = {
+        "columns": ["name", "close"],
+        "filter": [{"left": "is_primary", "operation": "equal", "right": True}],
+        "range": [0, 4000],
+        "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
+        "markets": ["america"],
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Origin": "https://www.tradingview.com",
+        "Content-Type": "text/plain;charset=UTF-8",
+    }
     try:
-        fi = yf.Ticker(ticker).fast_info
-        return _f(getattr(fi, "last_price", None) or fi.get("lastPrice"))
-    except Exception:
-        return None
+        with httpx.Client(timeout=20, verify=False, headers=headers) as client:
+            r = client.post(
+                "https://scanner.tradingview.com/america/scan",
+                content=json.dumps(body),
+            )
+        if r.status_code != 200:
+            logger.warning(f"[TradingView] 현재가 조회 HTTP {r.status_code}")
+            return _price_cache["data"]
+        out: dict = {}
+        for row in r.json().get("data", []):
+            d = row.get("d", [])
+            if len(d) >= 2 and d[0] and d[1] is not None:
+                out[str(d[0]).upper()] = float(d[1])
+        _price_cache = {"data": out, "ts": now}
+        logger.info(f"[TradingView] 현재가 {len(out)}종목 로드")
+        return out
+    except Exception as e:
+        logger.warning(f"[TradingView] 현재가 조회 실패: {e}")
+        return _price_cache["data"]
 
 
 def get_positions(limit: int = 100) -> list[dict]:
     """
     earnings_dashboard(시작가/예측가/경과%) 반환.
-
-    현재가·가격위치%는 라우터에서 결합한다.
-    (종목별 yfinance 실시간 조회는 HuggingFace에서 느리고 crumb 차단 위험이 커
-     이벤트 루프를 막으므로 여기서 호출하지 않는다.)
+    현재가·가격위치%는 라우터에서 TradingView 현재가와 결합한다.
     """
     return earnings_repo.list_dashboard(limit)
