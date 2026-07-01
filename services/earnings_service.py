@@ -89,6 +89,38 @@ def _close_nearby(date_close: dict, target_date, direction: int) -> Optional[flo
     return None
 
 
+def _series_asof(series: dict, target_date) -> Optional[float]:
+    """series(date→값)에서 target_date 당일 포함 이전 가장 가까운 값 (최대 10일 소급)."""
+    for delta in range(0, 11):
+        d = target_date - timedelta(days=delta)
+        if d in series:
+            return series[d]
+    return None
+
+
+def _fetch_rate_series() -> dict:
+    """
+    ^TNX(미국 10년물 국채금리) 2년치 → {date: yield%}.
+    Yahoo Chart v8 (Crumb 불필요). 전체 수집 시작 시 1회만 호출.
+    """
+    from datetime import timezone as _tz
+
+    data = _fetch_yahoo_chart_sync("^TNX", "2y")
+    result_list = data.get("chart", {}).get("result")
+    if not result_list:
+        logger.warning("[earnings] ^TNX 금리 시계열 조회 실패")
+        return {}
+    res = result_list[0]
+    ts = res.get("timestamp", [])
+    closes = res.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    out: dict = {}
+    for t, c in zip(ts, closes):
+        if t is not None and c is not None:
+            out[datetime.fromtimestamp(int(t), tz=_tz.utc).date()] = float(c)
+    logger.info(f"[earnings] ^TNX 10년물 금리 {len(out)}일치 로드")
+    return out
+
+
 def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y") -> dict:
     """Yahoo Chart v8 API — Crumb 불필요, HuggingFace 정상 동작."""
     import httpx
@@ -474,17 +506,25 @@ def collect_event(ticker: str, earnings_date: Optional[str] = None,
     return saved
 
 
-def _collect_one_ticker(ticker: str, max_per_ticker: int, sector: Optional[str]) -> tuple[int, str]:
+def _collect_one_ticker(
+    ticker: str,
+    max_per_ticker: int,
+    sector: Optional[str],
+    rate_series: Optional[dict] = None,
+) -> tuple[int, str]:
     """
     단일 종목 과거 실적 적재. (저장 개수, 상태) 반환.
       상태: ok | no_price | no_sec | no_eps
     데이터 소스 (모두 무인증):
       - SEC EDGAR companyfacts: EPS + 발표일(10-Q filed) + 재무제표
-      - Yahoo Chart v8: px_pre/post/next_pre
+      - Yahoo Chart v8: px_pre/post/next_pre + 구간 고저(px_max/min)
+      - ^TNX(rate_series): 발표일 금리(ust10y) + 구간 금리변동(ust10y_change)
     """
     from datetime import timezone as _tz
 
-    # ── 1. 가격 데이터 (Chart API) ──────────────────────────
+    rate_series = rate_series or {}
+
+    # ── 1. 가격 데이터 (Chart API) — 종가 + 장중 고저 ────────
     chart_data = _fetch_yahoo_chart_sync(ticker, "2y")
     result_list = chart_data.get("chart", {}).get("result")
     if not result_list:
@@ -493,13 +533,27 @@ def _collect_one_ticker(ticker: str, max_per_ticker: int, sector: Optional[str])
 
     res = result_list[0]
     timestamps = res.get("timestamp", [])
-    closes_raw = (res.get("indicators", {})
-                  .get("quote", [{}])[0]
-                  .get("close", []))
+    quote = res.get("indicators", {}).get("quote", [{}])[0]
+    closes_raw = quote.get("close", [])
+    highs_raw = quote.get("high", [])
+    lows_raw = quote.get("low", [])
+
     date_close: dict = {}
-    for ts, c in zip(timestamps, closes_raw):
-        if ts is not None and c is not None:
-            date_close[datetime.fromtimestamp(int(ts), tz=_tz.utc).date()] = float(c)
+    date_high: dict = {}
+    date_low: dict = {}
+    for i, ts in enumerate(timestamps):
+        if ts is None:
+            continue
+        d = datetime.fromtimestamp(int(ts), tz=_tz.utc).date()
+        c = closes_raw[i] if i < len(closes_raw) else None
+        h = highs_raw[i] if i < len(highs_raw) else None
+        low = lows_raw[i] if i < len(lows_raw) else None
+        if c is not None:
+            date_close[d] = float(c)
+        if h is not None:
+            date_high[d] = float(h)
+        if low is not None:
+            date_low[d] = float(low)
 
     if not date_close:
         logger.warning(f"[earnings] {ticker} 가격 데이터 없음")
@@ -541,6 +595,7 @@ def _collect_one_ticker(ticker: str, max_per_ticker: int, sector: Optional[str])
             px_pre = _close_nearby(date_close, ann_date, direction=-1)
             px_post = _close_nearby(date_close, ann_date, direction=+1)
             px_next_pre = None
+            next_ann_date = None
             if next_ed_str:
                 next_ann_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
                 px_next_pre = _close_nearby(date_close, next_ann_date, direction=-1)
@@ -553,6 +608,30 @@ def _collect_one_ticker(ticker: str, max_per_ticker: int, sector: Optional[str])
                 (px_next_pre - px_post) if px_post and px_next_pre else None, px_post
             )
 
+            # ── 보유 구간(발표일~다음발표전날) 장중 고저 + MFE/MAE ──
+            #   ※ px_max/min·ret_max_*·ust10y_change 는 '구간 종료까지의 결과'라
+            #     예측 입력(피처)이 아니라 타깃/사후분석용 (미래 정보 — 학습 누수 주의)
+            px_max = px_min = ret_max_up = ret_max_down = None
+            if next_ann_date is not None:
+                highs = [v for d, v in date_high.items() if ann_date <= d <= next_ann_date]
+                lows = [v for d, v in date_low.items() if ann_date <= d <= next_ann_date]
+                if highs:
+                    px_max = max(highs)
+                if lows:
+                    px_min = min(lows)
+                if px_max is not None and px_post:
+                    ret_max_up = (px_max - px_post) / px_post      # MFE 최대 상승
+                if px_min is not None and px_post:
+                    ret_max_down = (px_min - px_post) / px_post    # MAE 최대 하락
+
+            # ── 금리(10년물): 발표일 수준 + 보유 구간 변동(%p) ──
+            ust10y = _series_asof(rate_series, ann_date)
+            ust10y_change = None
+            if ust10y is not None and next_ann_date is not None:
+                ust10y_next = _series_asof(rate_series, next_ann_date)
+                if ust10y_next is not None:
+                    ust10y_change = ust10y_next - ust10y
+
             fin = fin_by_period.get(fiscal_end_str, {})   # 분기말 기준 재무 피처
 
             row = {k: v for k, v in {
@@ -563,9 +642,15 @@ def _collect_one_ticker(ticker: str, max_per_ticker: int, sector: Optional[str])
                 "px_pre": px_pre,
                 "px_post": px_post,
                 "px_next_pre": px_next_pre,
+                "px_max": px_max,
+                "px_min": px_min,
+                "ret_max_up": ret_max_up,
+                "ret_max_down": ret_max_down,
                 "eps_act": eps_act,
                 "ret_event": ret_event,
                 "ret_hold": ret_hold,
+                "ust10y": ust10y,
+                "ust10y_change": ust10y_change,
                 **fin,
             }.items() if v is not None}
             row["ticker"] = ticker
@@ -602,7 +687,8 @@ def collect_history_iter(
     n = len(tickers)
     logger.info(f"[earnings] collect_history 시작: {n}개 종목 (SEC EDGAR + Yahoo Chart)")
 
-    _get_sec_ticker_cik()   # CIK 매핑 사전 로드
+    _get_sec_ticker_cik()          # CIK 매핑 사전 로드
+    rate_series = _fetch_rate_series()   # ^TNX 10년물 금리 2년치 (1회)
 
     total = 0
     failed = []
@@ -612,7 +698,9 @@ def collect_history_iter(
             time.sleep(1)
         logger.info(f"[earnings] {ticker} 수집 ({i+1}/{n})")
         try:
-            saved, status = _collect_one_ticker(ticker, max_per_ticker, sector_map.get(ticker))
+            saved, status = _collect_one_ticker(
+                ticker, max_per_ticker, sector_map.get(ticker), rate_series
+            )
         except Exception as e:
             logger.error(f"[earnings] ❌ {ticker} 실패: {type(e).__name__} {e}", exc_info=True)
             saved, status = 0, "error"
