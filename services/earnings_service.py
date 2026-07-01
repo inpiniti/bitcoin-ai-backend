@@ -505,7 +505,7 @@ def collect_event_sec(ticker: str, earnings_date: str, sector: Optional[str] = N
         logger.warning(f"[earnings] {ticker} SEC companyfacts 없음")
         return None
 
-    sec_events = _extract_eps_quarters(us_gaap, ticker, max_per_ticker=100)
+    sec_events = _extract_eps_quarters(us_gaap, ticker, max_quarters=100)
     if not sec_events:
         logger.warning(f"[earnings] {ticker} EPS 분기 데이터 없음")
         return None
