@@ -44,7 +44,7 @@ class HistoryCollectReq(BaseModel):
     universe: str = "SP500"
     tickers: Optional[list[str]] = None
     limit: int = 20            # universe 사용 시 적재할 종목 수 상한
-    max_per_ticker: int = 8    # 종목당 과거 분기 수
+    max_per_ticker: int = 40   # 종목당 과거 분기 수 (약 10년)
     skip_existing: bool = True # 이미 적재된 종목 건너뛰기 (이어하기)
 
 

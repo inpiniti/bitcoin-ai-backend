@@ -148,7 +148,7 @@ def _fetch_rate_series() -> dict:
     """
     from datetime import timezone as _tz
 
-    data = _fetch_yahoo_chart_sync("^TNX", "2y")
+    data = _fetch_yahoo_chart_sync("^TNX", "10y")
     result_list = data.get("chart", {}).get("result")
     if not result_list:
         logger.warning("[earnings] ^TNX 금리 시계열 조회 실패")
@@ -297,7 +297,7 @@ def _stock_map(us_gaap: dict, *tags: str, unit: str = "USD") -> dict:
     return out
 
 
-def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 8) -> list[dict]:
+def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 40) -> list[dict]:
     """
     EPS 분기 리스트. 분기값(80~100일)만 골라 누적(6·9개월) EPS 혼입 방지.
     반환: [{"fiscal_end": date, "filed": date, "eps_act": float|None}, ...] (오래된→최신)
@@ -322,7 +322,7 @@ def _extract_eps_quarters(us_gaap: dict, ticker: str, max_quarters: int = 8) -> 
         logger.warning(f"[SEC] {ticker} EPS 데이터 없음")
         return []
 
-    cutoff = _d.today() - timedelta(days=730)
+    cutoff = _d.today() - timedelta(days=3800)   # 약 10년+여유 (주가 range="10y"와 정합)
     seen: dict = {}
     for f in sorted(eps_facts, key=lambda x: x.get("filed", "")):  # filed 오름차순
         if f.get("form") not in ("10-Q", "10-K"):
@@ -575,7 +575,7 @@ def _collect_one_ticker(
     rate_series = rate_series or {}
 
     # ── 1. 가격 데이터 (Chart API) — 종가 + 장중 고저 ────────
-    chart_data = _fetch_yahoo_chart_sync(ticker, "2y")
+    chart_data = _fetch_yahoo_chart_sync(ticker, "10y")
     result_list = chart_data.get("chart", {}).get("result")
     if not result_list:
         logger.warning(f"[earnings] {ticker} 차트 데이터 없음")
@@ -721,7 +721,7 @@ def _collect_one_ticker(
 
 def collect_history_iter(
     tickers: list[str],
-    max_per_ticker: int = 8,
+    max_per_ticker: int = 40,
     sector_map: Optional[dict] = None,
 ):
     """
@@ -781,7 +781,7 @@ def collect_history_iter(
 
 def collect_history(
     tickers: list[str],
-    max_per_ticker: int = 8,
+    max_per_ticker: int = 40,
     sector_map: Optional[dict] = None,
 ) -> dict:
     """과거 실적 적재 (일괄). 진행 제너레이터를 소비해 최종 집계만 반환."""
