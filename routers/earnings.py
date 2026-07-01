@@ -414,6 +414,58 @@ async def today_collect(req: TodayCollectReq, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/earnings/event/collect", summary="특정 발표 수집 (캘린더 클릭용)")
+async def event_collect(ticker: str, earnings_date: str, request: Request):
+    """
+    ticker + earnings_date 로 단일 발표 이벤트 수집 (yfinance).
+    발표 캘린더에서 날짜·종목을 클릭했을 때 호출.
+    """
+    try:
+        # 수집 전 로깅
+        await log_earnings_api(
+            api=f"earnings/event/collect",
+            inout="out",
+            payload={"ticker": ticker, "earnings_date": earnings_date},
+            response={"message": "Fetching from yfinance..."},
+            status="success"
+        )
+
+        result = earnings_service.collect_event(ticker, earnings_date=earnings_date)
+        response = {
+            "status": "ok",
+            "ticker": ticker,
+            "earnings_date": earnings_date,
+            "collected": result is not None,
+            "event": result
+        }
+
+        # 수집 후 로깅
+        await log_earnings_api(
+            api="earnings/event/collect",
+            inout="in",
+            payload={"ticker": ticker, "earnings_date": earnings_date},
+            response=response,
+            status="success"
+        )
+        return response
+    except Exception as e:
+        error_response = {
+            "status": "error",
+            "ticker": ticker,
+            "earnings_date": earnings_date,
+            "error": str(e)
+        }
+        await log_earnings_api(
+            api="earnings/event/collect",
+            inout="in",
+            payload={"ticker": ticker, "earnings_date": earnings_date},
+            response=None,
+            status="error",
+            error_message=str(e)
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/earnings/events", summary="이벤트 테이블 조회")
 async def events(
     request: Request,
