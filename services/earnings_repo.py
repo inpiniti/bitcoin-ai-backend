@@ -67,6 +67,28 @@ def list_events(
     return res.data or []
 
 
+def list_collected_tickers() -> set:
+    """이미 적재된(수집 완료) 종목 집합. resume(이어하기)용 — 페이지네이션."""
+    out: set = set()
+    offset, page = 0, 1000
+    while True:
+        res = (
+            _sb()
+            .table("earnings_events")
+            .select("ticker")
+            .range(offset, offset + page - 1)
+            .execute()
+        )
+        rows = res.data or []
+        for r in rows:
+            if r.get("ticker"):
+                out.add(r["ticker"])
+        if len(rows) < page:
+            break
+        offset += page
+    return out
+
+
 def list_events_for_date(date: str) -> list[dict]:
     res = (
         _sb()

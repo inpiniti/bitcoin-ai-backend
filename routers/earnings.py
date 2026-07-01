@@ -15,6 +15,7 @@ Postman: trends/실적발표_자동매매_API.postman_collection.json
   GET  /api/positions                  대시보드(시작가/현재가/예측가/위치%/경과%)
   GET  /api/earnings/api-logs          API 통신 이력 로그 조회
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ class HistoryCollectReq(BaseModel):
     tickers: Optional[list[str]] = None
     limit: int = 20            # universe 사용 시 적재할 종목 수 상한
     max_per_ticker: int = 8    # 종목당 과거 분기 수
+    skip_existing: bool = True # 이미 적재된 종목 건너뛰기 (이어하기)
 
 
 class TodayCollectReq(BaseModel):
@@ -78,6 +80,67 @@ def _sp500_tickers_sync(limit: int) -> list[tuple[str, str]]:
     finally:
         if loop:
             loop.close()
+
+
+# ── 백그라운드 수집 작업 상태 (서버 프로세스 소유) ─────────────
+#   브라우저를 껐다 켜도 이 상태를 /status 로 조회해 진행률을 이어서 표시.
+#   서버 재시작 시에만 초기화됨 → skip_existing 으로 이어하기.
+_collect_job: dict = {
+    "status": "idle",          # idle | running | done | error
+    "current": 0,
+    "total": 0,
+    "ticker": None,
+    "collected": 0,
+    "total_inserted": 0,
+    "failed": [],
+    "started_at": None,
+    "finished_at": None,
+    "message": None,
+}
+_collect_task = None   # 백그라운드 태스크 강한 참조 유지 (GC 방지)
+
+
+async def _run_collect_job(tickers: list[str], max_per_ticker: int, sector_map: dict):
+    """백그라운드에서 수집을 끝까지 수행하며 _collect_job 진행 상태를 갱신."""
+    def _do():
+        for ev in earnings_service.collect_history_iter(tickers, max_per_ticker, sector_map):
+            if ev.get("done"):
+                _collect_job.update({
+                    "status": "done",
+                    "collected": ev["collected"],
+                    "total_inserted": ev["total_inserted"],
+                    "failed": ev["failed"],
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "message": (
+                        f"{ev['processed_tickers']}개 처리, "
+                        f"{ev['total_inserted']}개 적재, 실패 {len(ev['failed'])}개"
+                    ),
+                })
+            else:
+                _collect_job.update({
+                    "current": ev["current"],
+                    "total": ev["total"],
+                    "ticker": ev["ticker"],
+                })
+
+    try:
+        await run_in_threadpool(_do)
+    except Exception as e:
+        logger.error(f"[earnings] 백그라운드 수집 실패: {e}", exc_info=True)
+        _collect_job.update({
+            "status": "error",
+            "message": str(e),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        })
+    finally:
+        await log_earnings_api(
+            api="/api/earnings/history/collect/start",
+            inout="in",
+            payload={"total": _collect_job.get("total")},
+            response={k: _collect_job[k] for k in ("collected", "total_inserted", "failed", "status")},
+            status="success" if _collect_job["status"] == "done" else "error",
+            error_message=None if _collect_job["status"] == "done" else _collect_job.get("message"),
+        )
 
 
 # ── 초기 1회 ─────────────────────────────────────────────────
@@ -179,6 +242,76 @@ async def history_collect_stream(req: HistoryCollectReq, request: Request):
             "X-Accel-Buffering": "no",   # 프록시 버퍼링 비활성화 (실시간 전달)
         },
     )
+
+
+@router.post("/earnings/history/collect/start", summary="과거 적재 백그라운드 시작")
+async def history_collect_start(req: HistoryCollectReq, request: Request):
+    """
+    수집을 서버 백그라운드에서 시작하고 즉시 응답.
+    브라우저를 껐다 켜도 /status 로 진행률을 이어서 확인 가능.
+    이미 실행 중이면 현재 상태를 반환(중복 시작 방지).
+    skip_existing=True 면 이미 적재된 종목은 건너뜀(이어하기).
+    """
+    if _collect_job["status"] == "running":
+        return {"status": "already_running", **_collect_job}
+
+    # 대상 종목 + 섹터
+    sector_map: dict = {}
+    if req.tickers:
+        tickers = req.tickers
+    else:
+        pairs = await run_in_threadpool(_sp500_tickers_sync, req.limit)
+        tickers = [t for t, _ in pairs]
+        sector_map = {t: s for t, s in pairs}
+    if not tickers:
+        raise HTTPException(400, "적재할 종목이 없습니다 (tickers 또는 universe 확인)")
+
+    total_requested = len(tickers)
+    skipped = 0
+    if req.skip_existing:
+        existing = await run_in_threadpool(earnings_repo.list_collected_tickers)
+        before = len(tickers)
+        tickers = [t for t in tickers if t not in existing]
+        skipped = before - len(tickers)
+
+    if not tickers:
+        _collect_job.update({
+            "status": "done",
+            "current": 0, "total": 0, "ticker": None,
+            "collected": 0, "total_inserted": 0, "failed": [],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "message": f"이미 모두 적재됨 (전체 {total_requested}개 스킵)",
+        })
+        return {"status": "done", **_collect_job}
+
+    # 상태 초기화 + 백그라운드 시작
+    _collect_job.update({
+        "status": "running",
+        "current": 0,
+        "total": len(tickers),
+        "ticker": None,
+        "collected": 0,
+        "total_inserted": 0,
+        "failed": [],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "message": f"수집 시작 ({len(tickers)}개 대상, {skipped}개 스킵)",
+    })
+    global _collect_task
+    _collect_task = asyncio.create_task(_run_collect_job(tickers, req.max_per_ticker, sector_map))
+    return {
+        "status": "started",
+        "total": len(tickers),
+        "skipped": skipped,
+        "total_requested": total_requested,
+    }
+
+
+@router.get("/earnings/history/collect/status", summary="과거 적재 진행 상태 조회")
+async def history_collect_status():
+    """현재 백그라운드 수집 진행 상태. 브라우저 재접속 시 진행률 복원용."""
+    return _collect_job
 
 
 # ── 일일 루프 ────────────────────────────────────────────────
