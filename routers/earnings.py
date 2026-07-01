@@ -417,8 +417,8 @@ async def today_collect(req: TodayCollectReq, request: Request):
 @router.post("/earnings/event/collect", summary="특정 발표 수집 (캘린더 클릭용)")
 async def event_collect(ticker: str, earnings_date: str, request: Request):
     """
-    ticker + earnings_date 로 단일 발표 이벤트 수집 (yfinance).
-    발표 캘린더에서 날짜·종목을 클릭했을 때 호출.
+    ticker + earnings_date 로 단일 발표 이벤트 수집 (SEC EDGAR + Yahoo Chart).
+    발표 캘린더에서 날짜·종목을 클릭했을 때 호출. 과거 수집과 동일 품질.
     """
     try:
         # 수집 전 로깅
@@ -426,11 +426,11 @@ async def event_collect(ticker: str, earnings_date: str, request: Request):
             api=f"earnings/event/collect",
             inout="out",
             payload={"ticker": ticker, "earnings_date": earnings_date},
-            response={"message": "Fetching from yfinance..."},
+            response={"message": "Fetching from SEC EDGAR + Yahoo Chart..."},
             status="success"
         )
 
-        result = earnings_service.collect_event(ticker, earnings_date=earnings_date)
+        result = earnings_service.collect_event_sec(ticker, earnings_date=earnings_date)
         response = {
             "status": "ok",
             "ticker": ticker,

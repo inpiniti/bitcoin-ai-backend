@@ -449,6 +449,171 @@ def _build_features_from_info(info: dict) -> dict:
     }
 
 
+def collect_event_sec(ticker: str, earnings_date: str, sector: Optional[str] = None) -> Optional[dict]:
+    """
+    특정 종목의 특정 발표일 데이터 수집 (SEC EDGAR + Yahoo Chart).
+    과거 수집(`collect_history`)과 동일한 데이터 품질.
+
+    반환: 저장된 이벤트 dict (없으면 None)
+    """
+    from datetime import timezone as _tz
+
+    try:
+        target_date = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+    except ValueError:
+        logger.warning(f"[earnings] {ticker} 잘못된 날짜: {earnings_date}")
+        return None
+
+    # ── 1. 가격 데이터 (Chart API) — 종가 + 장중 고저 ────────
+    chart_data = _fetch_yahoo_chart_sync(ticker, "10y")
+    result_list = chart_data.get("chart", {}).get("result")
+    if not result_list:
+        logger.warning(f"[earnings] {ticker} 차트 데이터 없음")
+        return None
+
+    res = result_list[0]
+    timestamps = res.get("timestamp", [])
+    quote = res.get("indicators", {}).get("quote", [{}])[0]
+    closes_raw = quote.get("close", [])
+    highs_raw = quote.get("high", [])
+    lows_raw = quote.get("low", [])
+
+    date_close: dict = {}
+    date_high: dict = {}
+    date_low: dict = {}
+    for i, ts in enumerate(timestamps):
+        if ts is None:
+            continue
+        d = datetime.fromtimestamp(int(ts), tz=_tz.utc).date()
+        c = closes_raw[i] if i < len(closes_raw) else None
+        h = highs_raw[i] if i < len(highs_raw) else None
+        low = lows_raw[i] if i < len(lows_raw) else None
+        if c is not None:
+            date_close[d] = float(c)
+        if h is not None:
+            date_high[d] = float(h)
+        if low is not None:
+            date_low[d] = float(low)
+
+    if not date_close:
+        logger.warning(f"[earnings] {ticker} 가격 데이터 없음")
+        return None
+
+    # ── 2. SEC companyfacts (EPS + 발표일 + 재무제표) ────────
+    us_gaap = _fetch_sec_companyfacts(ticker)
+    if not us_gaap:
+        logger.warning(f"[earnings] {ticker} SEC companyfacts 없음")
+        return None
+
+    sec_events = _extract_eps_quarters(us_gaap, ticker, max_per_ticker=100)
+    if not sec_events:
+        logger.warning(f"[earnings] {ticker} EPS 분기 데이터 없음")
+        return None
+
+    # 정렬 + 중복 제거 (과거 수집과 동일)
+    sec_events = sorted(sec_events, key=lambda e: e["filed"])
+    _dedup: dict = {}
+    for _ev in sec_events:
+        _dedup[_ev["filed"]] = _ev
+    sec_events = sorted(_dedup.values(), key=lambda e: e["filed"])
+
+    # 목표 날짜의 이벤트 찾기
+    target_event = None
+    target_idx = None
+    for idx, ev in enumerate(sec_events):
+        if ev["filed"] == target_date:
+            target_event = ev
+            target_idx = idx
+            break
+
+    if target_event is None:
+        logger.warning(f"[earnings] {ticker} {earnings_date} SEC 데이터 없음")
+        return None
+
+    fin_by_period = _extract_financials(us_gaap)
+    rate_series = _fetch_rate_series()
+
+    # ── 3. 목표 이벤트만 처리 & 저장 ──────────────────────────
+    try:
+        ann_date = target_event["filed"]
+        ed_str = ann_date.strftime("%Y-%m-%d")
+        fiscal_end_str = target_event["fiscal_end"].strftime("%Y-%m-%d")
+
+        next_ed_str = None
+        if target_idx + 1 < len(sec_events):
+            next_ed_str = sec_events[target_idx + 1]["filed"].strftime("%Y-%m-%d")
+
+        px_pre = _close_nearby(date_close, ann_date, direction=-1)
+        px_post = _close_nearby(date_close, ann_date, direction=+1)
+        px_next_pre = None
+        next_ann_date = None
+        if next_ed_str:
+            next_ann_date = datetime.strptime(next_ed_str, "%Y-%m-%d").date()
+            px_next_pre = _close_nearby(date_close, next_ann_date, direction=-1)
+
+        eps_act = _f(target_event.get("eps_act"))
+        ret_event = _ratio(
+            (px_post - px_pre) if px_pre and px_post else None, px_pre
+        )
+        ret_hold = _ratio(
+            (px_next_pre - px_post) if px_post and px_next_pre else None, px_post
+        )
+
+        # 구간 고저 + MFE/MAE
+        px_max = px_min = ret_max_up = ret_max_down = None
+        if next_ann_date is not None:
+            highs = [v for d, v in date_high.items() if ann_date <= d <= next_ann_date]
+            lows = [v for d, v in date_low.items() if ann_date <= d <= next_ann_date]
+            if highs:
+                px_max = max(highs)
+            if lows:
+                px_min = min(lows)
+            if px_max is not None and px_post:
+                ret_max_up = (px_max - px_post) / px_post
+            if px_min is not None and px_post:
+                ret_max_down = (px_min - px_post) / px_post
+
+        # 금리
+        ust10y = _series_asof(rate_series, ann_date)
+        ust10y_change = None
+        if ust10y is not None and next_ann_date is not None:
+            ust10y_next = _series_asof(rate_series, next_ann_date)
+            if ust10y_next is not None:
+                ust10y_change = ust10y_next - ust10y
+
+        fin = fin_by_period.get(fiscal_end_str, {})
+
+        row = {k: v for k, v in {
+            "ticker": ticker,
+            "gics_sector": sector,
+            "earnings_date": ed_str,
+            "next_earnings_date": next_ed_str,
+            "px_pre": px_pre,
+            "px_post": px_post,
+            "px_next_pre": px_next_pre,
+            "px_max": px_max,
+            "px_min": px_min,
+            "ret_max_up": ret_max_up,
+            "ret_max_down": ret_max_down,
+            "eps_act": eps_act,
+            "ret_event": ret_event,
+            "ret_hold": ret_hold,
+            "ust10y": ust10y,
+            "ust10y_change": ust10y_change,
+            **fin,
+        }.items() if v is not None}
+        row["ticker"] = ticker
+        row = _sanitize_row(row)
+
+        result = earnings_repo.upsert_event(row)
+        logger.info(f"[earnings] ✅ {ticker} {earnings_date} 수집 완료")
+        return result
+
+    except Exception as e:
+        logger.warning(f"[earnings] {ticker} {earnings_date} 처리 실패: {e}")
+        return None
+
+
 def collect_event(ticker: str, earnings_date: Optional[str] = None,
                   sector: Optional[str] = None, tv_event: Optional[object] = None) -> Optional[dict]:
     """
