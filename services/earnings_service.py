@@ -69,6 +69,38 @@ def _ratio(a, b) -> Optional[float]:
     return a / b
 
 
+# DB DECIMAL 컬럼별 절대값 상한 (precision-scale 기반)
+#   초과 시 저장하면 'numeric field overflow' → 이벤트 통째로 유실.
+#   그런 극단 비율은 분모(순이익 등)가 0에 가까운 노이즈이므로 결측 처리한다.
+_COL_MAX_ABS = {
+    # DECIMAL(8,4) → |x| < 10^4
+    "gross_margin": 9999.9999, "net_margin": 9999.9999, "sga_to_gross": 9999.9999,
+    "roe": 9999.9999, "roc": 9999.9999, "earnings_yield": 9999.9999,
+    "capex_to_ni": 9999.9999, "debt_to_ni": 9999.9999, "inventory_vs_sales": 9999.9999,
+    "ust10y_change": 9999.9999,
+    # DECIMAL(6,4) → |x| < 10^2
+    "dividend_yield": 99.9999,
+    # DECIMAL(10,4) → |x| < 10^6
+    "eps_yoy": 999999.9999, "eps_surprise_pct": 999999.9999, "rev_surprise_pct": 999999.9999,
+    "ret_event": 999999.9999, "ret_hold": 999999.9999,
+    "ret_max_up": 999999.9999, "ret_max_down": 999999.9999,
+    # DECIMAL(8,2) → |x| < 10^6
+    "peg": 999999.99,
+    # DECIMAL(10,2) → |x| < 10^8
+    "per": 99999999.99, "pbr": 99999999.99, "ev_ebitda": 99999999.99,
+}
+
+
+def _sanitize_row(row: dict) -> dict:
+    """DECIMAL 상한을 넘는 극단값은 결측 처리(제거) — overflow로 인한 이벤트 유실 방지."""
+    for col, limit in _COL_MAX_ABS.items():
+        v = row.get(col)
+        if v is not None and abs(v) > limit:
+            logger.debug(f"[earnings] {row.get('ticker')} {col}={v} 상한 초과 → 결측 처리")
+            row.pop(col, None)
+    return row
+
+
 def _close_on_or_before(hist, date) -> Optional[float]:
     """date(포함) 이전의 마지막 종가."""
     if hist is None or hist.empty:
@@ -132,9 +164,13 @@ def _fetch_rate_series() -> dict:
     return out
 
 
-def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y") -> dict:
-    """Yahoo Chart v8 API — Crumb 불필요, HuggingFace 정상 동작."""
+def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y", retries: int = 2) -> dict:
+    """
+    Yahoo Chart v8 API — Crumb 불필요, HuggingFace 정상 동작.
+    일시적 타임아웃/오류 대비 재시도(기본 2회, 1.5초 간격).
+    """
     import httpx
+    import time as _t
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         f"?range={range_str}&interval=1d"
@@ -144,14 +180,17 @@ def _fetch_yahoo_chart_sync(ticker: str, range_str: str = "2y") -> dict:
                       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json",
     }
-    try:
-        with httpx.Client(timeout=15, verify=False, headers=headers) as client:
-            r = client.get(url)
-        if r.status_code == 200:
-            return r.json()
-        logger.warning(f"[YahooChart] {ticker} HTTP {r.status_code}")
-    except Exception as e:
-        logger.warning(f"[YahooChart] {ticker} 조회 실패: {e}")
+    for attempt in range(retries + 1):
+        try:
+            with httpx.Client(timeout=20, verify=False, headers=headers) as client:
+                r = client.get(url)
+            if r.status_code == 200:
+                return r.json()
+            logger.warning(f"[YahooChart] {ticker} HTTP {r.status_code} (시도 {attempt+1}/{retries+1})")
+        except Exception as e:
+            logger.warning(f"[YahooChart] {ticker} 조회 실패 (시도 {attempt+1}/{retries+1}): {e}")
+        if attempt < retries:
+            _t.sleep(1.5)
     return {}
 
 
@@ -665,6 +704,7 @@ def _collect_one_ticker(
                 **fin,
             }.items() if v is not None}
             row["ticker"] = ticker
+            row = _sanitize_row(row)   # DECIMAL 상한 초과값 결측 처리 (overflow 방지)
 
             earnings_repo.upsert_event(row)
             saved_count += 1
