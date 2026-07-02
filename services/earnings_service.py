@@ -1000,25 +1000,87 @@ def _attach_qoq(events: list[dict]) -> None:
             prev = e
 
 
-def _feature_row(e: dict):
-    """이벤트 → 피처 벡터 (FEATURE_COLUMNS 순서, 결측=nan)."""
+def _feature_row(e: dict, cols: Optional[list] = None):
+    """이벤트 → 피처 벡터 (cols 순서, 결측=nan). cols 미지정 시 전체 FEATURE_COLUMNS."""
     import numpy as np
+    cols = cols or FEATURE_COLUMNS
     return [_f(e.get(c)) if _f(e.get(c)) is not None else np.nan
-            for c in FEATURE_COLUMNS]
+            for c in cols]
 
 
-def _to_matrix(events: list[dict], target: str = "ret_hold"):
+def _to_matrix(events: list[dict], target: str = "ret_hold", cols: Optional[list] = None):
     """해당 target 이 채워진 행만 (X, y, dates)로. dates 는 시계열 검증 분할용 발표일."""
     import numpy as np
+    cols = cols or FEATURE_COLUMNS
     X, y, dates = [], [], []
     for e in events:
         v = _f(e.get(target))
         if v is None:
             continue
-        X.append(_feature_row(e))
+        X.append(_feature_row(e, cols))
         y.append(v)
         dates.append(e.get("earnings_date") or "")
     return np.array(X, dtype="float32"), np.array(y, dtype="float32"), dates
+
+
+def select_features(labeled: list[dict], target: str = "ret_hold", max_features: int = 12) -> dict:
+    """
+    전진 선택법(forward greedy) 피처 선택.
+    전 섹터 통합(pooled) 데이터로 target 을 시계열 검증(앞80%/뒤20%)하며,
+    '추가했을 때 검증 RMSE 가 가장 줄어드는' 피처를 하나씩 채택. 개선 없으면 중단.
+    → 노이즈 피처를 빼 과적합을 줄인 '공통 피처셋' 1개를 반환.
+
+    반환: {"selected":[...], "curve":[{n,added,val_rmse}], "baseline_rmse":.., "best_rmse":..}
+    """
+    import numpy as np
+    import xgboost as xgb
+
+    rows = [e for e in labeled if _f(e.get(target)) is not None]
+    if len(rows) < 200:
+        return {"selected": list(FEATURE_COLUMNS), "curve": [], "baseline_rmse": None,
+                "best_rmse": None, "note": "표본 부족 → 전체 피처 사용"}
+
+    def _val_rmse(cols: list) -> float:
+        X, y, dates = _to_matrix(rows, target, cols)
+        order = np.argsort(np.array(dates))
+        Xs, ys = X[order], y[order]
+        split = int(len(y) * 0.8)
+        # 선택 단계는 상대 비교용이라 트리 수를 낮춰 속도 확보(60)
+        m = xgb.XGBRegressor(n_estimators=60, max_depth=4, learning_rate=0.05,
+                             subsample=0.8, colsample_bytree=0.8, random_state=42)
+        m.fit(Xs[:split], ys[:split])
+        pred = m.predict(Xs[split:])
+        return float(np.sqrt(np.mean((pred - ys[split:]) ** 2)))
+
+    # 기준선: 평균 찍기(train 평균)의 검증 RMSE
+    X0, y0, d0 = _to_matrix(rows, target, [FEATURE_COLUMNS[0]])
+    order0 = np.argsort(np.array(d0))
+    ys0 = y0[order0]
+    split0 = int(len(ys0) * 0.8)
+    base_rmse = float(np.sqrt(np.mean((np.full(len(ys0) - split0, float(ys0[:split0].mean())) - ys0[split0:]) ** 2)))
+
+    selected: list = []
+    candidates = list(FEATURE_COLUMNS)
+    curve = []
+    best_rmse = base_rmse
+    while candidates and len(selected) < max_features:
+        step_best, step_rmse = None, best_rmse
+        for c in candidates:
+            r = _val_rmse(selected + [c])
+            if r < step_rmse:
+                step_rmse, step_best = r, c
+        if step_best is None:      # 더 이상 개선 없음 → 중단
+            break
+        selected.append(step_best)
+        candidates.remove(step_best)
+        curve.append({"n": len(selected), "added": step_best, "val_rmse": round(step_rmse, 5)})
+        best_rmse = step_rmse
+
+    if not selected:               # 어떤 피처도 평균보다 못하면 전체 사용(폴백)
+        selected = list(FEATURE_COLUMNS)
+    logger.info(f"[featsel] 선택 {len(selected)}개: {selected} (base={base_rmse:.5f} → best={best_rmse:.5f})")
+    return {"selected": selected, "curve": curve,
+            "baseline_rmse": round(base_rmse, 5), "best_rmse": round(best_rmse, 5)}
 
 
 def train(min_samples: int = 30) -> dict:
@@ -1044,6 +1106,10 @@ def train(min_samples: int = 30) -> dict:
 
     labeled = earnings_repo.list_labeled_events()
     _attach_qoq(labeled)                      # 전분기 대비 증감(QoQ) 피처 주입
+
+    # ── 피처 선택(전 섹터 통합 ret_hold, 전진 선택) → 공통 피처셋 1개 ──
+    fsel = select_features(labeled, target="ret_hold")
+    cols = fsel["selected"]
     by_sector: dict[str, list[dict]] = {}
     for e in labeled:
         sec = e.get("gics_sector") or "Unknown"
@@ -1052,7 +1118,7 @@ def train(min_samples: int = 30) -> dict:
     results = []
     for sector, rows in by_sector.items():
         for target in TARGET_COLUMNS:
-            X, y, dates = _to_matrix(rows, target)
+            X, y, dates = _to_matrix(rows, target, cols)
             n = len(y)
             if n < min_samples:
                 results.append({"sector": sector, "target": target, "status": "skipped",
@@ -1093,11 +1159,12 @@ def train(min_samples: int = 30) -> dict:
             model_id = earnings_repo.save_earnings_model(
                 sector, model_json,
                 meta={
-                    "feature_count": len(FEATURE_COLUMNS),
+                    "feature_count": len(cols),
                     "sample_count": int(n),
                     "stage": 1,
                     "rmse": round(report_rmse, 5),   # ★ 검증 RMSE (정직한 값)
                     "model_version": version,
+                    "feature_list": cols,            # ★ 이 모델이 쓴 피처(예측 시 동일 순서 사용)
                 },
                 target=target,
             )
@@ -1137,6 +1204,13 @@ def train(min_samples: int = 30) -> dict:
             "signal": n_signal, "random": n_random, "worse": n_worse,
             "avg_edge_pct": avg_edge,
             "overall": overall,
+        },
+        "feature_selection": {
+            "selected": cols,
+            "count": len(cols),
+            "curve": fsel.get("curve", []),
+            "baseline_rmse": fsel.get("baseline_rmse"),
+            "best_rmse": fsel.get("best_rmse"),
         },
     }
 
@@ -1210,16 +1284,9 @@ def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -
         return model_cache[key]
 
     predicted, skipped = 0, 0
-    ci = FEATURE_COLUMNS.index("ust10y_change")
 
     for e in events:
         sector = e.get("gics_sector") or "Unknown"
-
-        # 피처 벡터 구성 (+ 금리 시나리오 주입)
-        feat = _feature_row(e)
-        if scenario_val is not None:
-            feat[ci] = scenario_val
-        x = np.array([feat], dtype="float32")
 
         # 예측가 기준선 = 시작가(px_pre, 발표 직전가). 화면 '시작가'와 일치시켜
         #   가격 위치% 계산의 기준선 불일치를 근본 해소한다. (px_pre 없으면 px_post 폴백)
@@ -1231,6 +1298,12 @@ def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -
             if not mrow:
                 continue
             used_model = mrow
+            # 모델이 학습에 쓴 피처(feature_list)로 동일 순서로 벡터 구성 (+ 금리 시나리오)
+            cols = mrow.get("feature_list") or FEATURE_COLUMNS
+            feat = _feature_row(e, cols)
+            if scenario_val is not None and "ust10y_change" in cols:
+                feat[cols.index("ust10y_change")] = scenario_val
+            x = np.array([feat], dtype="float32")
             preds[target] = float(_load_booster(mrow).predict(xgb.DMatrix(x))[0])
 
         if not preds:
