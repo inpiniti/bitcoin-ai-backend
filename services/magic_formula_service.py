@@ -202,14 +202,40 @@ def backtest(top_pct: int = 20) -> dict:
 # ═════════════════════════════════════════════════════════════
 
 # dir: +1 = 높을수록 좋음, -1 = 낮을수록 좋음
+# 증감(_chg): 전년동기(4분기 전) 대비. 비율은 차이(pp), 금액/EPS는 성장률(pct)
+_DELTA_SPEC = [
+    ("roc", "roc_chg", "pp"),
+    ("roe", "roe_chg", "pp"),
+    ("gross_margin", "gross_margin_chg", "pp"),
+    ("net_margin", "net_margin_chg", "pp"),
+    ("debt_to_ni", "debt_to_ni_chg", "pp"),
+    ("sga_to_gross", "sga_to_gross_chg", "pp"),
+    ("_ep", "ep_chg", "pp"),
+    ("eps_act", "eps_chg", "pct"),
+    ("retained_earnings", "retained_earnings_chg", "pct"),
+    ("cash_sti", "cash_sti_chg", "pct"),
+]
+
 FACTORS = [
-    {"key": "roc",          "label": "자본수익률(ROC)",   "guru": "그린블라트·버핏",    "dir": 1,  "col": "roc"},
-    {"key": "ep",           "label": "이익수익률(E/P)",   "guru": "그린블라트·그레이엄", "dir": 1,  "col": "_ep"},
-    {"key": "gross_margin", "label": "매출총이익률",       "guru": "버핏",            "dir": 1,  "col": "gross_margin"},
-    {"key": "net_margin",   "label": "순이익률",           "guru": "버핏",            "dir": 1,  "col": "net_margin"},
-    {"key": "roe",          "label": "ROE",               "guru": "버핏",            "dir": 1,  "col": "roe"},
-    {"key": "debt_to_ni",   "label": "부채/이익(낮을수록)", "guru": "버핏",           "dir": -1, "col": "debt_to_ni"},
-    {"key": "eps_growth",   "label": "EPS성장(YoY)",      "guru": "린치·버핏",       "dir": 1,  "col": "_eps_yoy"},
+    # ── 레벨(현재 수준) ──
+    {"key": "roc",          "label": "자본수익률(ROC)", "guru": "그린블라트·버핏",    "dir": 1,  "col": "roc"},
+    {"key": "ep",           "label": "이익수익률(E/P)", "guru": "그린블라트·그레이엄", "dir": 1,  "col": "_ep"},
+    {"key": "gross_margin", "label": "매출총이익률",     "guru": "버핏",            "dir": 1,  "col": "gross_margin"},
+    {"key": "net_margin",   "label": "순이익률",         "guru": "버핏",            "dir": 1,  "col": "net_margin"},
+    {"key": "roe",          "label": "ROE",             "guru": "버핏",            "dir": 1,  "col": "roe"},
+    {"key": "debt_to_ni",   "label": "부채/이익",        "guru": "버핏",            "dir": -1, "col": "debt_to_ni"},
+    {"key": "sga_to_gross", "label": "판관비율",         "guru": "버핏",            "dir": -1, "col": "sga_to_gross"},
+    # ── 증감(전년동기 대비) ──
+    {"key": "roc_chg",  "label": "ROC 증감",         "guru": "증감",     "dir": 1,  "col": "roc_chg"},
+    {"key": "ep_chg",   "label": "E/P 증감",         "guru": "증감",     "dir": 1,  "col": "ep_chg"},
+    {"key": "gm_chg",   "label": "매출총이익률 증감",  "guru": "증감",     "dir": 1,  "col": "gross_margin_chg"},
+    {"key": "nm_chg",   "label": "순이익률 증감",      "guru": "증감",     "dir": 1,  "col": "net_margin_chg"},
+    {"key": "roe_chg",  "label": "ROE 증감",         "guru": "증감",     "dir": 1,  "col": "roe_chg"},
+    {"key": "debt_chg", "label": "부채비율 증감(↓좋음)", "guru": "증감",  "dir": -1, "col": "debt_to_ni_chg"},
+    {"key": "sga_chg",  "label": "판관비율 증감(↓좋음)", "guru": "증감",  "dir": -1, "col": "sga_to_gross_chg"},
+    {"key": "eps_chg",  "label": "EPS 성장(YoY)",    "guru": "린치·버핏", "dir": 1, "col": "eps_chg"},
+    {"key": "ret_chg",  "label": "이익잉여 성장",      "guru": "버핏",    "dir": 1,  "col": "retained_earnings_chg"},
+    {"key": "cash_chg", "label": "현금 성장",         "guru": "버핏",    "dir": 1,  "col": "cash_sti_chg"},
 ]
 
 
@@ -218,28 +244,27 @@ def _round(v, nd: int = 4):
     return round(x, nd) if x is not None else None
 
 
-def _attach_eps_growth(events: list[dict]) -> None:
-    """ticker별 시계열 정렬 후 EPS의 전년동기(4분기 전) 대비 성장률을 e['_eps_yoy']에 주입."""
+def _attach_all(events: list[dict]) -> None:
+    """파생 팩터 주입: E/P(_ep) + 전년동기 대비 증감(*_chg). (events 전체를 넘겨 히스토리 확보)"""
     from collections import defaultdict as _dd
+    for e in events:
+        e["_ep"] = _cheapness(e)
     by_ticker = _dd(list)
     for e in events:
         by_ticker[e.get("ticker") or ""].append(e)
     for evs in by_ticker.values():
         evs.sort(key=lambda e: e.get("earnings_date") or "")
         for i, e in enumerate(evs):
-            e["_eps_yoy"] = None
-            cur = _f(e.get("eps_act"))
-            if cur is not None and i >= 4:
-                prev = _f(evs[i - 4].get("eps_act"))
-                if prev is not None and prev != 0:
-                    e["_eps_yoy"] = (cur - prev) / abs(prev)
-
-
-def _attach_factors(events: list[dict]) -> None:
-    """팩터 계산에 필요한 파생값(_ep, _eps_yoy)을 이벤트에 주입."""
-    _attach_eps_growth(events)
-    for e in events:
-        e["_ep"] = _cheapness(e)
+            for base, out, mode in _DELTA_SPEC:
+                e[out] = None
+                if i >= 4:
+                    cur = _f(e.get(base))
+                    prev = _f(evs[i - 4].get(base))
+                    if cur is not None and prev is not None:
+                        if mode == "pp":
+                            e[out] = cur - prev
+                        elif prev != 0:
+                            e[out] = (cur - prev) / abs(prev)
 
 
 def _rank_factor(items: list[dict], factor: dict) -> dict:
@@ -250,10 +275,10 @@ def _rank_factor(items: list[dict], factor: dict) -> dict:
     return {id(it): i + 1 for i, it in enumerate(valid)}
 
 
-def _composite(items: list[dict], min_factors: int = 3) -> list[dict]:
-    """팩터별 순위 백분위(0=최고~1=최악)의 평균을 종합점수(_score)로, 낮을수록 상위."""
+def _composite(items: list[dict], factors: list[dict], min_factors: int = 2) -> list[dict]:
+    """주어진 factors 순위 백분위(0=최고~1=최악)의 평균을 종합점수(_score)로, 낮을수록 상위."""
     pcts: dict[int, list[float]] = {id(it): [] for it in items}
-    for f in FACTORS:
+    for f in factors:
         ranks = _rank_factor(items, f)
         n = len(ranks)
         if n <= 1:
@@ -321,42 +346,67 @@ def _bt_ranking(evs: list[dict], rank_fn, top_pct: int) -> dict:
     }
 
 
+def _factor_rank_fn(f: dict):
+    """팩터 f 로 그룹을 정렬(상위=좋음)하는 함수 반환."""
+    def _fn(group):
+        ranks = _rank_factor(group, f)
+        usable = [e for e in group if id(e) in ranks]
+        usable.sort(key=lambda e: ranks[id(e)])
+        return usable
+    return _fn
+
+
+def _factor_results(evs: list[dict], top_pct: int) -> list[dict]:
+    """모든 팩터(레벨+증감) 개별 백테스트 결과."""
+    out = []
+    for f in FACTORS:
+        res = _bt_ranking(evs, _factor_rank_fn(f), top_pct)
+        res.update({"key": f["key"], "label": f["label"], "guru": f["guru"]})
+        out.append(res)
+    return out
+
+
 def scorecard_backtest(top_pct: int = 20) -> dict:
-    """팩터별 + 종합 백테스트. 어느 거장 기준이 실제 엣지가 있었는지 보여준다."""
+    """레벨+증감 팩터 개별 백테스트 + '통하는(spread>0) 팩터만' 종합 백테스트."""
     labeled = earnings_repo.list_labeled_events()
-    _attach_factors(labeled)
+    _attach_all(labeled)
     evs = [e for e in labeled if _f(e.get("ret_hold")) is not None]
 
-    factors_out = []
-    for f in FACTORS:
-        def _rank_fn(group, f=f):
-            ranks = _rank_factor(group, f)
-            usable = [e for e in group if id(e) in ranks]
-            usable.sort(key=lambda e: ranks[id(e)])
-            return usable
-        res = _bt_ranking(evs, _rank_fn, top_pct)
-        res.update({"key": f["key"], "label": f["label"], "guru": f["guru"]})
-        factors_out.append(res)
+    factors_out = _factor_results(evs, top_pct)
+    win_keys = {r["key"] for r in factors_out if r["spread"] is not None and r["spread"] > 0}
+    winners = [f for f in FACTORS if f["key"] in win_keys]
+    winner_labels = [f["label"] for f in winners]
 
-    # 통하는 팩터 우선 정렬(spread 내림차순)
     factors_out.sort(key=lambda r: (r["spread"] is not None, r["spread"] or -999), reverse=True)
 
-    composite = _bt_ranking(evs, lambda group: _composite(group), top_pct)
-    logger.info(f"[scorecard] backtest: 이벤트 {len(evs)}개, 종합 verdict={composite['verdict']}")
+    if winners:
+        composite = _bt_ranking(evs, lambda g: _composite(g, winners), top_pct)
+    else:
+        composite = {"top_ret": None, "bottom_ret": None, "all_ret": None, "spread": None,
+                     "years_win": 0, "years_total": 0, "verdict": "no_data"}
+    logger.info(f"[scorecard] backtest: {len(evs)}건, 통과팩터 {len(winners)}개 {winner_labels}, "
+                f"종합 verdict={composite['verdict']}")
     return {
         "top_pct": top_pct,
         "horizon": "발표~다음발표(≈3개월) 평균 보유수익률",
         "factors": factors_out,
         "composite": composite,
+        "winners": winner_labels,
     }
 
 
 def scorecard_ranking(limit: int = 30) -> dict:
-    """ticker별 최신 실적으로 종합 점수 랭킹 (오늘의 매수 후보)."""
+    """통과 팩터(spread>0)만으로 종합 점수 랭킹 (오늘의 매수 후보)."""
     labeled = earnings_repo.list_labeled_events()
     unlabeled = earnings_repo.list_unlabeled_events()
     allev = labeled + unlabeled
-    _attach_factors(allev)
+    _attach_all(allev)                       # 라벨+미라벨 통합으로 증감 히스토리 확보
+
+    # 통과 팩터 결정(라벨 데이터 백테스트)
+    evs = [e for e in labeled if _f(e.get("ret_hold")) is not None]
+    win_keys = {r["key"] for r in _factor_results(evs, 20)
+                if r["spread"] is not None and r["spread"] > 0}
+    winners = [f for f in FACTORS if f["key"] in win_keys] or list(FACTORS)
 
     latest: dict[str, dict] = {}
     for e in allev:
@@ -367,7 +417,7 @@ def scorecard_ranking(limit: int = 30) -> dict:
         if tk not in latest or d > (latest[tk].get("earnings_date") or ""):
             latest[tk] = e
 
-    scored = _composite(list(latest.values()))
+    scored = _composite(list(latest.values()), winners)
     items = []
     for i, e in enumerate(scored[:limit]):
         items.append({
@@ -381,11 +431,11 @@ def scorecard_ranking(limit: int = 30) -> dict:
             "ep": _round(e.get("_ep")),
             "net_margin": _round(e.get("net_margin")),
             "roe": _round(e.get("roe")),
-            "eps_growth": _round(e.get("_eps_yoy")),
+            "eps_growth": _round(e.get("eps_chg")),
         })
     return {
         "universe": len(scored),
         "shown": len(items),
-        "factors": [{"key": f["key"], "label": f["label"], "guru": f["guru"]} for f in FACTORS],
+        "factors_used": [f["label"] for f in winners],
         "items": items,
     }
