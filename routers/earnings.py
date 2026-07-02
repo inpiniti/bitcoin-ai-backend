@@ -27,7 +27,7 @@ from pydantic import BaseModel
 import httpx
 from starlette.concurrency import run_in_threadpool, iterate_in_threadpool
 
-from services import earnings_repo, earnings_service
+from services import earnings_repo, earnings_service, magic_formula_service
 from services.earnings_logger import log_earnings_api
 from services.supabase_service import SUPABASE_URL, _headers, _check_config
 
@@ -550,6 +550,26 @@ async def model_train(req: TrainReq, request: Request):
             status="error",
             error_message=str(e)
         )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── 마법공식 (그린블라트 랭킹 + 백테스트) ────────────────────
+
+@router.get("/earnings/magic/ranking", summary="마법공식 랭킹 (오늘의 매수 후보)")
+async def magic_ranking(request: Request, limit: int = Query(default=30, ge=1, le=200)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.ranking, limit)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/earnings/magic/backtest", summary="마법공식 백테스트 (과거 검증)")
+async def magic_backtest(request: Request, top_pct: int = Query(default=20, ge=5, le=50)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.backtest, top_pct)
+        return {"status": "ok", **result}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
