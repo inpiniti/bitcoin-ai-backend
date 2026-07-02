@@ -573,6 +573,24 @@ async def magic_backtest(request: Request, top_pct: int = Query(default=20, ge=5
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/earnings/scorecard/ranking", summary="종합 스코어카드 랭킹 (거장 팩터 결합)")
+async def scorecard_ranking(request: Request, limit: int = Query(default=30, ge=1, le=200)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.scorecard_ranking, limit)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/earnings/scorecard/backtest", summary="종합 스코어카드 백테스트 (팩터별 검증)")
+async def scorecard_backtest(request: Request, top_pct: int = Query(default=20, ge=5, le=50)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.scorecard_backtest, top_pct)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/model/status", summary="학습 상태·모델 목록")
 async def model_status(request: Request, limit: int = Query(default=50, ge=1, le=200)):
     payload = {"limit": limit}
