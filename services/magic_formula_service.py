@@ -33,6 +33,24 @@ def _f(v) -> Optional[float]:
     return x
 
 
+def _quality(e: dict) -> Optional[float]:
+    """좋은 기업 지표: ROC(자본수익률) 우선, 없으면 ROE 폴백."""
+    q = _f(e.get("roc"))
+    return q if q is not None else _f(e.get("roe"))
+
+
+def _cheapness(e: dict) -> Optional[float]:
+    """
+    싼 기업 지표(이익수익률). SEC 경로엔 earnings_yield 가 없으므로
+    E/P = EPS ÷ 시작가(px_pre) 로 계산 (데이터 재사용, 스케일 일관).
+    """
+    eps = _f(e.get("eps_act"))
+    px = _f(e.get("px_pre")) or _f(e.get("px_post"))
+    if eps is not None and px and px > 0:
+        return eps / px
+    return _f(e.get("earnings_yield"))   # 혹시 저장돼 있으면 폴백
+
+
 def _rank_desc(items: list[dict], key: str) -> dict:
     """key 내림차순 순위(1=최고)를 {id(item): rank} 로 반환. None 값은 제외."""
     valid = [it for it in items if _f(it.get(key)) is not None]
@@ -42,16 +60,21 @@ def _rank_desc(items: list[dict], key: str) -> dict:
 
 def _magic_rank(events: list[dict]) -> list[dict]:
     """
-    roc/earnings_yield 둘 다 있는 이벤트에 _roc_rank/_ey_rank/_combined 를 매겨
-    combined 오름차순 정렬해 반환 (in-place 필드 추가).
+    quality(ROC)·cheapness(E/P) 둘 다 있는 이벤트에 순위합(_combined)을 매겨
+    오름차순 정렬해 반환 (in-place 필드 추가). 계산값은 _q/_c 에 저장.
     """
-    usable = [e for e in events
-              if _f(e.get("roc")) is not None and _f(e.get("earnings_yield")) is not None]
-    roc_ranks = _rank_desc(usable, "roc")
-    ey_ranks = _rank_desc(usable, "earnings_yield")
+    usable = []
+    for e in events:
+        q, c = _quality(e), _cheapness(e)
+        if q is None or c is None:
+            continue
+        e["_q"], e["_c"] = q, c
+        usable.append(e)
+    q_ranks = _rank_desc(usable, "_q")
+    c_ranks = _rank_desc(usable, "_c")
     for e in usable:
-        e["_roc_rank"] = roc_ranks[id(e)]
-        e["_ey_rank"] = ey_ranks[id(e)]
+        e["_roc_rank"] = q_ranks[id(e)]
+        e["_ey_rank"] = c_ranks[id(e)]
         e["_combined"] = e["_roc_rank"] + e["_ey_rank"]
     usable.sort(key=lambda e: e["_combined"])
     return usable
@@ -66,7 +89,7 @@ def ranking(limit: int = 30) -> dict:
 
     latest: dict[str, dict] = {}
     for e in labeled + unlabeled:
-        if _f(e.get("roc")) is None or _f(e.get("earnings_yield")) is None:
+        if _quality(e) is None or _cheapness(e) is None:
             continue
         tk = e.get("ticker")
         if not tk:
@@ -83,8 +106,8 @@ def ranking(limit: int = 30) -> dict:
             "ticker": e.get("ticker"),
             "gics_sector": e.get("gics_sector"),
             "earnings_date": e.get("earnings_date"),
-            "roc": round(_f(e.get("roc")), 4),
-            "earnings_yield": round(_f(e.get("earnings_yield")), 4),
+            "roc": round(e["_q"], 4),            # 수익성(ROC/ROE)
+            "earnings_yield": round(e["_c"], 4), # 이익수익률(E/P)
             "roc_rank": e["_roc_rank"],
             "ey_rank": e["_ey_rank"],
             "combined": e["_combined"],
@@ -100,8 +123,8 @@ def backtest(top_pct: int = 20) -> dict:
     """
     labeled = earnings_repo.list_labeled_events()
     evs = [e for e in labeled
-           if _f(e.get("roc")) is not None
-           and _f(e.get("earnings_yield")) is not None
+           if _quality(e) is not None
+           and _cheapness(e) is not None
            and _f(e.get("ret_hold")) is not None]
 
     by_year: dict[str, list[dict]] = defaultdict(list)
