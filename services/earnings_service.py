@@ -26,13 +26,19 @@ logger = logging.getLogger("earnings_service")
 
 # 학습에 사용하는 수치형 피처 (이 순서를 train/predict 가 공유)
 #   ust10y_change: 보유 구간 금리변동 — 예측 시 시나리오(가정값)로 주입하는 '조건' 피처
+# 전분기 대비 증감(QoQ Δ) — 재무 수익성 지표의 개선/악화 '모멘텀' 피처.
+#   level(현재 수준)만으론 부족하므로 직전 분기 대비 변화량을 함께 학습한다.
+#   (비율형 지표라 Δ는 %p 변화 = scale-free, 분모 0 폭발 없음)
+QOQ_BASE = ["gross_margin", "net_margin", "roe", "roc", "earnings_yield"]
+QOQ_COLUMNS = [f"{b}_qoq" for b in QOQ_BASE]
+
 FEATURE_COLUMNS = [
     "eps_surprise_pct", "rev_surprise_pct",
     "gross_margin", "net_margin", "sga_to_gross", "roe", "roc", "earnings_yield",
     "capex_to_ni", "debt_to_ni", "inventory_vs_sales", "eps_yoy",
     "per", "pbr", "ev_ebitda", "peg", "dividend_yield",
     "fed_funds", "ust10y", "ust10y_change", "cpi_yoy",
-]
+] + QOQ_COLUMNS   # ★ QoQ 증감은 뒤에 append (기존 인덱스 보존)
 
 # 예측 타깃 (다중 출력) — 발표 직후(px_post) 대비 보유 구간 수익률
 #   ret_hold     : 다음 발표 전날까지 종가 수익률
@@ -973,6 +979,27 @@ def collect_history(
 # 학습 (섹터별 XGBoost)
 # ─────────────────────────────────────────────
 
+def _attach_qoq(events: list[dict]) -> None:
+    """
+    ticker별 발표일 오름차순 정렬 후, 재무 수익성 지표의 '전분기 대비 증감(Δ)'을
+    각 이벤트에 e['{base}_qoq'] 로 붙인다 (in-place). 첫 분기는 이전 없음 → None.
+    학습·예측 모두 호출해 피처를 일관되게 구성한다. (events 리스트 순서는 보존)
+    """
+    from collections import defaultdict
+    by_ticker: dict[str, list[dict]] = defaultdict(list)
+    for e in events:
+        by_ticker[e.get("ticker") or ""].append(e)
+    for evs in by_ticker.values():
+        evs.sort(key=lambda e: e.get("earnings_date") or "")
+        prev = None
+        for e in evs:
+            for base in QOQ_BASE:
+                cur = _f(e.get(base))
+                pv = _f(prev.get(base)) if prev is not None else None
+                e[f"{base}_qoq"] = (cur - pv) if (cur is not None and pv is not None) else None
+            prev = e
+
+
 def _feature_row(e: dict):
     """이벤트 → 피처 벡터 (FEATURE_COLUMNS 순서, 결측=nan)."""
     import numpy as np
@@ -981,27 +1008,42 @@ def _feature_row(e: dict):
 
 
 def _to_matrix(events: list[dict], target: str = "ret_hold"):
-    """해당 target 이 채워진 행만 (X, y)로. 타깃별 유효 표본이 다를 수 있음."""
+    """해당 target 이 채워진 행만 (X, y, dates)로. dates 는 시계열 검증 분할용 발표일."""
     import numpy as np
-    X, y = [], []
+    X, y, dates = [], [], []
     for e in events:
         v = _f(e.get(target))
         if v is None:
             continue
         X.append(_feature_row(e))
         y.append(v)
-    return np.array(X, dtype="float32"), np.array(y, dtype="float32")
+        dates.append(e.get("earnings_date") or "")
+    return np.array(X, dtype="float32"), np.array(y, dtype="float32"), dates
 
 
 def train(min_samples: int = 30) -> dict:
     """
     섹터 × 타깃별로 라벨 완성 행을 모아 XGBoost 회귀 학습 → ml_models 저장.
+
+    시계열 검증(발표일 앞 80% 학습 → 뒤 20% 검증)으로 '평균 찍기(no-skill)' 대비
+    우위를 측정해 좋다/나쁘다(verdict)를 함께 반환한다. 저장 모델은 전체로 재학습.
+    저장되는 rmse 는 훈련오차가 아니라 '검증 RMSE'(정직한 값).
     타깃: ret_hold(종가) / ret_max_up(최대상승) / ret_max_down(최대하락)
     """
     import numpy as np
     import xgboost as xgb
 
+    def _rmse(pred, actual) -> float:
+        return float(np.sqrt(np.mean((np.asarray(pred, dtype="float64") - np.asarray(actual, dtype="float64")) ** 2)))
+
+    def _mk():
+        return xgb.XGBRegressor(
+            n_estimators=200, max_depth=4, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, random_state=42,
+        )
+
     labeled = earnings_repo.list_labeled_events()
+    _attach_qoq(labeled)                      # 전분기 대비 증감(QoQ) 피처 주입
     by_sector: dict[str, list[dict]] = {}
     for e in labeled:
         sec = e.get("gics_sector") or "Unknown"
@@ -1010,19 +1052,41 @@ def train(min_samples: int = 30) -> dict:
     results = []
     for sector, rows in by_sector.items():
         for target in TARGET_COLUMNS:
-            X, y = _to_matrix(rows, target)
-            if len(y) < min_samples:
+            X, y, dates = _to_matrix(rows, target)
+            n = len(y)
+            if n < min_samples:
                 results.append({"sector": sector, "target": target, "status": "skipped",
-                                "reason": f"표본 부족({len(y)}<{min_samples})"})
+                                "reason": f"표본 부족({n}<{min_samples})"})
                 continue
 
-            model = xgb.XGBRegressor(
-                n_estimators=200, max_depth=4, learning_rate=0.05,
-                subsample=0.8, colsample_bytree=0.8, random_state=42,
-            )
+            # ── 시계열 분할: 발표일 오름차순 → 앞 80% 학습 / 뒤 20% 검증 ──
+            order = np.argsort(np.array(dates))
+            Xs, ys = X[order], y[order]
+            val_n = int(round(n * 0.2))
+            can_val = val_n >= 10 and (n - val_n) >= min_samples
+
+            val_rmse = base_rmse = edge_pct = None
+            verdict = "no_val"
+            if can_val:
+                split = n - val_n
+                vm = _mk()
+                vm.fit(Xs[:split], ys[:split])
+                val_rmse = _rmse(vm.predict(Xs[split:]), ys[split:])
+                # 평균 찍기(train 평균으로 전부 예측)의 검증 RMSE = no-skill 기준선
+                base_rmse = _rmse(np.full(val_n, float(ys[:split].mean())), ys[split:])
+                edge_pct = ((base_rmse - val_rmse) / base_rmse * 100.0) if base_rmse > 0 else 0.0
+                if val_rmse < base_rmse * 0.98:
+                    verdict = "signal"       # 평균보다 2%+ 나음 → 신호 있음
+                elif val_rmse <= base_rmse * 1.02:
+                    verdict = "random"       # 평균과 사실상 동일 → 주사위
+                else:
+                    verdict = "worse"        # 평균보다 나쁨 → 과적합
+
+            # ── 저장 모델: 전체 데이터로 재학습(예측 품질 극대화) ──
+            model = _mk()
             model.fit(X, y)
-            pred = model.predict(X)
-            rmse = float(np.sqrt(np.mean((pred - y) ** 2)))
+            train_rmse = _rmse(model.predict(X), y)
+            report_rmse = val_rmse if val_rmse is not None else train_rmse
 
             model_json = json.loads(model.get_booster().save_raw("json").decode("utf-8"))
             version = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -1030,20 +1094,51 @@ def train(min_samples: int = 30) -> dict:
                 sector, model_json,
                 meta={
                     "feature_count": len(FEATURE_COLUMNS),
-                    "sample_count": int(len(y)),
+                    "sample_count": int(n),
                     "stage": 1,
-                    "rmse": rmse,
+                    "rmse": round(report_rmse, 5),   # ★ 검증 RMSE (정직한 값)
                     "model_version": version,
                 },
                 target=target,
             )
-            results.append({"sector": sector, "target": target, "status": "trained",
-                            "model_id": model_id, "version": version,
-                            "samples": int(len(y)), "rmse": round(rmse, 5)})
-            logger.info(f"[earnings] 학습 완료 sector={sector} target={target} "
-                        f"n={len(y)} rmse={rmse:.5f}")
+            results.append({
+                "sector": sector, "target": target, "status": "trained",
+                "model_id": model_id, "version": version, "samples": int(n),
+                "val_rmse": round(val_rmse, 5) if val_rmse is not None else None,
+                "base_rmse": round(base_rmse, 5) if base_rmse is not None else None,
+                "edge_pct": round(edge_pct, 1) if edge_pct is not None else None,
+                "verdict": verdict,
+            })
+            logger.info(f"[earnings] 학습 sector={sector} target={target} n={n} "
+                        f"val_rmse={val_rmse} base={base_rmse} verdict={verdict}")
 
-    return {"sectors": results}
+    # ── 전체 요약(좋다/나쁘다) ──
+    trained = [r for r in results if r.get("status") == "trained"]
+    validated = [r for r in trained if r.get("edge_pct") is not None]
+    n_signal = sum(1 for r in validated if r["verdict"] == "signal")
+    n_random = sum(1 for r in validated if r["verdict"] == "random")
+    n_worse = sum(1 for r in validated if r["verdict"] == "worse")
+    avg_edge = round(sum(r["edge_pct"] for r in validated) / len(validated), 1) if validated else None
+
+    if not validated:
+        overall = "검증 표본 부족 — 판정 불가"
+    elif n_signal > (n_random + n_worse):
+        overall = "쓸만함 — 다수 모델이 평균 찍기보다 나음"
+    elif n_signal == 0:
+        overall = "주사위 수준 — 재무 피처만으론 신호 거의 없음"
+    else:
+        overall = "미약 — 일부만 신호, 대부분 평균 수준"
+
+    return {
+        "sectors": results,
+        "summary": {
+            "trained": len(trained),
+            "validated": len(validated),
+            "signal": n_signal, "random": n_random, "worse": n_worse,
+            "avg_edge_pct": avg_edge,
+            "overall": overall,
+        },
+    }
 
 
 # ─────────────────────────────────────────────
@@ -1093,6 +1188,9 @@ def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -
 
     if scope == "missing_label":
         events = earnings_repo.list_unlabeled_events()
+        # QoQ 피처: 라벨+미라벨 전체로 ticker별 시계열 컨텍스트를 만들어 증감 주입
+        #   (미라벨 이벤트의 '직전 분기'는 대개 과거 라벨 이벤트라 컨텍스트가 필요)
+        _attach_qoq(earnings_repo.list_labeled_events() + events)
         # 라벨 없음(예측 후보) + 같은 시나리오로 아직 예측되지 않은 행만 남긴다
         scenario_key = rate_scenario or "actual"
         done = earnings_repo.predicted_event_ids(scenario_key)
@@ -1100,6 +1198,7 @@ def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -
             events = [e for e in events if e.get("id") not in done]
     else:
         events = earnings_repo.list_events(limit=500)
+        _attach_qoq(events)
 
     # (sector, target) → model row 캐시
     model_cache: dict[tuple, Optional[dict]] = {}
