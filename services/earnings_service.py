@@ -29,7 +29,11 @@ logger = logging.getLogger("earnings_service")
 # 전분기 대비 증감(QoQ Δ) — 재무 수익성 지표의 개선/악화 '모멘텀' 피처.
 #   level(현재 수준)만으론 부족하므로 직전 분기 대비 변화량을 함께 학습한다.
 #   (비율형 지표라 Δ는 %p 변화 = scale-free, 분모 0 폭발 없음)
-QOQ_BASE = ["gross_margin", "net_margin", "roe", "roc", "earnings_yield"]
+QOQ_BASE = [
+    "gross_margin", "net_margin", "roe", "roc",   # 수익성 비율 증감
+    "sga_to_gross", "debt_to_ni",                 # 판관비·부채 비율 증감
+    "retained_earnings", "cash_sti", "eps_act",   # 이익잉여·현금·EPS 증감
+]  # ※ 매출·EBIT·FCF·capex·투하자본 증감은 원본 미저장 → 재수집 필요(별도)
 QOQ_COLUMNS = [f"{b}_qoq" for b in QOQ_BASE]
 
 FEATURE_COLUMNS = [
