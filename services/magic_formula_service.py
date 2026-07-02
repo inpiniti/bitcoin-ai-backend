@@ -439,3 +439,156 @@ def scorecard_ranking(limit: int = 30) -> dict:
         "factors_used": [f["label"] for f in winners],
         "items": items,
     }
+
+
+# ═════════════════════════════════════════════════════════════
+# 가중치 학습 + 워크포워드 (랭킹에 ML)
+#   학습창(과거)에서 팩터별 스프레드로 가중치를 정하고,
+#   그 가중치로 검증창(안 본 미래)을 랭킹해 '학습가중 vs 등가중'을 비교.
+# ═════════════════════════════════════════════════════════════
+
+def _avg_ret(lst: list[dict]):
+    rs = [_f(e.get("ret_hold")) for e in lst]
+    rs = [r for r in rs if r is not None]
+    return (sum(rs) / len(rs)) if rs else None
+
+
+def _spread_of(ranked: list[dict], top_pct: int):
+    """정렬된(상위=좋음) 리스트에서 상위-하위 top_pct% ret_hold 스프레드 + 상/하위 리스트."""
+    n = len(ranked)
+    if n < 10:
+        return None, [], []
+    k = max(1, n * top_pct // 100)
+    top, bot = ranked[:k], ranked[-k:]
+    t, b = _avg_ret(top), _avg_ret(bot)
+    sp = (t - b) if (t is not None and b is not None) else None
+    return sp, top, bot
+
+
+def _factor_spread(evs: list[dict], factor: dict, top_pct: int = 20):
+    """단일 팩터로 evs 정렬 후 스프레드 (가중치 학습용)."""
+    ranks = _rank_factor(evs, factor)
+    usable = [e for e in evs if id(e) in ranks]
+    usable.sort(key=lambda e: ranks[id(e)])
+    sp, _, _ = _spread_of(usable, top_pct)
+    return sp
+
+
+def _weighted_rank(events: list[dict], factors: list[dict], weights: dict) -> list[dict]:
+    """factors의 순위 백분위를 weights로 가중평균해 정렬(상위=좋음). _wscore(0=최고) 부여."""
+    per: dict[int, list] = {id(e): [] for e in events}
+    for f in factors:
+        w = weights.get(f["key"], 0.0)
+        if w <= 0:
+            continue
+        ranks = _rank_factor(events, f)
+        n = len(ranks)
+        if n <= 1:
+            continue
+        for e in events:
+            r = ranks.get(id(e))
+            if r is not None:
+                per[id(e)].append((w, (r - 1) / (n - 1)))
+    scored = []
+    for e in events:
+        ws = per[id(e)]
+        if len(ws) >= 2:
+            tw = sum(w for w, _ in ws)
+            e["_wscore"] = (sum(w * p for w, p in ws) / tw) if tw > 0 else 1.0
+            scored.append(e)
+    scored.sort(key=lambda e: e["_wscore"])
+    return scored
+
+
+def walkforward(top_pct: int = 20, limit: int = 30) -> dict:
+    """
+    워크포워드: 과거 학습창에서 팩터 가중치(=스프레드) 학습 → 안 본 다음 해로 검증.
+    학습가중 랭킹 vs 등가중 랭킹의 out-of-sample 성과 비교.
+    """
+    from collections import defaultdict as _dd
+
+    labeled = earnings_repo.list_labeled_events()
+    unlabeled = earnings_repo.list_unlabeled_events()
+    allev = labeled + unlabeled
+    _attach_all(allev)
+    evs = [e for e in labeled if _f(e.get("ret_hold")) is not None]
+
+    by_year = _dd(list)
+    for e in evs:
+        d = e.get("earnings_date") or ""
+        if len(d) >= 4:
+            by_year[d[:4]].append(e)
+    years = sorted(by_year.keys())
+
+    rows = []
+    pl_top, pl_bot, pe_top, pe_bot = [], [], [], []
+    MIN_TRAIN = 3
+    for i in range(MIN_TRAIN, len(years)):
+        test_evs = by_year[years[i]]
+        if len(test_evs) < 10:
+            continue
+        train_evs = [e for y in years[:i] for e in by_year[y]]
+        w = {f["key"]: max(0.0, _factor_spread(train_evs, f) or 0.0) for f in FACTORS}
+        wf = [f for f in FACTORS if w[f["key"]] > 0]
+        if not wf:
+            continue
+        lr = _weighted_rank(test_evs, wf, w)                              # 학습가중
+        er = _weighted_rank(test_evs, wf, {f["key"]: 1.0 for f in wf})    # 등가중
+        lsp, lt, lb = _spread_of(lr, top_pct)
+        esp, et, eb = _spread_of(er, top_pct)
+        pl_top += lt; pl_bot += lb; pe_top += et; pe_bot += eb
+        rows.append({
+            "year": years[i], "n": len(test_evs),
+            "learned_spread": _round(lsp), "equal_spread": _round(esp),
+            "winner": ("learned" if (lsp is not None and esp is not None and lsp > esp)
+                       else ("equal" if esp is not None else None)),
+        })
+
+    la_t, la_b = _avg_ret(pl_top), _avg_ret(pl_bot)
+    ea_t, ea_b = _avg_ret(pe_top), _avg_ret(pe_bot)
+    lsp_all = (la_t - la_b) if (la_t is not None and la_b is not None) else None
+    esp_all = (ea_t - ea_b) if (ea_t is not None and ea_b is not None) else None
+    if lsp_all is None or esp_all is None:
+        verdict = "no_data"
+    elif lsp_all > esp_all + 0.002:
+        verdict = "learned"
+    elif lsp_all >= esp_all - 0.002:
+        verdict = "tie"
+    else:
+        verdict = "equal"
+
+    # ── 전체 라벨로 최종 가중치 학습 + 오늘의 가중 랭킹 ──
+    fw = {f["key"]: max(0.0, _factor_spread(evs, f) or 0.0) for f in FACTORS}
+    tot = sum(fw.values()) or 1.0
+    weights_disp = sorted(
+        [{"label": f["label"], "guru": f["guru"], "weight": round(fw[f["key"]] / tot * 100, 1)}
+         for f in FACTORS if fw[f["key"]] > 0],
+        key=lambda x: x["weight"], reverse=True,
+    )
+    wf_final = [f for f in FACTORS if fw[f["key"]] > 0]
+
+    latest: dict[str, dict] = {}
+    for e in allev:
+        tk = e.get("ticker")
+        if not tk:
+            continue
+        d = e.get("earnings_date") or ""
+        if tk not in latest or d > (latest[tk].get("earnings_date") or ""):
+            latest[tk] = e
+    ranked = _weighted_rank(list(latest.values()), wf_final, fw)
+    top_picks = [{
+        "rank": i + 1, "ticker": e.get("ticker"), "gics_sector": e.get("gics_sector"),
+        "earnings_date": e.get("earnings_date"),
+        "score": round((1 - e["_wscore"]) * 100, 1),
+        "roc": _round(e.get("roc")), "ep": _round(e.get("_ep")),
+        "eps_growth": _round(e.get("eps_chg")),
+    } for i, e in enumerate(ranked[:limit])]
+
+    logger.info(f"[walkforward] folds={len(rows)} learned={lsp_all} equal={esp_all} verdict={verdict}")
+    return {
+        "top_pct": top_pct,
+        "by_year": rows,
+        "overall": {"learned_spread": _round(lsp_all), "equal_spread": _round(esp_all), "verdict": verdict},
+        "weights": weights_disp,
+        "top_picks": top_picks,
+    }

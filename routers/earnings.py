@@ -591,6 +591,15 @@ async def scorecard_backtest(request: Request, top_pct: int = Query(default=20, 
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/earnings/scorecard/walkforward", summary="가중치 학습 워크포워드 (학습가중 vs 등가중)")
+async def scorecard_walkforward(request: Request, top_pct: int = Query(default=20, ge=5, le=50)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.walkforward, top_pct)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/model/status", summary="학습 상태·모델 목록")
 async def model_status(request: Request, limit: int = Query(default=50, ge=1, le=200)):
     payload = {"limit": limit}
