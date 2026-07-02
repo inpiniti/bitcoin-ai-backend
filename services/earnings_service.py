@@ -1221,7 +1221,9 @@ def predict(scope: str = "missing_label", rate_scenario: Optional[str] = None) -
             feat[ci] = scenario_val
         x = np.array([feat], dtype="float32")
 
-        base = _f(e.get("px_post")) or _f(e.get("px_pre"))
+        # 예측가 기준선 = 시작가(px_pre, 발표 직전가). 화면 '시작가'와 일치시켜
+        #   가격 위치% 계산의 기준선 불일치를 근본 해소한다. (px_pre 없으면 px_post 폴백)
+        base = _f(e.get("px_pre")) or _f(e.get("px_post"))
         preds: dict = {}
         used_model = None
         for target in TARGET_COLUMNS:
