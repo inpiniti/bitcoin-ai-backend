@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git commit -m ' *)",
+      "Bash(npx vite *)",
+      "Bash(npm install *)",
+      "Bash(curl -s --max-time 10 -A \"Mozilla/5.0\" \"https://m.stock.naver.com/api/stock/000660/finance/annual\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(list\\(d.keys\\(\\)\\)\\); print\\('---title rows---'\\); [print\\(r.get\\('title'\\)\\) for r in d.get\\('financeInfo',{}\\).get\\('rowList',[]\\)[:40]]\")",
+      "Bash(curl -s --max-time 10 -A \"Mozilla/5.0\" \"https://m.stock.naver.com/api/stock/000660/finance/annual\" -o /tmp/hynix_annual.json)",
+      "Bash(python3 -c ' *)",
+      "Bash(where python *)",
+      "Bash(cd \"c:/Users/user/repositories/my/bitcoin-ai-backend\" && echo \"=== 연간 항목명 목록 ===\" && grep -o '\"title\":\"[^\"]*\"' /tmp/hynix_annual.json | sed 's/\"title\"://' | sort -u; echo; echo \"=== 현금흐름/부채/현금 관련 검색 ===\" && grep -o '\"title\":\"[^\"]*\"' /tmp/hynix_annual.json | grep -E \"현금|부채|자산|자본|유동|당좌|배당|EPS|PER|PBR|ROE|BPS\")",
+      "Read(//tmp/**)",
+      "Bash(curl -s --max-time 10 -A \"Mozilla/5.0\" \"https://navercomp.wisereport.co.kr/v2/company/c1030001.aspx?cmp_cd=000660\")",
+      "Bash(iconv -f EUC-KR -t UTF-8)",
+      "Bash(curl -s --max-time 12 -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\)\" \"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A000660&cID=&MenuYn=Y&ReportGB=&NewMenuID=103&stkGb=701\" -o /tmp/fn.html -w \"HTTP %{http_code} size=%{size_download}\\\\n\")",
+      "Bash(iconv -f EUC-KR -t UTF-8 /tmp/fn.html)",
+      "Bash(cd \"c:/Users/user/repositories/my/bitcoin-ai-backend\" *)",
+      "Bash(curl -s --max-time 10 -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\)\" \"https://query1.finance.yahoo.com/v10/finance/quoteSummary/BRK-B?modules=financialData,summaryDetail\" -w \"\\\\nHTTP %{http_code}\\\\n\")",
+      "Bash(curl -s --max-time 10 -A \"Mozilla/5.0\" \"https://query1.finance.yahoo.com/v8/finance/chart/BRK-B?range=1d&interval=1d\" -w \"\\\\nHTTP %{http_code}\\\\n\")",
+      "Bash(py -3 --version)",
+      "Bash(perl -0777 -e ' *)",
+      "Bash(curl -s --max-time 8 -A \"Mozilla/5.0\" \"https://ac.stock.naver.com/ac?q=BRK.B&target=stock,index\")",
+      "Bash(grep -o '\"items\":\\\\[.\\\\{0,3\\\\}')",
+      "Bash(python -c \"import httpx; print\\('httpx ok'\\)\")"
+    ]
+  }
+}

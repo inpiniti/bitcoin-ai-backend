@@ -130,6 +130,8 @@ async def fetch_kr_financials_from_fnguide(code: str) -> dict:
         operating = _fnguide_latest_row_value(html, "영업활동으로인한현금흐름")
         investing = _fnguide_latest_row_value(html, "투자활동으로인한현금흐름")
         cash = _fnguide_latest_row_value(html, "현금및현금성자산")
+        gross_profit = _fnguide_latest_row_value(html, "매출총이익")
+        revenue = _fnguide_latest_row_value(html, "매출액")
 
         result: dict = {}
         if operating is not None:
@@ -139,6 +141,11 @@ async def fetch_kr_financials_from_fnguide(code: str) -> dict:
                 result["freeCashflow"] = operating + investing
         if cash is not None:
             result["totalCash"] = cash
+        # 매출총이익률 계산용 (매출총이익 / 매출액) — 비율이 상식 범위일 때만 채택
+        if gross_profit is not None and revenue and revenue > 0:
+            gm = gross_profit / revenue
+            if 0 < gm < 1.5:
+                result["grossMargins"] = gm
 
         if result:
             logger.info(f"[FnGuide] {code} 현금흐름 수집 성공: keys={list(result.keys())}")
@@ -166,25 +173,45 @@ async def fetch_naver_kr_annual_metrics(code: str) -> dict:
         data = resp.json()
         fin = data.get("financeInfo", {})
         # 확정 실적(isConsensus == 'N') 중 가장 최근 key 선택
-        actual_keys = [c.get("key") for c in fin.get("trTitleList", []) if c.get("isConsensus") == "N" and c.get("key")]
+        actual_keys = sorted([c.get("key") for c in fin.get("trTitleList", []) if c.get("isConsensus") == "N" and c.get("key")])
         if not actual_keys:
             return {}
-        latest_key = sorted(actual_keys)[-1]
+        latest_key = actual_keys[-1]
+        prev_key = actual_keys[-2] if len(actual_keys) >= 2 else None
 
         row_by_title = {r.get("title"): r for r in fin.get("rowList", [])}
 
-        def val(title: str) -> float:
+        def val_at(title: str, key) -> float:
             r = row_by_title.get(title)
-            if not r:
+            if not r or not key:
                 return 0.0
-            return clean_float(r.get("columns", {}).get(latest_key, {}).get("value", "0"))
+            return clean_float(r.get("columns", {}).get(key, {}).get("value", "0"))
 
-        return {
+        def val(title: str) -> float:
+            return val_at(title, latest_key)
+
+        out = {
             "quickRatio": val("당좌비율"),
             "trailingEps": val("EPS"),
             "trailingPE": val("PER"),
             "priceToBook": val("PBR"),
         }
+
+        # 이익성장(YoY): 당기순이익 최근 2개 확정연도로 계산
+        ni_latest = val("당기순이익")
+        ni_prev = val_at("당기순이익", prev_key)
+        if ni_prev:
+            out["earningsGrowth"] = (ni_latest - ni_prev) / abs(ni_prev)
+
+        # 배당성향: 주당배당금 / EPS (0~1 범위 상식값만)
+        dps = val("주당배당금")
+        eps = out["trailingEps"]
+        if dps and eps and eps > 0:
+            payout = dps / eps
+            if 0 < payout < 3:
+                out["payoutRatio"] = payout
+
+        return out
     except Exception as e:
         logger.warning(f"[NaverKR] 연간 재무 보충 수집 실패 (code={code}): {e}")
         return {}
@@ -289,7 +316,8 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
     roe = 0.0
     debt_to_equity = 0.0
     op_income = 0.0
-    
+    equity_won = 0.0
+
     last_actual_idx = 2
     rev_str = "0"
     op_inc_str = "0"
@@ -342,7 +370,8 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
                     net_margin = clean_float(get_row_val("순이익률", last_actual_idx))
                     roe = clean_float(get_row_val("ROE(지배주주)", last_actual_idx)) or clean_float(get_row_val("ROE", last_actual_idx))
                     debt_to_equity = clean_float(get_row_val("부채비율", last_actual_idx))
-                    
+                    equity_won = clean_float(get_row_val("자본총계", last_actual_idx)) * 100_000_000
+
         except Exception as e:
             logger.error(f"[Naver] HTML 파싱 실패: {e}")
 
@@ -376,6 +405,22 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
     _quick = annual_metrics.get("quickRatio")
     quick_cell = {"raw": _quick, "fmt": f"{_quick}%"} if _quick else {"raw": 0, "fmt": "N/A"}
 
+    # ── 파생 지표 계산 (일관된 소스 조합) ──────────────────────────────────
+    # 총부채 = 자본총계 × 부채비율/100 ; ROA = ROE / (1 + 부채비율/100)
+    total_debt = equity_won * debt_to_equity / 100.0 if (equity_won and debt_to_equity) else 0.0
+    roa = roe / (1 + debt_to_equity / 100.0) if (roe and debt_to_equity) else 0.0
+    price_to_sales = market_cap_num / total_revenue if (market_cap_num and total_revenue) else 0.0
+    gross_margins = fnguide_cf.get("grossMargins")           # 소수(0.45 = 45%)
+    earnings_growth = annual_metrics.get("earningsGrowth")   # 소수
+    payout_ratio = annual_metrics.get("payoutRatio")         # 소수
+
+    total_debt_cell = _cell_won(total_debt)
+    gm_cell = {"raw": gross_margins, "fmt": f"{gross_margins * 100:.2f}%"} if gross_margins else {"raw": 0, "fmt": "N/A"}
+    roa_cell = {"raw": roa / 100.0, "fmt": f"{roa:.2f}%"} if roa else {"raw": 0, "fmt": "N/A"}
+    eg_cell = {"raw": earnings_growth, "fmt": f"{earnings_growth * 100:.2f}%"} if earnings_growth is not None else {"raw": 0, "fmt": "N/A"}
+    ps_cell = {"raw": price_to_sales, "fmt": f"{price_to_sales:.2f}배"} if price_to_sales else {"raw": 0, "fmt": "N/A"}
+    payout_cell = {"raw": payout_ratio, "fmt": f"{payout_ratio * 100:.2f}%"} if payout_ratio else {"raw": 0, "fmt": "N/A"}
+
     profile = {
         "assetProfile": {
             "sector": "KOSPI" if sosok == "0" else "KOSDAQ",
@@ -389,11 +434,15 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
             "operatingCashflow": op_cf_cell,
             "freeCashflow": fcf_cell,
             "totalCash": cash_cell,
+            "totalDebt": total_debt_cell,
             "quickRatio": quick_cell,
+            "grossMargins": gm_cell,
             "operatingMargins": {"raw": operating_margin / 100.0, "fmt": f"{operating_margin}%"},
             "returnOnEquity": {"raw": roe / 100.0, "fmt": f"{roe}%"},
+            "returnOnAssets": roa_cell,
             "debtToEquity": {"raw": debt_to_equity, "fmt": f"{debt_to_equity}%"},
             "revenueGrowth": {"raw": revenue_growth, "fmt": f"{revenue_growth * 100:.2f}%"},
+            "earningsGrowth": eg_cell,
             "grossProfits": {"raw": op_income, "fmt": f"{op_inc_str}억"},
             "ebitda": {"raw": op_income, "fmt": f"{op_inc_str}억"},
             "profitMargins": {"raw": net_margin / 100.0, "fmt": f"{net_margin}%"}
@@ -412,7 +461,9 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
             "fiftyTwoWeekHigh": {"raw": high_52, "fmt": high_52_str},
             "marketCap": {"raw": market_cap_num, "fmt": market_cap_str},
             "trailingPE": per_cell,
-            "dividendYield": {"raw": clean_float(dividend_yield_str) / 100.0, "fmt": f"{dividend_yield_str}%"}
+            "priceToSalesTrailing12Months": ps_cell,
+            "dividendYield": {"raw": clean_float(dividend_yield_str) / 100.0, "fmt": f"{dividend_yield_str}%"},
+            "payoutRatio": payout_cell
         },
         "earnings": {}
     }
@@ -457,6 +508,221 @@ async def resolve_naver_reuters_code(symbol: str) -> str | None:
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# SEC EDGAR 펀더멘털 (미국 종목 · 무인증 정부 API · HuggingFace에서도 미차단)
+#   Yahoo가 HF IP에서 차단되면 네이버 US는 가격/시총만 주므로, 재무는 SEC로 보강.
+# ─────────────────────────────────────────────────────────────────────────
+_sec_cik_map: dict = {}
+
+
+async def _load_sec_cik_map() -> dict:
+    """SEC 전체 ticker→CIK10 매핑 (프로세스 1회 로드·캐시)."""
+    global _sec_cik_map
+    if _sec_cik_map:
+        return _sec_cik_map
+    try:
+        async with httpx.AsyncClient(
+            timeout=15, verify=False,
+            headers={"User-Agent": "DdalkiStock grmictsol@gmail.com"},
+        ) as client:
+            r = await client.get("https://www.sec.gov/files/company_tickers.json")
+        if r.status_code == 200:
+            data = r.json()
+            _sec_cik_map = {
+                v["ticker"].upper(): str(v["cik_str"]).zfill(10) for v in data.values()
+            }
+            logger.info(f"[SEC] ticker→CIK {len(_sec_cik_map)}개 로드")
+    except Exception as e:
+        logger.warning(f"[SEC] CIK 맵 로드 실패: {e}")
+    return _sec_cik_map
+
+
+def _sec_days(start: str, end: str) -> int:
+    from datetime import date
+    y1, m1, d1 = (int(x) for x in start.split("-"))
+    y2, m2, d2 = (int(x) for x in end.split("-"))
+    return (date(y2, m2, d2) - date(y1, m1, d1)).days
+
+
+def _sec_annual_series(gaap: dict, tags: list[str], unit: str = "USD") -> list[tuple[str, float]]:
+    """연간(기간 300~400일) 값 → (end, val) 오름차순. 동일 회계연도의 정정치는 최신으로 병합."""
+    for tag in tags:
+        node = gaap.get(tag)
+        if not node:
+            continue
+        arr = node.get("units", {}).get(unit)
+        if not arr:
+            continue
+        by_end: dict[str, float] = {}
+        for f in arr:
+            start, end, val = f.get("start"), f.get("end"), f.get("val")
+            if not start or not end or val is None:
+                continue
+            try:
+                if not (300 <= _sec_days(start, end) <= 400):
+                    continue
+            except Exception:
+                continue
+            by_end[end] = float(val)  # 같은 end의 정정 제출치는 나중 값으로 덮어씀
+        if by_end:
+            return sorted(by_end.items())
+    return []
+
+
+def _sec_latest_instant(gaap: dict, tags: list[str], unit: str = "USD") -> float | None:
+    """시점(대차대조표) 값 중 가장 최근 end의 값."""
+    for tag in tags:
+        node = gaap.get(tag)
+        if not node:
+            continue
+        arr = node.get("units", {}).get(unit)
+        if not arr:
+            continue
+        best_end, best_val = None, None
+        for f in arr:
+            end, val = f.get("end"), f.get("val")
+            if not end or val is None:
+                continue
+            if best_end is None or end > best_end:
+                best_end, best_val = end, float(val)
+        if best_val is not None:
+            return best_val
+    return None
+
+
+async def fetch_us_financials_from_sec(symbol: str) -> dict:
+    """
+    SEC EDGAR companyfacts(무인증)로 미국 종목의 펀더멘털 절대값을 수집한다.
+    가치평가 비율(PER·PSR·PBR)은 시가총액이 필요하므로 호출부에서 계산한다.
+    반환 키: totalRevenue, netIncome, grossMargins, operatingMargins, profitMargins,
+             revenueGrowth, earningsGrowth, returnOnEquity, returnOnAssets,
+             operatingCashflow, freeCashflow, totalCash, totalEquity, totalAssets,
+             totalDebt, debtToEquity
+    """
+    ticker = symbol.upper().strip().replace(".", "-")  # SEC는 클래스주에 하이픈 (BRK.B→BRK-B)
+    cik = (await _load_sec_cik_map()).get(ticker)
+    if not cik:
+        logger.info(f"[SEC] {symbol}({ticker}) CIK 없음 — 재무 보강 생략")
+        return {}
+
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    try:
+        async with httpx.AsyncClient(
+            timeout=30, verify=False,
+            headers={"User-Agent": "DdalkiStock grmictsol@gmail.com"},
+        ) as client:
+            r = await client.get(url)
+        if r.status_code != 200:
+            logger.warning(f"[SEC] {ticker} companyfacts HTTP {r.status_code}")
+            return {}
+        gaap = r.json().get("facts", {}).get("us-gaap", {})
+    except Exception as e:
+        logger.warning(f"[SEC] {ticker} companyfacts 실패: {e}")
+        return {}
+    if not gaap:
+        return {}
+
+    rev = _sec_annual_series(gaap, [
+        "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"])
+    ni = _sec_annual_series(gaap, ["NetIncomeLoss", "ProfitLoss"])
+    gp = _sec_annual_series(gaap, ["GrossProfit"])
+    opinc = _sec_annual_series(gaap, ["OperatingIncomeLoss"])
+    ocf = _sec_annual_series(gaap, [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"])
+    capex = _sec_annual_series(gaap, [
+        "PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"])
+
+    assets = _sec_latest_instant(gaap, ["Assets"])
+    liab = _sec_latest_instant(gaap, ["Liabilities"])
+    equity = _sec_latest_instant(gaap, [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"])
+    cash = _sec_latest_instant(gaap, [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"])
+    debt = _sec_latest_instant(gaap, [
+        "LongTermDebt", "LongTermDebtNoncurrent", "DebtLongtermAndShorttermCombinedAmount"])
+
+    def _latest(series):
+        return series[-1][1] if series else None
+
+    def _yoy(series):
+        if len(series) >= 2 and series[-2][1]:
+            return (series[-1][1] - series[-2][1]) / abs(series[-2][1])
+        return None
+
+    revenue, net_income = _latest(rev), _latest(ni)
+    gross_profit, op_income = _latest(gp), _latest(opinc)
+    op_cash, capex_v = _latest(ocf), _latest(capex)
+
+    out: dict = {}
+    if revenue:
+        out["totalRevenue"] = revenue
+        if gross_profit is not None:
+            out["grossMargins"] = gross_profit / revenue
+        if op_income is not None:
+            out["operatingMargins"] = op_income / revenue
+        if net_income is not None:
+            out["profitMargins"] = net_income / revenue
+        rg = _yoy(rev)
+        if rg is not None:
+            out["revenueGrowth"] = rg
+    if net_income is not None:
+        out["netIncome"] = net_income
+        eg = _yoy(ni)
+        if eg is not None:
+            out["earningsGrowth"] = eg
+        if equity:
+            out["returnOnEquity"] = net_income / equity
+        if assets:
+            out["returnOnAssets"] = net_income / assets
+    if op_cash is not None:
+        out["operatingCashflow"] = op_cash
+        if capex_v is not None:
+            out["freeCashflow"] = op_cash - abs(capex_v)  # capex 지출분 차감
+    if cash is not None:
+        out["totalCash"] = cash
+    if assets:
+        out["totalAssets"] = assets
+    if equity:
+        out["totalEquity"] = equity
+    if debt is not None:
+        out["totalDebt"] = debt
+    elif liab is not None:
+        out["totalDebt"] = liab  # 명시적 차입금 태그 없으면 총부채(총부채총계)로 대체
+    if liab is not None and equity:
+        out["debtToEquity"] = liab / equity * 100.0
+
+    logger.info(f"[SEC] {ticker} 펀더멘털 수집: {list(out.keys())}")
+    return out
+
+
+def _fmt_usd(raw: float) -> str:
+    a = abs(raw)
+    if a >= 1e12:
+        return f"${raw / 1e12:,.2f}T"
+    if a >= 1e9:
+        return f"${raw / 1e9:,.2f}B"
+    if a >= 1e6:
+        return f"${raw / 1e6:,.2f}M"
+    return f"${raw:,.0f}"
+
+
+def _cell_usd(raw) -> dict:
+    return {"raw": raw, "fmt": _fmt_usd(raw)} if raw else {"raw": 0, "fmt": "N/A"}
+
+
+def _cell_pct(raw) -> dict:
+    """raw는 소수(0.23 = 23%)."""
+    return {"raw": raw, "fmt": f"{raw * 100:.2f}%"} if raw is not None else {"raw": 0, "fmt": "N/A"}
+
+
+def _cell_ratio(raw, unit="배") -> dict:
+    return {"raw": raw, "fmt": f"{raw:,.2f}{unit}"} if raw else {"raw": 0, "fmt": "N/A"}
+
+
 async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
     """
     네이버 금융 API를 사용하여 미국(해외) 주식의 상세 정보를 조회하고 기존 야후 파이낸스 스키마로 변환합니다.
@@ -479,7 +745,10 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
 
     # 중복 제거(순서 유지)
     candidates = list(dict.fromkeys(candidates))
-    
+
+    # SEC 펀더멘털은 네이버 조회와 병렬로 미리 시작 (지연 최소화)
+    sec_task = asyncio.create_task(fetch_us_financials_from_sec(symbol))
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -505,6 +774,7 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
                 
         if not basic_data or not resolved_symbol:
             logger.warning(f"[NaverUS] Could not resolve basic data for US symbol: {symbol}")
+            sec_task.cancel()
             return {}
             
         integration_url = f"https://api.stock.naver.com/stock/{resolved_symbol}/integration"
@@ -539,16 +809,37 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
     except Exception:
         pass
         
-    per_str = info_map.get("per", "N/A")
-    eps_str = info_map.get("eps", "N/A")
-    pbr_str = info_map.get("pbr", "N/A")
-    bps_str = info_map.get("bps", "N/A")
-    
+    dividend_yield_str = info_map.get("dividendYieldRatio", "N/A")
+
     # integration 데이터에서 기업 개요 및 기타 재무 지표 추출
     business_summary = "정보가 제공되지 않습니다."
     if integration_data:
         business_summary = integration_data.get("corporateOverview", business_summary)
-        
+
+    # ── SEC EDGAR 펀더멘털 병합 (네이버 US는 가격/시총만 신뢰 가능) ──────────
+    try:
+        sec = await sec_task
+    except Exception as e:
+        logger.warning(f"[NaverUS] SEC 재무 대기 실패 ({symbol}): {e}")
+        sec = {}
+    sec = sec or {}
+
+    # 가치평가 비율은 시가총액 기준으로 계산 → 주식클래스(A/B) 무관하게 정확
+    mc = market_cap_num
+    ni = sec.get("netIncome")
+    rev = sec.get("totalRevenue")
+    eq = sec.get("totalEquity")
+    trailing_pe = mc / ni if (mc and ni and ni > 0) else None
+    price_to_sales = mc / rev if (mc and rev) else None
+    price_to_book = mc / eq if (mc and eq and eq > 0) else None
+    # EPS는 시총 기준 PER로 역산해 주식클래스와 일관성 유지 (SEC EPS는 A주 기준이라 부정확)
+    trailing_eps = (current_price / trailing_pe) if (trailing_pe and current_price) else None
+    eg = sec.get("earningsGrowth")
+    peg = (trailing_pe / (eg * 100)) if (trailing_pe and eg and eg > 0) else None
+
+    def _dte_cell(v):
+        return {"raw": v, "fmt": f"{v:.2f}%"} if v is not None else {"raw": 0, "fmt": "N/A"}
+
     profile = {
         "assetProfile": {
             "sector": basic_data.get("industryCodeType", {}).get("industryGroupKor", "US Stock"),
@@ -558,21 +849,26 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
         },
         "financialData": {
             "currentPrice": {"raw": current_price, "fmt": f"${current_price_str}"},
-            "totalRevenue": {"raw": 0, "fmt": "N/A"},
-            "freeCashflow": {"raw": 0, "fmt": "N/A"},
-            "operatingMargins": {"raw": 0, "fmt": "N/A"},
-            "returnOnEquity": {"raw": 0, "fmt": "N/A"},
-            "debtToEquity": {"raw": 0, "fmt": "N/A"},
-            "revenueGrowth": {"raw": 0, "fmt": "N/A"},
-            "grossProfits": {"raw": 0, "fmt": "N/A"},
-            "ebitda": {"raw": 0, "fmt": "N/A"},
-            "profitMargins": {"raw": 0, "fmt": "N/A"}
+            "totalRevenue": _cell_usd(sec.get("totalRevenue")),
+            "operatingCashflow": _cell_usd(sec.get("operatingCashflow")),
+            "freeCashflow": _cell_usd(sec.get("freeCashflow")),
+            "totalCash": _cell_usd(sec.get("totalCash")),
+            "totalDebt": _cell_usd(sec.get("totalDebt")),
+            "grossMargins": _cell_pct(sec.get("grossMargins")),
+            "operatingMargins": _cell_pct(sec.get("operatingMargins")),
+            "profitMargins": _cell_pct(sec.get("profitMargins")),
+            "returnOnEquity": _cell_pct(sec.get("returnOnEquity")),
+            "returnOnAssets": _cell_pct(sec.get("returnOnAssets")),
+            "debtToEquity": _dte_cell(sec.get("debtToEquity")),
+            "revenueGrowth": _cell_pct(sec.get("revenueGrowth")),
+            "earningsGrowth": _cell_pct(sec.get("earningsGrowth")),
         },
         "defaultKeyStatistics": {
-            "forwardPE": {"raw": clean_float(per_str), "fmt": f"{per_str}"},
-            "pegRatio": {"raw": 0, "fmt": "N/A"},
-            "priceToBook": {"raw": clean_float(pbr_str), "fmt": f"{pbr_str}"},
-            "trailingEps": {"raw": clean_float(eps_str), "fmt": f"{eps_str}"},
+            "forwardPE": {"raw": 0, "fmt": "N/A"},
+            "pegRatio": _cell_ratio(peg),
+            "priceToBook": _cell_ratio(price_to_book),
+            "trailingEps": ({"raw": trailing_eps, "fmt": f"${trailing_eps:,.2f}"}
+                            if trailing_eps else {"raw": 0, "fmt": "N/A"}),
             "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
             "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
             "beta": {"raw": 0, "fmt": "N/A"}
@@ -581,11 +877,17 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
             "fiftyTwoWeekLow": {"raw": low_52, "fmt": low_52_str},
             "fiftyTwoWeekHigh": {"raw": high_52, "fmt": high_52_str},
             "marketCap": {"raw": market_cap_num, "fmt": market_cap_str},
-            "trailingPE": {"raw": clean_float(per_str), "fmt": f"{per_str}"}
+            "trailingPE": _cell_ratio(trailing_pe),
+            "priceToSalesTrailing12Months": _cell_ratio(price_to_sales),
+            "dividendYield": ({"raw": clean_float(dividend_yield_str) / 100.0, "fmt": f"{dividend_yield_str}%"}
+                              if clean_float(dividend_yield_str) else {"raw": 0, "fmt": "N/A"}),
         },
         "earnings": {}
     }
-    logger.info(f"[NaverUS] {symbol} ({stock_name}) 데이터 바인딩 완료")
+    logger.info(
+        f"[NaverUS] {symbol} ({stock_name}) 데이터 바인딩 완료 "
+        f"(SEC 지표 {len(sec)}종, PER={trailing_pe and round(trailing_pe,1)})"
+    )
     return profile
 
 async def fetch_company_via_yahoo_chart(symbol: str) -> dict:
