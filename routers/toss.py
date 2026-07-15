@@ -82,13 +82,13 @@ async def session_refresh():
 async def screen_custom(
     filters: list[dict] = Body(..., embed=True, description="토스 필터 조건 배열"),
     nation: str = Query("kr", description="kr(국내) | us(해외)"),
-    size: int = Query(50, ge=1, le=100),
+    size: int = Query(50, ge=1, le=200),
     page: int = Query(1, ge=1),
 ):
-    from services.toss_screener_service import screen, flatten_result
+    from services.toss_screener_service import screen, flatten_result, enrich_tickers
     try:
         raw = await screen(filters, nation=nation, size=size, page=page)
-        return flatten_result(raw)
+        return await enrich_tickers(flatten_result(raw), nation)
     except Exception as e:
         logger.exception(f"[Toss] 커스텀 조회 실패: {e}")
         raise HTTPException(status_code=502, detail=str(e))
@@ -107,7 +107,7 @@ async def screen_custom(
 async def screen_guru(
     guru: str,
     nation: str = Query("kr", description="kr(국내) | us(해외)"),
-    size: int = Query(50, ge=1, le=100),
+    size: int = Query(50, ge=1, le=200),
     page: int = Query(1, ge=1),
 ):
     from services.toss_screener_service import screen_by_guru, GURU_PRESETS

@@ -27,6 +27,8 @@ logger = logging.getLogger("toss_screener")
 
 INIT_URL = "https://wts-api.tossinvest.com/api/v3/init"
 SCREEN_URL = "https://wts-cert-api.tossinvest.com/api/v2/screener/screen"
+# 종목 정보 API — productCode(US20020523001 등) → 실제 심볼(NFLX 등). 인증 불필요.
+INFO_URL = "https://wts-info-api.tossinvest.com/api/v2/stock-infos"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -184,6 +186,69 @@ def flatten_result(raw: dict) -> dict:
         "count": len(stocks),
         "stocks": stocks,
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# 심볼 보강 (해외 종목)
+#
+# 국내(kr)는 stockCode "A095570"에서 A만 떼면 그게 실제 종목코드(095570)다.
+# 해외(us)는 stockCode가 토스 내부 코드(US20020523001·NAS0230914001…)라 실제 티커가
+# 아니다. 종목 정보 API(INFO_URL)로 productCode → 심볼(NFLX·ARM…)을 배치 조회해 채운다.
+# 조회 실패 시 기존 ticker(내부 코드)를 그대로 두어 화면이 깨지지 않게 한다.
+# ──────────────────────────────────────────────────────────────
+
+_SYMBOL_CHUNK = 100  # URL 길이 보호를 위해 한 번에 조회할 코드 수
+
+
+async def _resolve_symbols(codes: list[str]) -> dict[str, str]:
+    """productCode 목록 → {code: 심볼} 매핑. 인증 불필요. 실패는 조용히 빈 값."""
+    uniq = list(dict.fromkeys(c for c in codes if c))  # 순서 유지 + 중복 제거
+    if not uniq:
+        return {}
+
+    chunks = [uniq[i : i + _SYMBOL_CHUNK] for i in range(0, len(uniq), _SYMBOL_CHUNK)]
+    mapping: dict[str, str] = {}
+
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        headers={
+            "user-agent": USER_AGENT,
+            "accept": "application/json",
+            "referer": "https://www.tossinvest.com/",
+        },
+    ) as client:
+        async def fetch(chunk: list[str]) -> None:
+            try:
+                # 콤마는 그대로 전달(테스트로 검증). httpx params 인코딩을 피해 URL 직접 구성.
+                res = await client.get(f"{INFO_URL}?codes={','.join(chunk)}")
+                if res.status_code != 200:
+                    logger.warning(f"[Toss] 심볼 조회 HTTP {res.status_code}")
+                    return
+                for r in res.json().get("result") or []:
+                    code, symbol = r.get("code"), r.get("symbol")
+                    if code and symbol:
+                        mapping[code] = symbol
+            except Exception as e:
+                logger.warning(f"[Toss] 심볼 조회 실패: {e}")
+
+        await asyncio.gather(*(fetch(c) for c in chunks))
+
+    return mapping
+
+
+async def enrich_tickers(flat: dict, nation: str) -> dict:
+    """해외 종목의 ticker를 실제 심볼로 교체한다(국내는 그대로). flat을 제자리 수정 후 반환."""
+    if not nation or nation.lower() != "us":
+        return flat
+
+    stocks = flat.get("stocks") or []
+    mapping = await _resolve_symbols([s.get("stockCode") for s in stocks])
+    if mapping:
+        for s in stocks:
+            symbol = mapping.get(s.get("stockCode"))
+            if symbol:
+                s["ticker"] = symbol
+    return flat
 
 
 # ──────────────────────────────────────────────────────────────
@@ -568,7 +633,7 @@ async def screen_by_guru(
 
     preset = GURU_PRESETS[key]
     raw = await screen(preset["filters"], nation=nation, size=size, page=page)
-    flat = flatten_result(raw)
+    flat = await enrich_tickers(flatten_result(raw), nation)
 
     return {
         "guru": key,
