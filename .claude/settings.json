@@ -89,7 +89,9 @@
       "Bash(git commit -m '✨ Feat: 투자 보고서 뷰어 앱 구축 \\(Vite + React + Tailwind + shadcn\\) *)",
       "Bash(git branch *)",
       "Bash(git remote *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(grep -i \"error\" /tmp_build.log)"
     ],
     "additionalDirectories": [
       "c:\\Users\\user\\repositories\\my\\game\\docs\\design",

@@ -169,8 +169,10 @@ def flatten_result(raw: dict) -> dict:
             "stockCode": s.get("stockCode"),
             "name": s.get("name"),
             "logoImageUrl": s.get("logoImageUrl"),
-            "price": (s.get("base") or {}).get("krw"),
-            "prevClose": (s.get("close") or {}).get("krw"),
+            # 토스 필드 주의: base=기준가(전일 종가), close=현재가(당일 최신).
+            # 예전엔 이 둘을 뒤집어 매핑해 현재가에 전일가가 뜨고 등락 부호가 반대였다.
+            "price": (s.get("close") or {}).get("krw"),
+            "prevClose": (s.get("base") or {}).get("krw"),
         }
         for col in s.get("columns") or []:
             value = col.get("value")
