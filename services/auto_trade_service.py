@@ -49,6 +49,11 @@ _REALTIME_CHECK_THROTTLE_SECONDS = 5
 # 미체결 주문을 취소 처리하기까지의 대기 시간 (이후 재주문 가능 상태로 복귀)
 _REALTIME_PENDING_CANCEL_SECONDS = 600  # 10분
 
+# 실시간 주문 진행 상태 락 (키: trade_id, 값: {'side': side, 'timestamp': datetime})
+# KIS 잔고에서 보유 수량이 바뀐 것이 확정되어 동기화될 때까지 새로운 주문 생성을 일절 막습니다.
+_realtime_pending_orders: dict[str, dict] = {}
+
+
 
 def _resolve_order_price(side: str, current_price: float, ask: float, bid: float) -> float:
     """즉시체결 유도용 주문가: 매수=매도호가(ask), 매도=매수호가(bid).
@@ -702,10 +707,9 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         return
     _realtime_check_throttle[trade_id] = now
 
-    # 실패(거부) 쿨다운
-    last_fail = _realtime_failure_cooldown.get(trade_id)
-    if last_fail and (now - last_fail).total_seconds() < _REALTIME_FAILURE_COOLDOWN_SECONDS:
-        logger.debug(f"[Realtime] {ticker} 실패 쿨다운 중 — 스킵")
+    # 락 확인: 현재 락이 걸려있는 경우, 추가 주문 생성을 완벽히 무시합니다.
+    if trade_id in _realtime_pending_orders:
+        logger.debug(f"[Realtime] {ticker} 주문 진행 상태 락 작동 중 — 추가 주문 차단")
         return
 
     # 자격증명 조회 — trade 소유자(user_id)의 것만 사용 (멀티유저 격리).
@@ -742,42 +746,23 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
     try:
         is_domestic = market in ('KRX', 'KOSDAQ')
 
-        # ── B. 미체결 가드 + 10분 초과 취소 (해외전용 - 국내는 미체결 API 없음) ──
-        if not is_domestic:
+        # ── B. 미체결 가드 (국내/해외 통합 체크: 미체결이 있으면 무시) ──
+        if is_domestic:
+            nccs = await kis_service.get_domestic_unfilled_orders(appkey, appsecret, cano, prdt)
+            if not nccs.get('success'):
+                logger.warning(f"[Realtime] {ticker} 국내 미체결내역 조회 실패: {nccs.get('error')} → 이번 틱 보류")
+                return
+            unfilled = [o for o in nccs['orders'] if _norm_ticker(o.get('pdno')) == ticker_norm]
+        else:
             nccs = await kis_service.get_overseas_unfilled_orders(appkey, appsecret, cano, prdt, "NASD")
             if not nccs.get('success'):
-                # 미체결 상태를 모르면 중복주문 위험 → 이번 틱은 보류 (쿨다운은 걸지 않음)
-                logger.warning(f"[Realtime] {ticker} 미체결내역 조회 실패: {nccs.get('error')} → 이번 틱 보류")
+                logger.warning(f"[Realtime] {ticker} 해외 미체결내역 조회 실패: {nccs.get('error')} → 이번 틱 보류")
                 return
-
             unfilled = [o for o in nccs['orders'] if _norm_ticker(o.get('pdno')) == ticker_norm]
 
-            if unfilled:
-                def _age(o):
-                    dt = _parse_kis_order_dt(o.get('ord_dt', ''), o.get('ord_tmd', ''))
-                    return (now - dt).total_seconds() if dt else 0.0
-
-                oldest = max(unfilled, key=_age)  # age가 가장 큰 = 가장 오래된 주문
-                age = _age(oldest)
-
-                if age >= _REALTIME_PENDING_CANCEL_SECONDS:
-                    odno = oldest.get('odno')
-                    excg = oldest.get('ovrs_excg_cd') or 'NASD'
-                    remain = int(float(oldest.get('nccs_qty', 0) or 0))
-                    cancel_res = await kis_service.cancel_overseas_order(
-                        appkey, appsecret, cano, prdt, ticker, odno, remain, excg,
-                    )
-                    if cancel_res.get('success'):
-                        logger.info(f"[Realtime] {ticker} 미체결 {age/60:.1f}분 경과 → 취소 (ODNO={odno}, {remain}주)")
-                        _record(action='cancel', side='none', quantity=remain, price=current_price,
-                                success=True, order_no=odno, error_message=f'미체결 {age/60:.0f}분 경과 취소')
-                    else:
-                        logger.warning(f"[Realtime] {ticker} 미체결 취소 실패: {cancel_res.get('error')}")
-                        _record(action='cancel', side='none', quantity=remain, price=current_price,
-                                order_no=odno, error_message=f"취소 실패: {cancel_res.get('error')}")
-                else:
-                    logger.debug(f"[Realtime] {ticker} 미체결 대기중({age/60:.1f}분) → 추가주문 보류")
-                return  # 미체결이 있으면 어느 경우든 신규주문 안 함
+        if unfilled:
+            logger.debug(f"[Realtime] {ticker} KIS 미체결 주문 대기 중 → 추가 주문 보류")
+            return
 
         # ── C. 미체결 없음 → 잔고로 체결 확정/동기화 ──
         if is_domestic:
@@ -791,27 +776,28 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         real_qty = 0
         for h in bal.get('holdings', []):
             if _norm_ticker(h.get('pdno')) == ticker_norm:
-                # 국내 잔고(inquire-balance): hldg_qty, 해외 잔고(inquire-present-balance): ccld_qty_smtl1
                 qty_field = 'hldg_qty' if is_domestic else 'ccld_qty_smtl1'
                 real_qty = int(float(h.get(qty_field, 0) or 0))
                 break
 
         if real_qty != current_quantity:
-            # 직전 주문이 체결되어 보유수량이 변함 → 동기화 + 기준가를 현재가로 갱신
+            # 직전 주문이 체결되어 보유수량이 변함 → 동기화 + 기준가를 현재가로 갱신 + 락 해제
             try:
-                # DB에서 현재 grid_step 조회
                 trade_res = supabase.table('realtime_trading').select('grid_step').eq('id', trade_id).execute()
                 current_step = 0
                 if trade_res.data:
                     current_step = int(trade_res.data[0].get('grid_step', 0))
                 
                 next_step = current_step
+                
+                # 주문 실행 시 넘겨받았던 n_steps 단계를 반영하여 복수 단계 조정 처리
+                n_steps = int(order_data.get('n_steps', 1) or 1)
+                
                 if real_qty > current_quantity:
-                    next_step += 1
+                    next_step += n_steps
                 elif real_qty < current_quantity:
                     next_step = max(0, next_step - 1)
                 
-                # 안전장치: 실제 보유량이 0이면 step도 0으로 초기화
                 if real_qty == 0:
                     next_step = 0
 
@@ -824,12 +810,16 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
             except Exception as e:
                 logger.error(f"[Realtime] {ticker} 체결 동기화 실패: {e}")
                 return
+            
+            # 실제 체결 완료가 확인되었으므로, 인메모리 락을 해제합니다.
+            _realtime_pending_orders.pop(trade_id, None)
+            
             logger.info(
-                f"[Realtime] {ticker} 체결 반영: 보유 {current_quantity} → {real_qty}, grid_step {current_step} → {next_step}, 기준가 → {current_price}"
+                f"[Realtime] {ticker} 체결 반영: 보유 {current_quantity} → {real_qty}, grid_step {current_step} → {next_step}, 기준가 → {current_price} (락 해제)"
             )
             _record(action='settle', side='none', quantity=abs(real_qty - current_quantity),
                     price=current_price, success=True, base_price_after=current_price)
-            return  # 이번 틱 소진, 다음 갭에서 신규주문
+            return
 
         # ── D. 신규 주문 (즉시체결 유도 지정가: 매수=ask / 매도=bid) ──
         if side == 'sell':
@@ -842,45 +832,45 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
 
         if side == 'buy':
             if is_domestic:
-                logger.info(f"[Realtime] 국내 매수 시도: {ticker} {order_qty}주 @ {price}, CANO={cano} PRDT={prdt}")
+                logger.info(f"[Realtime] 국내 매수 시도: {ticker} {order_qty}주 @ {price}")
                 result = await kis_service.buy_domestic_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price)
             else:
                 result = await kis_service.buy_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
         else:
             if is_domestic:
-                logger.info(f"[Realtime] 국내 매도 시도: {ticker} {order_qty}주 @ {price}, CANO={cano} PRDT={prdt}")
+                logger.info(f"[Realtime] 국내 매도 시도: {ticker} {order_qty}주 @ {price}")
                 result = await kis_service.sell_domestic_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price)
             else:
                 result = await kis_service.sell_overseas_stock(appkey, appsecret, cano, prdt, ticker, order_qty, price, market)
 
         if result.get('success'):
             _realtime_failure_cooldown.pop(trade_id, None)
+            
+            # 주문 성공 즉시 인메모리 락을 겁니다.
+            _realtime_pending_orders[trade_id] = {'side': side, 'price': price, 'timestamp': now}
+            
             logger.info(
-                f"[Realtime] {side.upper()} 주문 접수(체결 대기): {ticker} {order_qty}주 @ {price} "
+                f"[Realtime] {side.upper()} 주문 접수 및 락 설정: {ticker} {order_qty}주 @ {price} "
                 f"(ODNO={result.get('order_no')})"
             )
-            # base_price/quantity는 체결 확인(C단계) 후에만 갱신 — 접수만으로는 갱신하지 않음
             _record(quantity=order_qty, success=True, order_no=result.get('order_no'))
         else:
             err = result.get('error', '주문 실패')
             logger.warning(f"[Realtime] {side.upper()} 주문 실패: {err} → 쿨다운")
             _realtime_failure_cooldown[trade_id] = now
             
-            # 주문가능금액 초과로 실패한 경우 (매수 주문에 한함) 설정의 갭을 +1.0% 상향 조정
             if side == 'buy' and ('APBK0952' in err or '주문가능금액을 초과' in err or '주문가능금액' in err):
                 try:
                     trade_res = supabase.table('realtime_trading').select('gap').eq('id', trade_id).execute()
                     if trade_res.data:
                         current_gap = float(trade_res.data[0].get('gap', 1.0))
-                        if current_gap < 30.0:  # 최대 갭 한계선 30%
+                        if current_gap < 30.0:
                             new_gap = min(30.0, current_gap + 1.0)
                             supabase.table('realtime_trading').update({
                                 'gap': new_gap,
                                 'updated_at': now.isoformat(),
                             }).eq('id', trade_id).execute()
                             logger.info(f"[Realtime] {ticker} 주문가능금액 초과로 갭 상향 조정: {current_gap}% → {new_gap}%")
-                        else:
-                            logger.info(f"[Realtime] {ticker} 주문가능금액 초과하였으나 이미 최대 갭 한계선(30%)에 도달하여 유지합니다.")
                 except Exception as db_err:
                     logger.error(f"[Realtime] {ticker} 갭 자동 조절 중 DB 오류 발생: {db_err}")
 
@@ -890,3 +880,4 @@ async def execute_realtime_order(trade_id: str, order_data: dict, supabase_clien
         logger.error(f"[Realtime] {ticker} 실시간 주문 처리 예외: {e}")
         _realtime_failure_cooldown[trade_id] = now
         _record(error_message=f'예외: {e}')
+

@@ -389,14 +389,13 @@ async def handle_price_detection(
         })
         return
 
-    # 3. gap * 1.054% 이상 올랐을 때 → 등비수열 수량만큼 매도 (보유 부족 시 보유량만큼만)
+    # 3. gap * 1.054% 이상 올랐을 때 → 단계별 기하급수 수량만큼 매도
     # 매도 시 거래세+수수료(약 0.54%)를 감안해 gap에 1.054를 곱한 임계값을 사용
-    # 예) gap=1% → 1.054% 이상 상승해야 매도 / gap=2% → 2.108% 이상 상승해야 매도
     sell_gap = gap * 1.054
     if price_rate >= sell_gap:
-        # 등비수열 매도 수량 계산 (요구사항 3): base_qty * (1.1 ** (grid_step - 1))
+        # grid_step에 따른 기하급수 매도 수량 (예: 3단계 -> 2단계 하락 시 4개 매도, grid_step 3일 때 2^(3-1) = 4)
         step = max(1, grid_step)
-        target_sell_qty = max(1, round(gap_qty * (1.1 ** (step - 1))))
+        target_sell_qty = max(1, gap_qty * (2 ** (step - 1)))
         actual_sell_qty = min(target_sell_qty, quantity)
         if actual_sell_qty > 0:
             await on_order_execute({
@@ -406,18 +405,29 @@ async def handle_price_detection(
                 'action': 'sell_and_update',
                 'sell_gap': sell_gap,
             })
-        # 매도할 보유량이 없으면 아무 것도 하지 않는다 (하락 시 기준가 슬라이딩 금지).
-        # 기준가 슬라이딩은 오직 '신고점 + 보유 0'(section 2)에서만 일어난다.
 
-    # 4. gap% 이상 내렸을 때 → 등비수열 수량만큼 매수
+    # 4. gap% 이상 내렸을 때 → 단계별 기하급수 수량(또는 급락폭 비례 대량 매수) 매수
     elif price_rate <= -gap:
         if gap_qty > 0:
-            # 등비수열 매수 수량 계산 (요구사항 3): base_qty * (1.1 ** grid_step)
-            buy_qty = max(1, round(gap_qty * (1.1 ** grid_step)))
+            # 급락 비율 계산 (예: 10% 급락하고 gap이 2%인 경우 N = 5단계)
+            import math
+            n_steps = max(1, math.floor(abs(price_rate) / gap))
+            
+            # 현재 grid_step부터 n_steps단계 진행하는 동안의 총 매수 수량 합산
+            # 1단계 상승(0->1): 2^0 = 1
+            # 2단계 상승(1->2): 2^1 = 2
+            # 3단계 상승(2->3): 2^2 = 4
+            buy_qty = 0
+            for i in range(n_steps):
+                step_idx = grid_step + i
+                buy_qty += gap_qty * (2 ** step_idx)
+            
+            buy_qty = max(1, buy_qty)
             await on_order_execute({
                 **common,
                 'side': 'buy',
                 'quantity': buy_qty,
                 'action': 'buy_and_update',
+                'n_steps': n_steps, # 몇 단계를 한 번에 내려가며 매수했는지 전달
             })
-        # gap_qty=0 등으로 매수 수량이 없어도 기준가를 끌어내리지 않는다 (하락 슬라이딩 금지).
+

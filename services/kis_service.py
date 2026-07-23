@@ -294,6 +294,36 @@ async def cancel_overseas_order(
 # 국내주식 API (1단계 이후)
 # ============================================================
 
+async def get_domestic_unfilled_orders(
+    appkey: str, appsecret: str, account_no: str, account_code: str
+) -> dict:
+    """국내주식 미체결내역 조회 (TTTC8011R, 실전 전용).
+    
+    반환 orders 항목 주요 필드: odno(주문번호), pdno(종목), sll_buy_dvsn_cd(01매도/02매수),
+    ord_qty(주문수량), cntg_qty(체결수량), rmnd_qty(미체결수량),
+    ord_dt(주문일자 YYYYMMDD), ord_tmd(주문시각 HHMMSS).
+    """
+    token = await get_access_token(appkey, appsecret)
+    params = {
+        "CANO": account_no.strip(),
+        "ACNT_PRDT_CD": account_code.strip(),
+        "INQR_DVSN_1": "0",  # 조회구분1 (0: 전체, 1: 단가순, 2: 주문일시순)
+        "INQR_DVSN_2": "0",  # 조회구분2 (0: 전체, 1: 매도, 2: 매수)
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-nccs",
+            params=params,
+            headers=_make_headers(token, appkey, appsecret, "TTTC8011R"),
+        )
+    data = resp.json()
+    if data.get("rt_cd") == "0":
+        return {"success": True, "orders": data.get("output", []) or []}
+    return {"success": False, "error": data.get("msg1", "국내 미체결내역 조회 실패")}
+
+
 async def get_domestic_balance(appkey: str, appsecret: str, account_no: str, account_code: str) -> dict:
     """국내주식 잔고 조회 (TTTC8434R 실전 / VTTC8434R 모의)"""
     token = await get_access_token(appkey, appsecret)
