@@ -67,6 +67,28 @@ def list_events(
     return res.data or []
 
 
+def list_collected_tickers() -> set:
+    """이미 적재된(수집 완료) 종목 집합. resume(이어하기)용 — 페이지네이션."""
+    out: set = set()
+    offset, page = 0, 1000
+    while True:
+        res = (
+            _sb()
+            .table("earnings_events")
+            .select("ticker")
+            .range(offset, offset + page - 1)
+            .execute()
+        )
+        rows = res.data or []
+        for r in rows:
+            if r.get("ticker"):
+                out.add(r["ticker"])
+        if len(rows) < page:
+            break
+        offset += page
+    return out
+
+
 def list_events_for_date(date: str) -> list[dict]:
     res = (
         _sb()
@@ -79,24 +101,55 @@ def list_events_for_date(date: str) -> list[dict]:
 
 
 def list_labeled_events(sector: Optional[str] = None) -> list[dict]:
-    """ret_hold 가 채워진(학습 가능) 행."""
-    q = _sb().table("earnings_events").select("*").not_.is_("ret_hold", "null")
-    if sector:
-        q = q.eq("gics_sector", sector)
-    return q.execute().data or []
+    """
+    ret_hold 가 채워진(학습 가능) 행 전체.
+    Supabase 기본 응답 상한(≈1000행)에 잘리지 않도록 range 페이지네이션으로 모두 조회한다.
+    (id 정렬로 페이지 경계에서 누락/중복 방지)
+    """
+    out: list[dict] = []
+    offset, page = 0, 1000
+    while True:
+        q = _sb().table("earnings_events").select("*").not_.is_("ret_hold", "null")
+        if sector:
+            q = q.eq("gics_sector", sector)
+        rows = (
+            q.order("id")
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        out.extend(rows)
+        if len(rows) < page:
+            break
+        offset += page
+    return out
 
 
 def list_unlabeled_events() -> list[dict]:
-    """ret_hold 가 비어있는(예측 대상) 행."""
-    return (
-        _sb()
-        .table("earnings_events")
-        .select("*")
-        .is_("ret_hold", "null")
-        .execute()
-        .data
-        or []
-    )
+    """
+    ret_hold 가 비어있는(예측 대상 후보) 행 전체.
+    Supabase 기본 응답 상한(≈1000행)에 잘리지 않도록 range 페이지네이션으로 모두 조회한다.
+    """
+    out: list[dict] = []
+    offset, page = 0, 1000
+    while True:
+        rows = (
+            _sb()
+            .table("earnings_events")
+            .select("*")
+            .is_("ret_hold", "null")
+            .order("id")
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        out.extend(rows)
+        if len(rows) < page:
+            break
+        offset += page
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -104,11 +157,11 @@ def list_unlabeled_events() -> list[dict]:
 # ─────────────────────────────────────────────
 
 def upsert_prediction(row: dict) -> dict:
-    """(event_id, model_version) 기준 upsert."""
+    """(event_id, rate_scenario) 기준 upsert — 금리 시나리오별 예측 공존."""
     res = (
         _sb()
         .table("earnings_predictions")
-        .upsert(row, on_conflict="event_id,model_version")
+        .upsert(row, on_conflict="event_id,rate_scenario")
         .execute()
     )
     return (res.data or [row])[0]
@@ -126,6 +179,34 @@ def latest_prediction(event_id: str) -> Optional[dict]:
     )
     rows = res.data or []
     return rows[0] if rows else None
+
+
+def predicted_event_ids(rate_scenario: str = "actual") -> set[str]:
+    """
+    해당 금리 시나리오로 이미 예측이 저장된 event_id 집합 (재예측 제외용).
+    1000행 상한 없이 range 페이지네이션으로 모두 조회한다.
+    """
+    out: set[str] = set()
+    offset, page = 0, 1000
+    while True:
+        rows = (
+            _sb()
+            .table("earnings_predictions")
+            .select("event_id")
+            .eq("rate_scenario", rate_scenario)
+            .order("event_id")
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        for r in rows:
+            if r.get("event_id"):
+                out.add(r["event_id"])
+        if len(rows) < page:
+            break
+        offset += page
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -156,10 +237,13 @@ def list_dashboard(limit: int = 200) -> list[dict]:
 # ml_models (실적 모델 재사용 + 섹터 라우팅)
 # ─────────────────────────────────────────────
 
-def save_earnings_model(sector: str, model_json: dict, meta: dict) -> str:
-    """실적 모델을 ml_models 에 저장(domain='earnings', gics_sector=섹터). id 반환."""
+def save_earnings_model(sector: str, model_json: dict, meta: dict, target: str = "ret_hold") -> str:
+    """
+    실적 모델을 ml_models 에 저장. id 반환.
+    섹터 × 타깃을 name(earnings_{sector}_{target})으로 구분 (스키마 변경 없이).
+    """
     payload = {
-        "name": f"earnings_{sector}",
+        "name": f"earnings_{sector}_{target}",
         "domain": "earnings",
         "gics_sector": sector,
         "model_json": model_json,
@@ -172,14 +256,15 @@ def save_earnings_model(sector: str, model_json: dict, meta: dict) -> str:
     return rows[0]["id"]
 
 
-def latest_earnings_model(sector: str) -> Optional[dict]:
-    """섹터별 최신 실적 모델 1건 (model_version 내림차순)."""
+def latest_earnings_model(sector: str, target: str = "ret_hold") -> Optional[dict]:
+    """섹터 × 타깃별 최신 실적 모델 1건 (model_version 내림차순)."""
     res = (
         _sb()
         .table("ml_models")
         .select("*")
         .eq("domain", "earnings")
         .eq("gics_sector", sector)
+        .eq("name", f"earnings_{sector}_{target}")
         .order("model_version", desc=True)
         .limit(1)
         .execute()

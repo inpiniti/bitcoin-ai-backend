@@ -15,17 +15,24 @@ Postman: trends/실적발표_자동매매_API.postman_collection.json
   GET  /api/positions                  대시보드(시작가/현재가/예측가/위치%/경과%)
   GET  /api/earnings/api-logs          API 통신 이력 로그 조회
 """
+import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
+from starlette.concurrency import run_in_threadpool, iterate_in_threadpool
 
-from services import earnings_repo, earnings_service
+from services import earnings_repo, earnings_service, magic_formula_service
 from services.earnings_logger import log_earnings_api
 from services.supabase_service import SUPABASE_URL, _headers, _check_config
+
+# 미사용 import 제거 (이미 위에서 정의됨)
+# import httpx
 
 logger = logging.getLogger("earnings_router")
 router = APIRouter(prefix="/api", tags=["earnings"])
@@ -37,7 +44,8 @@ class HistoryCollectReq(BaseModel):
     universe: str = "SP500"
     tickers: Optional[list[str]] = None
     limit: int = 20            # universe 사용 시 적재할 종목 수 상한
-    max_per_ticker: int = 8    # 종목당 과거 분기 수
+    max_per_ticker: int = 40   # 종목당 과거 분기 수 (약 10년)
+    skip_existing: bool = True # 이미 적재된 종목 건너뛰기 (이어하기)
 
 
 class TodayCollectReq(BaseModel):
@@ -46,7 +54,8 @@ class TodayCollectReq(BaseModel):
 
 
 class PredictReq(BaseModel):
-    scope: str = "missing_label"   # missing_label | all
+    scope: str = "missing_label"          # missing_label | all
+    rate_scenario: Optional[str] = None   # up | down | flat | 숫자(%p) — 금리 시나리오(what-if)
 
 
 class TrainReq(BaseModel):
@@ -55,12 +64,84 @@ class TrainReq(BaseModel):
 
 # ── 헬퍼 ─────────────────────────────────────────────────────
 
-def _sp500_tickers(limit: int) -> list[tuple[str, str]]:
-    """(ticker, sector) 목록. fetch_sp500_list 는 async 라 동기 래핑."""
+def _sp500_tickers_sync(limit: int) -> list[tuple[str, str]]:
+    """(ticker, sector) 목록. 동기 함수(스레드풀에서 실행)."""
     import asyncio
     from services.sp500_list_service import fetch_sp500_list
-    stocks = asyncio.run(fetch_sp500_list())
-    return [(s.ticker, s.sector) for s in stocks[:limit]]
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        stocks = loop.run_until_complete(fetch_sp500_list())
+        return [(s.ticker, s.sector) for s in stocks[:limit]]
+    finally:
+        if loop:
+            loop.close()
+
+
+# ── 백그라운드 수집 작업 상태 (서버 프로세스 소유) ─────────────
+#   브라우저를 껐다 켜도 이 상태를 /status 로 조회해 진행률을 이어서 표시.
+#   서버 재시작 시에만 초기화됨 → skip_existing 으로 이어하기.
+_collect_job: dict = {
+    "status": "idle",          # idle | running | done | error
+    "current": 0,
+    "total": 0,
+    "ticker": None,
+    "collected": 0,
+    "total_inserted": 0,
+    "failed": [],
+    "started_at": None,
+    "finished_at": None,
+    "message": None,
+}
+_collect_task = None   # 백그라운드 태스크 강한 참조 유지 (GC 방지)
+
+
+async def _run_collect_job(tickers: list[str], max_per_ticker: int, sector_map: dict):
+    """백그라운드에서 수집을 끝까지 수행하며 _collect_job 진행 상태를 갱신."""
+    def _do():
+        for ev in earnings_service.collect_history_iter(tickers, max_per_ticker, sector_map):
+            if ev.get("done"):
+                _collect_job.update({
+                    "status": "done",
+                    "collected": ev["collected"],
+                    "total_inserted": ev["total_inserted"],
+                    "failed": ev["failed"],
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "message": (
+                        f"{ev['processed_tickers']}개 처리, "
+                        f"{ev['total_inserted']}개 적재, 실패 {len(ev['failed'])}개"
+                    ),
+                })
+            else:
+                _collect_job.update({
+                    "current": ev["current"],
+                    "total": ev["total"],
+                    "ticker": ev["ticker"],
+                })
+
+    try:
+        await run_in_threadpool(_do)
+    except Exception as e:
+        logger.error(f"[earnings] 백그라운드 수집 실패: {e}", exc_info=True)
+        _collect_job.update({
+            "status": "error",
+            "message": str(e),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        })
+    finally:
+        await log_earnings_api(
+            api="/api/earnings/history/collect/start",
+            inout="in",
+            payload={"total": _collect_job.get("total")},
+            response={k: _collect_job[k] for k in ("collected", "total_inserted", "failed", "status")},
+            status="success" if _collect_job["status"] == "done" else "error",
+            error_message=None if _collect_job["status"] == "done" else _collect_job.get("message"),
+        )
 
 
 # ── 초기 1회 ─────────────────────────────────────────────────
@@ -68,13 +149,25 @@ def _sp500_tickers(limit: int) -> list[tuple[str, str]]:
 @router.post("/earnings/history/collect", summary="과거 실적·주가 배치 적재")
 async def history_collect(req: HistoryCollectReq, request: Request):
     payload = req.dict()
-    tickers = req.tickers or [t for t, _ in _sp500_tickers(req.limit)]
+    # 동기 작업을 스레드풀에서 실행 — 섹터 정보도 함께 확보
+    sector_map: dict = {}
+    if req.tickers:
+        tickers = req.tickers
+    else:
+        pairs = await run_in_threadpool(_sp500_tickers_sync, req.limit)
+        tickers = [t for t, _ in pairs]
+        sector_map = {t: s for t, s in pairs}
     if not tickers:
         raise HTTPException(400, "적재할 종목이 없습니다 (tickers 또는 universe 확인)")
-    
+
     try:
-        # yfinance를 사용하여 실질 수집
-        result = earnings_service.collect_history(tickers, max_per_ticker=req.max_per_ticker)
+        # SEC + Yahoo Chart 수집도 스레드풀에서 실행
+        result = await run_in_threadpool(
+            earnings_service.collect_history,
+            tickers,
+            req.max_per_ticker,
+            sector_map,
+        )
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
@@ -93,6 +186,133 @@ async def history_collect(req: HistoryCollectReq, request: Request):
             error_message=str(e)
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/earnings/history/collect/stream", summary="과거 적재 (SSE 실시간 진행률)")
+async def history_collect_stream(req: HistoryCollectReq, request: Request):
+    """
+    503개 전체를 한 번에 수집하되, 종목마다 진행 상황을 SSE로 푸시.
+    타임아웃 없이 0 → N 진행률을 실시간 표시.
+
+    SSE 이벤트(각 줄 `data: {json}\\n\\n`):
+      진행: {"current":1,"total":503,"ticker":"MMM","saved":7,"status":"ok"}
+      완료: {"done":true,"collected":3500,"total_inserted":3500,"failed":[...]}
+    """
+    payload = req.dict()
+    sector_map: dict = {}
+    if req.tickers:
+        tickers = req.tickers
+    else:
+        pairs = await run_in_threadpool(_sp500_tickers_sync, req.limit)
+        tickers = [t for t, _ in pairs]
+        sector_map = {t: s for t, s in pairs}
+    if not tickers:
+        raise HTTPException(400, "적재할 종목이 없습니다 (tickers 또는 universe 확인)")
+
+    async def event_stream():
+        final = None
+        try:
+            # 동기 제너레이터를 스레드풀에서 비동기로 소비
+            sync_gen = earnings_service.collect_history_iter(
+                tickers, req.max_per_ticker, sector_map
+            )
+            async for ev in iterate_in_threadpool(sync_gen):
+                if ev.get("done"):
+                    final = ev
+                yield f"data: {json.dumps(ev)}\n\n"
+        except Exception as e:
+            logger.error(f"[earnings] SSE 수집 실패: {e}", exc_info=True)
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            # 최종 결과를 통신 로그에 기록 (스트림 종료 후)
+            await log_earnings_api(
+                api=str(request.url.path),
+                inout="in",
+                payload=payload,
+                response=final,
+                status="success" if final else "error",
+                error_message=None if final else "스트림 중단",
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",   # 프록시 버퍼링 비활성화 (실시간 전달)
+        },
+    )
+
+
+@router.post("/earnings/history/collect/start", summary="과거 적재 백그라운드 시작")
+async def history_collect_start(req: HistoryCollectReq, request: Request):
+    """
+    수집을 서버 백그라운드에서 시작하고 즉시 응답.
+    브라우저를 껐다 켜도 /status 로 진행률을 이어서 확인 가능.
+    이미 실행 중이면 현재 상태를 반환(중복 시작 방지).
+    skip_existing=True 면 이미 적재된 종목은 건너뜀(이어하기).
+    """
+    if _collect_job["status"] == "running":
+        return {"status": "already_running", **_collect_job}
+
+    # 대상 종목 + 섹터
+    sector_map: dict = {}
+    if req.tickers:
+        tickers = req.tickers
+    else:
+        pairs = await run_in_threadpool(_sp500_tickers_sync, req.limit)
+        tickers = [t for t, _ in pairs]
+        sector_map = {t: s for t, s in pairs}
+    if not tickers:
+        raise HTTPException(400, "적재할 종목이 없습니다 (tickers 또는 universe 확인)")
+
+    total_requested = len(tickers)
+    skipped = 0
+    if req.skip_existing:
+        existing = await run_in_threadpool(earnings_repo.list_collected_tickers)
+        before = len(tickers)
+        tickers = [t for t in tickers if t not in existing]
+        skipped = before - len(tickers)
+
+    if not tickers:
+        _collect_job.update({
+            "status": "done",
+            "current": 0, "total": 0, "ticker": None,
+            "collected": 0, "total_inserted": 0, "failed": [],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "message": f"이미 모두 적재됨 (전체 {total_requested}개 스킵)",
+        })
+        return {"status": "done", **_collect_job}
+
+    # 상태 초기화 + 백그라운드 시작
+    _collect_job.update({
+        "status": "running",
+        "current": 0,
+        "total": len(tickers),
+        "ticker": None,
+        "collected": 0,
+        "total_inserted": 0,
+        "failed": [],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "message": f"수집 시작 ({len(tickers)}개 대상, {skipped}개 스킵)",
+    })
+    global _collect_task
+    _collect_task = asyncio.create_task(_run_collect_job(tickers, req.max_per_ticker, sector_map))
+    return {
+        "status": "started",
+        "total": len(tickers),
+        "skipped": skipped,
+        "total_requested": total_requested,
+    }
+
+
+@router.get("/earnings/history/collect/status", summary="과거 적재 진행 상태 조회")
+async def history_collect_status():
+    """현재 백그라운드 수집 진행 상태. 브라우저 재접속 시 진행률 복원용."""
+    return _collect_job
 
 
 # ── 일일 루프 ────────────────────────────────────────────────
@@ -194,6 +414,59 @@ async def today_collect(req: TodayCollectReq, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/earnings/event/collect", summary="특정 발표 수집 (캘린더 클릭용)")
+async def event_collect(ticker: str, earnings_date: str, request: Request):
+    """
+    ticker + earnings_date 로 단일 발표 이벤트 수집 (SEC EDGAR + Yahoo Chart).
+    발표 캘린더에서 날짜·종목을 클릭했을 때 호출. 과거 수집과 동일 품질.
+    """
+    try:
+        # 수집 전 로깅
+        await log_earnings_api(
+            api=f"earnings/event/collect",
+            inout="out",
+            payload={"ticker": ticker, "earnings_date": earnings_date},
+            response={"message": "Fetching from SEC EDGAR + Yahoo Chart..."},
+            status="success"
+        )
+
+        event, msg = earnings_service.collect_event_sec(ticker, earnings_date=earnings_date)
+        response = {
+            "status": "ok" if event else "no_data",
+            "ticker": ticker,
+            "earnings_date": earnings_date,
+            "collected": event is not None,
+            "event": event,
+            "message": msg
+        }
+
+        # 수집 후 로깅
+        await log_earnings_api(
+            api="earnings/event/collect",
+            inout="in",
+            payload={"ticker": ticker, "earnings_date": earnings_date},
+            response=response,
+            status="success"
+        )
+        return response
+    except Exception as e:
+        error_response = {
+            "status": "error",
+            "ticker": ticker,
+            "earnings_date": earnings_date,
+            "error": str(e)
+        }
+        await log_earnings_api(
+            api="earnings/event/collect",
+            inout="in",
+            payload={"ticker": ticker, "earnings_date": earnings_date},
+            response=None,
+            status="error",
+            error_message=str(e)
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/earnings/events", summary="이벤트 테이블 조회")
 async def events(
     request: Request,
@@ -203,7 +476,9 @@ async def events(
 ):
     payload = {"ticker": ticker, "sector": sector, "limit": limit}
     try:
-        items = earnings_repo.list_events(ticker=ticker, sector=sector, limit=limit)
+        items = await run_in_threadpool(
+            lambda: earnings_repo.list_events(ticker=ticker, sector=sector, limit=limit)
+        )
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
@@ -228,7 +503,9 @@ async def events(
 async def predict(req: PredictReq, request: Request):
     payload = req.dict()
     try:
-        result = earnings_service.predict(scope=req.scope)
+        result = await run_in_threadpool(
+            earnings_service.predict, req.scope, req.rate_scenario
+        )
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
@@ -255,7 +532,7 @@ async def predict(req: PredictReq, request: Request):
 async def model_train(req: TrainReq, request: Request):
     payload = req.dict()
     try:
-        result = earnings_service.train(min_samples=req.min_samples)
+        result = await run_in_threadpool(earnings_service.train, req.min_samples)
         await log_earnings_api(
             api=str(request.url.path),
             inout="in",
@@ -273,6 +550,53 @@ async def model_train(req: TrainReq, request: Request):
             status="error",
             error_message=str(e)
         )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── 마법공식 (그린블라트 랭킹 + 백테스트) ────────────────────
+
+@router.get("/earnings/magic/ranking", summary="마법공식 랭킹 (오늘의 매수 후보)")
+async def magic_ranking(request: Request, limit: int = Query(default=30, ge=1, le=200)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.ranking, limit)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/earnings/magic/backtest", summary="마법공식 백테스트 (과거 검증)")
+async def magic_backtest(request: Request, top_pct: int = Query(default=20, ge=5, le=50)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.backtest, top_pct)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/earnings/scorecard/ranking", summary="종합 스코어카드 랭킹 (거장 팩터 결합)")
+async def scorecard_ranking(request: Request, limit: int = Query(default=30, ge=1, le=200)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.scorecard_ranking, limit)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/earnings/scorecard/backtest", summary="종합 스코어카드 백테스트 (팩터별 검증)")
+async def scorecard_backtest(request: Request, top_pct: int = Query(default=20, ge=5, le=50)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.scorecard_backtest, top_pct)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/earnings/scorecard/walkforward", summary="가중치 학습 워크포워드 (학습가중 vs 등가중)")
+async def scorecard_walkforward(request: Request, top_pct: int = Query(default=20, ge=5, le=50)):
+    try:
+        result = await run_in_threadpool(magic_formula_service.walkforward, top_pct)
+        return {"status": "ok", **result}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -308,30 +632,42 @@ async def model_status(request: Request, limit: int = Query(default=50, ge=1, le
 @router.get("/positions", summary="대시보드용 포지션 목록")
 async def positions(request: Request, limit: int = Query(default=100, ge=1, le=500)):
     payload = {"limit": limit}
+
+    def _num(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     try:
-        items = earnings_service.get_positions(limit)
-        
-        # 실시간 현재가 변동 시뮬레이션 매핑 추가
+        # 동기 DB 조회를 스레드풀에서 실행 (이벤트 루프 블로킹 방지)
+        items = await run_in_threadpool(earnings_service.get_positions, limit)
+        # TradingView 현재가 배치 조회(캐시) — 1회
+        price_map = await run_in_threadpool(earnings_service.fetch_current_prices)
+
         enriched_items = []
         for row in items:
-            start_p = float(row.get("start_price") or 100.0)
-            predict_p = float(row.get("predict_price") or (start_p * 1.15))
-            
-            # 실시간 현재가 시뮬레이션
-            current_p = start_p * (1.0 + (datetime.now(timezone.utc).second % 10 - 3) * 0.01)
-            
-            # 가격 위치% = (현재가 - 시작가) / (예측가 - 시작가) * 100
-            denom = (predict_p - start_p)
-            price_pos_pct = ((current_p - start_p) / denom * 100.0) if denom != 0 else 0.0
-            
+            start_p = _num(row.get("start_price"))
+            predict_p = _num(row.get("predict_price"))   # 예측 없으면 None (가짜 생성 안 함)
+            max_p = _num(row.get("price_max_pred"))      # 예상 최고가 (구간 MFE)
+            min_p = _num(row.get("price_min_pred"))      # 예상 최저가 (구간 MAE)
+            cur = price_map.get(str(row.get("ticker") or "").upper())
+
+            # 가격 위치% — 시작가·예측가·현재가가 모두 있을 때만 (없으면 None='모름')
+            price_pos_pct = None
+            if start_p is not None and predict_p is not None and cur is not None and (predict_p - start_p) != 0:
+                price_pos_pct = round((cur - start_p) / (predict_p - start_p) * 100.0, 1)
+
             enriched_items.append({
                 **row,
                 "start_price": start_p,
-                "current_price": round(current_p, 2),
-                "predict_price": round(predict_p, 2),
-                "price_position_pct": round(price_pos_pct, 1)
+                "current_price": round(cur, 2) if cur is not None else None,
+                "predict_price": round(predict_p, 2) if predict_p is not None else None,
+                "price_max_pred": round(max_p, 2) if max_p is not None else None,
+                "price_min_pred": round(min_p, 2) if min_p is not None else None,
+                "price_position_pct": price_pos_pct,
             })
-            
+
         result = {"items": enriched_items}
         await log_earnings_api(
             api=str(request.url.path),

@@ -77,6 +77,146 @@ def parse_market_cap(val_str: str) -> float:
         pass
     return total
 
+def _fnguide_latest_row_value(html: str, item_name: str) -> float | None:
+    """
+    FnGuide SVD_Finance HTML에서 특정 계정과목 행의 '가장 최근 기간' 값(억원 단위)을 추출.
+    구조: <div class="th_b">{항목}</div> ... </th> <td class="r" title="42,781.91">42,782</td> ...
+    각 td는 좌→우 시간순(가장 오른쪽이 최신)이므로 마지막 유효 숫자를 취한다.
+    반환값 단위: 원(억원 × 1e8). 실패 시 None.
+    """
+    import re
+    # 항목명 위치 이후 </tr> 전까지의 구간을 잡는다
+    idx = html.find(item_name)
+    if idx == -1:
+        return None
+    tail = html[idx: idx + 2000]
+    end = tail.find("</tr>")
+    if end != -1:
+        tail = tail[:end]
+    # td의 title 속성(전체 정밀도)을 우선 사용
+    titles = re.findall(r'<td[^>]*title="([-\d,\.]+)"', tail)
+    vals: list[float] = []
+    for t in titles:
+        try:
+            vals.append(float(t.replace(",", "")))
+        except ValueError:
+            continue
+    if not vals:
+        return None
+    # 가장 최근(마지막) 값 → 억원 단위이므로 원으로 환산
+    return vals[-1] * 100_000_000
+
+
+async def fetch_kr_financials_from_fnguide(code: str) -> dict:
+    """
+    FnGuide(comp.fnguide.com) 종합 재무제표 페이지에서 한국 주식의 현금흐름 데이터를 조회합니다.
+    가입/인증 불필요. 영업·투자·재무 현금흐름과 현금및현금성자산을 추출해 원(KRW) 단위로 반환합니다.
+    잉여현금흐름(FCF)은 (영업활동 + 투자활동) 근사치로 계산합니다.
+    """
+    gicode = f"A{code}"
+    url = (
+        f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp"
+        f"?pGB=1&gicode={gicode}&cID=&MenuYn=Y&ReportGB=&NewMenuID=103&stkGb=701"
+    )
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        async with httpx.AsyncClient(timeout=8, verify=False, headers=headers) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            logger.warning(f"[FnGuide] 재무 조회 실패 (code={code}): HTTP {resp.status_code}")
+            return {}
+
+        html = resp.text  # FnGuide 페이지는 UTF-8
+        operating = _fnguide_latest_row_value(html, "영업활동으로인한현금흐름")
+        investing = _fnguide_latest_row_value(html, "투자활동으로인한현금흐름")
+        cash = _fnguide_latest_row_value(html, "현금및현금성자산")
+        gross_profit = _fnguide_latest_row_value(html, "매출총이익")
+        revenue = _fnguide_latest_row_value(html, "매출액")
+
+        result: dict = {}
+        if operating is not None:
+            result["operatingCashflow"] = operating
+            if investing is not None:
+                # FCF 근사: 영업활동 + 투자활동(통상 음수) → 자본지출 차감 효과
+                result["freeCashflow"] = operating + investing
+        if cash is not None:
+            result["totalCash"] = cash
+        # 매출총이익률 계산용 (매출총이익 / 매출액) — 비율이 상식 범위일 때만 채택
+        if gross_profit is not None and revenue and revenue > 0:
+            gm = gross_profit / revenue
+            if 0 < gm < 1.5:
+                result["grossMargins"] = gm
+
+        if result:
+            logger.info(f"[FnGuide] {code} 현금흐름 수집 성공: keys={list(result.keys())}")
+        else:
+            logger.warning(f"[FnGuide] {code} 현금흐름 항목을 찾지 못함")
+        return result
+    except Exception as e:
+        logger.error(f"[FnGuide] 현금흐름 수집 중 오류 (code={code}): {e}")
+        return {}
+
+
+async def fetch_naver_kr_annual_metrics(code: str) -> dict:
+    """
+    네이버 모바일 연간 재무 API에서 무인증으로 당좌비율·EPS·PER·PBR 등을 보충 수집합니다.
+    (integration API가 손실 연도 등으로 N/A를 주는 경우를 메꾸기 위함)
+    가장 최근 '확정 실적(컨센서스 아님)' 컬럼 값을 사용합니다.
+    """
+    url = f"https://m.stock.naver.com/api/stock/{code}/finance/annual"
+    headers = {"User-Agent": USER_AGENT, "Referer": "https://m.stock.naver.com/"}
+    try:
+        async with httpx.AsyncClient(timeout=6, verify=False, headers=headers) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        fin = data.get("financeInfo", {})
+        # 확정 실적(isConsensus == 'N') 중 가장 최근 key 선택
+        actual_keys = sorted([c.get("key") for c in fin.get("trTitleList", []) if c.get("isConsensus") == "N" and c.get("key")])
+        if not actual_keys:
+            return {}
+        latest_key = actual_keys[-1]
+        prev_key = actual_keys[-2] if len(actual_keys) >= 2 else None
+
+        row_by_title = {r.get("title"): r for r in fin.get("rowList", [])}
+
+        def val_at(title: str, key) -> float:
+            r = row_by_title.get(title)
+            if not r or not key:
+                return 0.0
+            return clean_float(r.get("columns", {}).get(key, {}).get("value", "0"))
+
+        def val(title: str) -> float:
+            return val_at(title, latest_key)
+
+        out = {
+            "quickRatio": val("당좌비율"),
+            "trailingEps": val("EPS"),
+            "trailingPE": val("PER"),
+            "priceToBook": val("PBR"),
+        }
+
+        # 이익성장(YoY): 당기순이익 최근 2개 확정연도로 계산
+        ni_latest = val("당기순이익")
+        ni_prev = val_at("당기순이익", prev_key)
+        if ni_prev:
+            out["earningsGrowth"] = (ni_latest - ni_prev) / abs(ni_prev)
+
+        # 배당성향: 주당배당금 / EPS (0~1 범위 상식값만)
+        dps = val("주당배당금")
+        eps = out["trailingEps"]
+        if dps and eps and eps > 0:
+            payout = dps / eps
+            if 0 < payout < 3:
+                out["payoutRatio"] = payout
+
+        return out
+    except Exception as e:
+        logger.warning(f"[NaverKR] 연간 재무 보충 수집 실패 (code={code}): {e}")
+        return {}
+
+
 def is_korean_stock(symbol: str) -> bool:
     symbol = symbol.upper().strip()
     if symbol.isdigit() and len(symbol) == 6:
@@ -124,14 +264,19 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
 
     try:
         async with httpx.AsyncClient(headers=headers, verify=False) as client:
-            basic_data, integration_data, pc_html = await asyncio.gather(
+            # 네이버 3종 + FnGuide 현금흐름 + 네이버 연간 보충지표를 모두 병렬로 수집
+            basic_data, integration_data, pc_html, fnguide_cf, annual_metrics = await asyncio.gather(
                 fetch_json(client, basic_url),
                 fetch_json(client, integration_url),
-                fetch_html(client, pc_url)
+                fetch_html(client, pc_url),
+                fetch_kr_financials_from_fnguide(code),
+                fetch_naver_kr_annual_metrics(code),
             )
     except Exception as e:
         logger.error(f"[Naver] 병렬 데이터 수집 중 치명적 오류: {e}")
         return {}
+    fnguide_cf = fnguide_cf or {}
+    annual_metrics = annual_metrics or {}
 
     if not basic_data or not integration_data:
         logger.warning(f"[Naver] 필수 API 데이터 수집 실패: {symbol}")
@@ -171,7 +316,8 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
     roe = 0.0
     debt_to_equity = 0.0
     op_income = 0.0
-    
+    equity_won = 0.0
+
     last_actual_idx = 2
     rev_str = "0"
     op_inc_str = "0"
@@ -224,9 +370,56 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
                     net_margin = clean_float(get_row_val("순이익률", last_actual_idx))
                     roe = clean_float(get_row_val("ROE(지배주주)", last_actual_idx)) or clean_float(get_row_val("ROE", last_actual_idx))
                     debt_to_equity = clean_float(get_row_val("부채비율", last_actual_idx))
-                    
+                    equity_won = clean_float(get_row_val("자본총계", last_actual_idx)) * 100_000_000
+
         except Exception as e:
             logger.error(f"[Naver] HTML 파싱 실패: {e}")
+
+    # ── 무인증 보충 데이터(FnGuide 현금흐름 + 네이버 연간 지표) 병합 ──────────
+    def _fmt_won(raw):
+        if not raw:
+            return None
+        if abs(raw) >= 1e12:
+            return f"{raw / 1e12:,.2f}조"
+        return f"{raw / 1e8:,.0f}억"
+
+    def _cell_won(raw):
+        f = _fmt_won(raw)
+        return {"raw": raw, "fmt": f} if f else {"raw": 0, "fmt": "N/A"}
+
+    # EPS/PER/PBR: integration(loss 연도엔 N/A) → 네이버 연간 실적으로 보충
+    def _pick(primary_str, unit, annual_val):
+        v = clean_float(primary_str)
+        if v != 0:
+            return {"raw": v, "fmt": f"{primary_str}{unit}"}
+        if annual_val:
+            return {"raw": annual_val, "fmt": f"{annual_val}{unit}"}
+        return {"raw": 0, "fmt": "N/A"}
+
+    op_cf_cell = _cell_won(fnguide_cf.get("operatingCashflow"))
+    fcf_cell = _cell_won(fnguide_cf.get("freeCashflow"))
+    cash_cell = _cell_won(fnguide_cf.get("totalCash"))
+    eps_cell = _pick(eps_str, "원", annual_metrics.get("trailingEps"))
+    per_cell = _pick(per_str, "배", annual_metrics.get("trailingPE"))
+    pbr_cell = _pick(pbr_str, "배", annual_metrics.get("priceToBook"))
+    _quick = annual_metrics.get("quickRatio")
+    quick_cell = {"raw": _quick, "fmt": f"{_quick}%"} if _quick else {"raw": 0, "fmt": "N/A"}
+
+    # ── 파생 지표 계산 (일관된 소스 조합) ──────────────────────────────────
+    # 총부채 = 자본총계 × 부채비율/100 ; ROA = ROE / (1 + 부채비율/100)
+    total_debt = equity_won * debt_to_equity / 100.0 if (equity_won and debt_to_equity) else 0.0
+    roa = roe / (1 + debt_to_equity / 100.0) if (roe and debt_to_equity) else 0.0
+    price_to_sales = market_cap_num / total_revenue if (market_cap_num and total_revenue) else 0.0
+    gross_margins = fnguide_cf.get("grossMargins")           # 소수(0.45 = 45%)
+    earnings_growth = annual_metrics.get("earningsGrowth")   # 소수
+    payout_ratio = annual_metrics.get("payoutRatio")         # 소수
+
+    total_debt_cell = _cell_won(total_debt)
+    gm_cell = {"raw": gross_margins, "fmt": f"{gross_margins * 100:.2f}%"} if gross_margins else {"raw": 0, "fmt": "N/A"}
+    roa_cell = {"raw": roa / 100.0, "fmt": f"{roa:.2f}%"} if roa else {"raw": 0, "fmt": "N/A"}
+    eg_cell = {"raw": earnings_growth, "fmt": f"{earnings_growth * 100:.2f}%"} if earnings_growth is not None else {"raw": 0, "fmt": "N/A"}
+    ps_cell = {"raw": price_to_sales, "fmt": f"{price_to_sales:.2f}배"} if price_to_sales else {"raw": 0, "fmt": "N/A"}
+    payout_cell = {"raw": payout_ratio, "fmt": f"{payout_ratio * 100:.2f}%"} if payout_ratio else {"raw": 0, "fmt": "N/A"}
 
     profile = {
         "assetProfile": {
@@ -238,11 +431,18 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
         "financialData": {
             "currentPrice": {"raw": current_price, "fmt": current_price_str},
             "totalRevenue": {"raw": total_revenue, "fmt": f"{rev_str}억"},
-            "freeCashflow": {"raw": 0, "fmt": "N/A"},
+            "operatingCashflow": op_cf_cell,
+            "freeCashflow": fcf_cell,
+            "totalCash": cash_cell,
+            "totalDebt": total_debt_cell,
+            "quickRatio": quick_cell,
+            "grossMargins": gm_cell,
             "operatingMargins": {"raw": operating_margin / 100.0, "fmt": f"{operating_margin}%"},
             "returnOnEquity": {"raw": roe / 100.0, "fmt": f"{roe}%"},
+            "returnOnAssets": roa_cell,
             "debtToEquity": {"raw": debt_to_equity, "fmt": f"{debt_to_equity}%"},
             "revenueGrowth": {"raw": revenue_growth, "fmt": f"{revenue_growth * 100:.2f}%"},
+            "earningsGrowth": eg_cell,
             "grossProfits": {"raw": op_income, "fmt": f"{op_inc_str}억"},
             "ebitda": {"raw": op_income, "fmt": f"{op_inc_str}억"},
             "profitMargins": {"raw": net_margin / 100.0, "fmt": f"{net_margin}%"}
@@ -250,8 +450,8 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
         "defaultKeyStatistics": {
             "forwardPE": {"raw": clean_float(forward_pe_str), "fmt": f"{forward_pe_str}배"},
             "pegRatio": {"raw": 0, "fmt": "N/A"},
-            "priceToBook": {"raw": clean_float(pbr_str), "fmt": f"{pbr_str}배"},
-            "trailingEps": {"raw": clean_float(eps_str), "fmt": f"{eps_str}원"},
+            "priceToBook": pbr_cell,
+            "trailingEps": eps_cell,
             "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
             "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
             "beta": {"raw": 0, "fmt": "N/A"}
@@ -260,8 +460,10 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
             "fiftyTwoWeekLow": {"raw": low_52, "fmt": low_52_str},
             "fiftyTwoWeekHigh": {"raw": high_52, "fmt": high_52_str},
             "marketCap": {"raw": market_cap_num, "fmt": market_cap_str},
-            "trailingPE": {"raw": clean_float(per_str), "fmt": f"{per_str}배"},
-            "dividendYield": {"raw": clean_float(dividend_yield_str) / 100.0, "fmt": f"{dividend_yield_str}%"}
+            "trailingPE": per_cell,
+            "priceToSalesTrailing12Months": ps_cell,
+            "dividendYield": {"raw": clean_float(dividend_yield_str) / 100.0, "fmt": f"{dividend_yield_str}%"},
+            "payoutRatio": payout_cell
         },
         "earnings": {}
     }
@@ -269,13 +471,284 @@ async def fetch_company_profile_and_financials_naver(symbol: str) -> dict:
     logger.info(f"[Naver] {symbol} ({stock_name}) 데이터 바인딩 완료")
     return profile
 
+async def resolve_naver_reuters_code(symbol: str) -> str | None:
+    """
+    네이버 자동완성 API로 티커의 정확한 reutersCode를 해석합니다.
+    예: 'AAPL' → 'AAPL.O', 'BRK.B' → 'BRKb' (BRK.B 같은 특수문자 티커의 핵심 해결책).
+    무인증. 실패 시 None.
+    """
+    symbol_upper = symbol.upper().strip()
+    try:
+        async with httpx.AsyncClient(timeout=5, verify=False) as client:
+            resp = await client.get(
+                "https://ac.stock.naver.com/ac",
+                params={"q": symbol, "target": "stock,index"},
+                headers={"User-Agent": USER_AGENT},
+            )
+        if resp.status_code != 200:
+            return None
+        items = resp.json().get("items", [])
+        # items는 [[{...}], ...] 또는 [{...}] 형태일 수 있어 평탄화
+        flat = []
+        for it in items:
+            if isinstance(it, list):
+                flat.extend(it)
+            elif isinstance(it, dict):
+                flat.append(it)
+        # code(대문자)가 입력 티커와 정확히 일치하는 항목의 reutersCode 우선
+        for it in flat:
+            if str(it.get("code", "")).upper() == symbol_upper and it.get("reutersCode"):
+                return it["reutersCode"]
+        # 못 찾으면 첫 미국 주식 항목의 reutersCode
+        for it in flat:
+            if it.get("reutersCode") and it.get("nationCode") == "USA":
+                return it["reutersCode"]
+    except Exception as e:
+        logger.warning(f"[NaverAC] reutersCode 해석 실패 ({symbol}): {e}")
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# SEC EDGAR 펀더멘털 (미국 종목 · 무인증 정부 API · HuggingFace에서도 미차단)
+#   Yahoo가 HF IP에서 차단되면 네이버 US는 가격/시총만 주므로, 재무는 SEC로 보강.
+# ─────────────────────────────────────────────────────────────────────────
+_sec_cik_map: dict = {}
+
+
+async def _load_sec_cik_map() -> dict:
+    """SEC 전체 ticker→CIK10 매핑 (프로세스 1회 로드·캐시)."""
+    global _sec_cik_map
+    if _sec_cik_map:
+        return _sec_cik_map
+    try:
+        async with httpx.AsyncClient(
+            timeout=15, verify=False,
+            headers={"User-Agent": "DdalkiStock grmictsol@gmail.com"},
+        ) as client:
+            r = await client.get("https://www.sec.gov/files/company_tickers.json")
+        if r.status_code == 200:
+            data = r.json()
+            _sec_cik_map = {
+                v["ticker"].upper(): str(v["cik_str"]).zfill(10) for v in data.values()
+            }
+            logger.info(f"[SEC] ticker→CIK {len(_sec_cik_map)}개 로드")
+    except Exception as e:
+        logger.warning(f"[SEC] CIK 맵 로드 실패: {e}")
+    return _sec_cik_map
+
+
+def _sec_days(start: str, end: str) -> int:
+    from datetime import date
+    y1, m1, d1 = (int(x) for x in start.split("-"))
+    y2, m2, d2 = (int(x) for x in end.split("-"))
+    return (date(y2, m2, d2) - date(y1, m1, d1)).days
+
+
+def _sec_annual_series(gaap: dict, tags: list[str], unit: str = "USD") -> list[tuple[str, float]]:
+    """연간(기간 300~400일) 값 → (end, val) 오름차순. 동일 회계연도의 정정치는 최신으로 병합."""
+    for tag in tags:
+        node = gaap.get(tag)
+        if not node:
+            continue
+        arr = node.get("units", {}).get(unit)
+        if not arr:
+            continue
+        by_end: dict[str, float] = {}
+        for f in arr:
+            start, end, val = f.get("start"), f.get("end"), f.get("val")
+            if not start or not end or val is None:
+                continue
+            try:
+                if not (300 <= _sec_days(start, end) <= 400):
+                    continue
+            except Exception:
+                continue
+            by_end[end] = float(val)  # 같은 end의 정정 제출치는 나중 값으로 덮어씀
+        if by_end:
+            return sorted(by_end.items())
+    return []
+
+
+def _sec_latest_instant(gaap: dict, tags: list[str], unit: str = "USD") -> float | None:
+    """시점(대차대조표) 값 중 가장 최근 end의 값."""
+    for tag in tags:
+        node = gaap.get(tag)
+        if not node:
+            continue
+        arr = node.get("units", {}).get(unit)
+        if not arr:
+            continue
+        best_end, best_val = None, None
+        for f in arr:
+            end, val = f.get("end"), f.get("val")
+            if not end or val is None:
+                continue
+            if best_end is None or end > best_end:
+                best_end, best_val = end, float(val)
+        if best_val is not None:
+            return best_val
+    return None
+
+
+async def fetch_us_financials_from_sec(symbol: str) -> dict:
+    """
+    SEC EDGAR companyfacts(무인증)로 미국 종목의 펀더멘털 절대값을 수집한다.
+    가치평가 비율(PER·PSR·PBR)은 시가총액이 필요하므로 호출부에서 계산한다.
+    반환 키: totalRevenue, netIncome, grossMargins, operatingMargins, profitMargins,
+             revenueGrowth, earningsGrowth, returnOnEquity, returnOnAssets,
+             operatingCashflow, freeCashflow, totalCash, totalEquity, totalAssets,
+             totalDebt, debtToEquity
+    """
+    ticker = symbol.upper().strip().replace(".", "-")  # SEC는 클래스주에 하이픈 (BRK.B→BRK-B)
+    cik = (await _load_sec_cik_map()).get(ticker)
+    if not cik:
+        logger.info(f"[SEC] {symbol}({ticker}) CIK 없음 — 재무 보강 생략")
+        return {}
+
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    try:
+        async with httpx.AsyncClient(
+            timeout=30, verify=False,
+            headers={"User-Agent": "DdalkiStock grmictsol@gmail.com"},
+        ) as client:
+            r = await client.get(url)
+        if r.status_code != 200:
+            logger.warning(f"[SEC] {ticker} companyfacts HTTP {r.status_code}")
+            return {}
+        gaap = r.json().get("facts", {}).get("us-gaap", {})
+    except Exception as e:
+        logger.warning(f"[SEC] {ticker} companyfacts 실패: {e}")
+        return {}
+    if not gaap:
+        return {}
+
+    rev = _sec_annual_series(gaap, [
+        "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"])
+    ni = _sec_annual_series(gaap, ["NetIncomeLoss", "ProfitLoss"])
+    gp = _sec_annual_series(gaap, ["GrossProfit"])
+    opinc = _sec_annual_series(gaap, ["OperatingIncomeLoss"])
+    ocf = _sec_annual_series(gaap, [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"])
+    capex = _sec_annual_series(gaap, [
+        "PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"])
+
+    assets = _sec_latest_instant(gaap, ["Assets"])
+    liab = _sec_latest_instant(gaap, ["Liabilities"])
+    equity = _sec_latest_instant(gaap, [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"])
+    cash = _sec_latest_instant(gaap, [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"])
+    debt = _sec_latest_instant(gaap, [
+        "LongTermDebt", "LongTermDebtNoncurrent", "DebtLongtermAndShorttermCombinedAmount"])
+
+    def _latest(series):
+        return series[-1][1] if series else None
+
+    def _yoy(series):
+        if len(series) >= 2 and series[-2][1]:
+            return (series[-1][1] - series[-2][1]) / abs(series[-2][1])
+        return None
+
+    revenue, net_income = _latest(rev), _latest(ni)
+    gross_profit, op_income = _latest(gp), _latest(opinc)
+    op_cash, capex_v = _latest(ocf), _latest(capex)
+
+    out: dict = {}
+    if revenue:
+        out["totalRevenue"] = revenue
+        if gross_profit is not None:
+            out["grossMargins"] = gross_profit / revenue
+        if op_income is not None:
+            out["operatingMargins"] = op_income / revenue
+        if net_income is not None:
+            out["profitMargins"] = net_income / revenue
+        rg = _yoy(rev)
+        if rg is not None:
+            out["revenueGrowth"] = rg
+    if net_income is not None:
+        out["netIncome"] = net_income
+        eg = _yoy(ni)
+        if eg is not None:
+            out["earningsGrowth"] = eg
+        if equity:
+            out["returnOnEquity"] = net_income / equity
+        if assets:
+            out["returnOnAssets"] = net_income / assets
+    if op_cash is not None:
+        out["operatingCashflow"] = op_cash
+        if capex_v is not None:
+            out["freeCashflow"] = op_cash - abs(capex_v)  # capex 지출분 차감
+    if cash is not None:
+        out["totalCash"] = cash
+    if assets:
+        out["totalAssets"] = assets
+    if equity:
+        out["totalEquity"] = equity
+    if debt is not None:
+        out["totalDebt"] = debt
+    elif liab is not None:
+        out["totalDebt"] = liab  # 명시적 차입금 태그 없으면 총부채(총부채총계)로 대체
+    if liab is not None and equity:
+        out["debtToEquity"] = liab / equity * 100.0
+
+    logger.info(f"[SEC] {ticker} 펀더멘털 수집: {list(out.keys())}")
+    return out
+
+
+def _fmt_usd(raw: float) -> str:
+    a = abs(raw)
+    if a >= 1e12:
+        return f"${raw / 1e12:,.2f}T"
+    if a >= 1e9:
+        return f"${raw / 1e9:,.2f}B"
+    if a >= 1e6:
+        return f"${raw / 1e6:,.2f}M"
+    return f"${raw:,.0f}"
+
+
+def _cell_usd(raw) -> dict:
+    return {"raw": raw, "fmt": _fmt_usd(raw)} if raw else {"raw": 0, "fmt": "N/A"}
+
+
+def _cell_pct(raw) -> dict:
+    """raw는 소수(0.23 = 23%)."""
+    return {"raw": raw, "fmt": f"{raw * 100:.2f}%"} if raw is not None else {"raw": 0, "fmt": "N/A"}
+
+
+def _cell_ratio(raw, unit="배") -> dict:
+    return {"raw": raw, "fmt": f"{raw:,.2f}{unit}"} if raw else {"raw": 0, "fmt": "N/A"}
+
+
 async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
     """
     네이버 금융 API를 사용하여 미국(해외) 주식의 상세 정보를 조회하고 기존 야후 파이낸스 스키마로 변환합니다.
+    BRK.B 같은 특수문자 티커는 자동완성 API로 정확한 reutersCode(→ BRKb)를 먼저 해석해 사용합니다.
     """
     symbol_upper = symbol.upper().strip()
-    candidates = [symbol_upper] if "." in symbol_upper else [f"{symbol_upper}.O", f"{symbol_upper}.N", f"{symbol_upper}.K"]
-    
+
+    # 1순위: 자동완성으로 정확한 reutersCode 해석 (BRK.B → BRKb 등)
+    candidates = []
+    resolved_code = await resolve_naver_reuters_code(symbol_upper)
+    if resolved_code:
+        candidates.append(resolved_code)
+
+    # 2순위(폴백): 접미사 추정 형식
+    if "." in symbol_upper or "-" in symbol_upper:
+        base = symbol_upper.replace(".", "").replace("-", "")
+        candidates += [symbol_upper, base + ".O", base + ".N", base + ".K"]
+    else:
+        candidates += [f"{symbol_upper}.O", f"{symbol_upper}.N", f"{symbol_upper}.K"]
+
+    # 중복 제거(순서 유지)
+    candidates = list(dict.fromkeys(candidates))
+
+    # SEC 펀더멘털은 네이버 조회와 병렬로 미리 시작 (지연 최소화)
+    sec_task = asyncio.create_task(fetch_us_financials_from_sec(symbol))
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -301,6 +774,7 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
                 
         if not basic_data or not resolved_symbol:
             logger.warning(f"[NaverUS] Could not resolve basic data for US symbol: {symbol}")
+            sec_task.cancel()
             return {}
             
         integration_url = f"https://api.stock.naver.com/stock/{resolved_symbol}/integration"
@@ -335,16 +809,37 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
     except Exception:
         pass
         
-    per_str = info_map.get("per", "N/A")
-    eps_str = info_map.get("eps", "N/A")
-    pbr_str = info_map.get("pbr", "N/A")
-    bps_str = info_map.get("bps", "N/A")
-    
+    dividend_yield_str = info_map.get("dividendYieldRatio", "N/A")
+
     # integration 데이터에서 기업 개요 및 기타 재무 지표 추출
     business_summary = "정보가 제공되지 않습니다."
     if integration_data:
         business_summary = integration_data.get("corporateOverview", business_summary)
-        
+
+    # ── SEC EDGAR 펀더멘털 병합 (네이버 US는 가격/시총만 신뢰 가능) ──────────
+    try:
+        sec = await sec_task
+    except Exception as e:
+        logger.warning(f"[NaverUS] SEC 재무 대기 실패 ({symbol}): {e}")
+        sec = {}
+    sec = sec or {}
+
+    # 가치평가 비율은 시가총액 기준으로 계산 → 주식클래스(A/B) 무관하게 정확
+    mc = market_cap_num
+    ni = sec.get("netIncome")
+    rev = sec.get("totalRevenue")
+    eq = sec.get("totalEquity")
+    trailing_pe = mc / ni if (mc and ni and ni > 0) else None
+    price_to_sales = mc / rev if (mc and rev) else None
+    price_to_book = mc / eq if (mc and eq and eq > 0) else None
+    # EPS는 시총 기준 PER로 역산해 주식클래스와 일관성 유지 (SEC EPS는 A주 기준이라 부정확)
+    trailing_eps = (current_price / trailing_pe) if (trailing_pe and current_price) else None
+    eg = sec.get("earningsGrowth")
+    peg = (trailing_pe / (eg * 100)) if (trailing_pe and eg and eg > 0) else None
+
+    def _dte_cell(v):
+        return {"raw": v, "fmt": f"{v:.2f}%"} if v is not None else {"raw": 0, "fmt": "N/A"}
+
     profile = {
         "assetProfile": {
             "sector": basic_data.get("industryCodeType", {}).get("industryGroupKor", "US Stock"),
@@ -354,21 +849,26 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
         },
         "financialData": {
             "currentPrice": {"raw": current_price, "fmt": f"${current_price_str}"},
-            "totalRevenue": {"raw": 0, "fmt": "N/A"},
-            "freeCashflow": {"raw": 0, "fmt": "N/A"},
-            "operatingMargins": {"raw": 0, "fmt": "N/A"},
-            "returnOnEquity": {"raw": 0, "fmt": "N/A"},
-            "debtToEquity": {"raw": 0, "fmt": "N/A"},
-            "revenueGrowth": {"raw": 0, "fmt": "N/A"},
-            "grossProfits": {"raw": 0, "fmt": "N/A"},
-            "ebitda": {"raw": 0, "fmt": "N/A"},
-            "profitMargins": {"raw": 0, "fmt": "N/A"}
+            "totalRevenue": _cell_usd(sec.get("totalRevenue")),
+            "operatingCashflow": _cell_usd(sec.get("operatingCashflow")),
+            "freeCashflow": _cell_usd(sec.get("freeCashflow")),
+            "totalCash": _cell_usd(sec.get("totalCash")),
+            "totalDebt": _cell_usd(sec.get("totalDebt")),
+            "grossMargins": _cell_pct(sec.get("grossMargins")),
+            "operatingMargins": _cell_pct(sec.get("operatingMargins")),
+            "profitMargins": _cell_pct(sec.get("profitMargins")),
+            "returnOnEquity": _cell_pct(sec.get("returnOnEquity")),
+            "returnOnAssets": _cell_pct(sec.get("returnOnAssets")),
+            "debtToEquity": _dte_cell(sec.get("debtToEquity")),
+            "revenueGrowth": _cell_pct(sec.get("revenueGrowth")),
+            "earningsGrowth": _cell_pct(sec.get("earningsGrowth")),
         },
         "defaultKeyStatistics": {
-            "forwardPE": {"raw": clean_float(per_str), "fmt": f"{per_str}"},
-            "pegRatio": {"raw": 0, "fmt": "N/A"},
-            "priceToBook": {"raw": clean_float(pbr_str), "fmt": f"{pbr_str}"},
-            "trailingEps": {"raw": clean_float(eps_str), "fmt": f"{eps_str}"},
+            "forwardPE": {"raw": 0, "fmt": "N/A"},
+            "pegRatio": _cell_ratio(peg),
+            "priceToBook": _cell_ratio(price_to_book),
+            "trailingEps": ({"raw": trailing_eps, "fmt": f"${trailing_eps:,.2f}"}
+                            if trailing_eps else {"raw": 0, "fmt": "N/A"}),
             "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
             "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
             "beta": {"raw": 0, "fmt": "N/A"}
@@ -377,77 +877,171 @@ async def fetch_company_profile_and_financials_naver_us(symbol: str) -> dict:
             "fiftyTwoWeekLow": {"raw": low_52, "fmt": low_52_str},
             "fiftyTwoWeekHigh": {"raw": high_52, "fmt": high_52_str},
             "marketCap": {"raw": market_cap_num, "fmt": market_cap_str},
-            "trailingPE": {"raw": clean_float(per_str), "fmt": f"{per_str}"}
+            "trailingPE": _cell_ratio(trailing_pe),
+            "priceToSalesTrailing12Months": _cell_ratio(price_to_sales),
+            "dividendYield": ({"raw": clean_float(dividend_yield_str) / 100.0, "fmt": f"{dividend_yield_str}%"}
+                              if clean_float(dividend_yield_str) else {"raw": 0, "fmt": "N/A"}),
         },
         "earnings": {}
     }
-    logger.info(f"[NaverUS] {symbol} ({stock_name}) 데이터 바인딩 완료")
+    logger.info(
+        f"[NaverUS] {symbol} ({stock_name}) 데이터 바인딩 완료 "
+        f"(SEC 지표 {len(sec)}종, PER={trailing_pe and round(trailing_pe,1)})"
+    )
     return profile
+
+async def fetch_company_via_yahoo_chart(symbol: str) -> dict:
+    """
+    Yahoo Chart v8 API로 기본 가격·지표 조회 (Crumb 불필요).
+    HuggingFace에서 fc.yahoo.com 차단 시 최종 폴백으로 사용.
+    매크로 지표 조회와 동일한 엔드포인트 사용 → HuggingFace에서 정상 작동 확인.
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d&includePrePost=false"
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=False, headers=get_headers()) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                logger.warning(f"[YahooChart] {symbol} HTTP {r.status_code}")
+                return {}
+
+            data = r.json()
+            result_list = data.get("chart", {}).get("result")
+            if not result_list:
+                logger.warning(f"[YahooChart] {symbol} result 없음")
+                return {}
+
+            result = result_list[0]
+            meta = result.get("meta", {})
+
+            price = meta.get("regularMarketPrice") or meta.get("regularMarketPreviousClose", 0) or 0
+            prev_close = meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose") or price
+            low_52 = meta.get("fiftyTwoWeekLow", 0) or 0
+            high_52 = meta.get("fiftyTwoWeekHigh", 0) or 0
+
+            quote = result.get("indicators", {}).get("quote", [{}])[0]
+            closes = [c for c in quote.get("close", []) if c is not None]
+            ma50 = sum(closes[-50:]) / min(len(closes), 50) if closes else price
+            ma200 = sum(closes[-200:]) / min(len(closes), 200) if closes else price
+
+            profile = {
+                "assetProfile": {
+                    "sector": meta.get("exchangeName", "US Stock"),
+                    "industry": meta.get("exchangeName", ""),
+                    "longBusinessSummary": f"{symbol} ({meta.get('exchangeName','')}) — 재무 상세 데이터 제한적 (Yahoo Chart 기본값)",
+                    "companyOfficers": [{"name": f"{symbol} Management"}]
+                },
+                "financialData": {
+                    "currentPrice": {"raw": price, "fmt": f"${price:.2f}"},
+                    "totalRevenue": {"raw": 0, "fmt": "N/A"},
+                    "freeCashflow": {"raw": 0, "fmt": "N/A"},
+                    "operatingMargins": {"raw": 0, "fmt": "N/A"},
+                    "returnOnEquity": {"raw": 0, "fmt": "N/A"},
+                    "debtToEquity": {"raw": 0, "fmt": "N/A"},
+                    "revenueGrowth": {"raw": 0, "fmt": "N/A"},
+                    "grossProfits": {"raw": 0, "fmt": "N/A"},
+                    "ebitda": {"raw": 0, "fmt": "N/A"},
+                    "profitMargins": {"raw": 0, "fmt": "N/A"}
+                },
+                "defaultKeyStatistics": {
+                    "forwardPE": {"raw": 0, "fmt": "N/A"},
+                    "pegRatio": {"raw": 0, "fmt": "N/A"},
+                    "priceToBook": {"raw": 0, "fmt": "N/A"},
+                    "trailingEps": {"raw": 0, "fmt": "N/A"},
+                    "enterpriseToRevenue": {"raw": 0, "fmt": "N/A"},
+                    "enterpriseToEbitda": {"raw": 0, "fmt": "N/A"},
+                    "beta": {"raw": meta.get("beta", 0) or 0, "fmt": "N/A"}
+                },
+                "summaryDetail": {
+                    "fiftyTwoWeekLow": {"raw": low_52, "fmt": f"${low_52:.2f}"},
+                    "fiftyTwoWeekHigh": {"raw": high_52, "fmt": f"${high_52:.2f}"},
+                    "marketCap": {"raw": 0, "fmt": "N/A"},
+                    "trailingPE": {"raw": 0, "fmt": "N/A"},
+                    "dividendYield": {"raw": 0, "fmt": "N/A"},
+                    "fiftyDayAverage": {"raw": ma50, "fmt": f"${ma50:.2f}"},
+                    "twoHundredDayAverage": {"raw": ma200, "fmt": f"${ma200:.2f}"},
+                },
+                "earnings": {}
+            }
+            logger.info(f"[YahooChart] {symbol} 폴백 성공 (price={price:.2f}, 52w {low_52:.2f}~{high_52:.2f})")
+            return profile
+
+    except Exception as e:
+        logger.error(f"[YahooChart] {symbol} 조회 실패: {e}")
+        return {}
+
 
 async def fetch_company_profile_and_financials(symbol: str) -> dict:
     """
-    Yahoo Finance quoteSummary API를 활용하여 기업 프로필 및 재무 데이터를 가져옵니다 (쿠키/크럼 캐싱 적용).
-    단, 한국 주식은 네이버 금융 연동을 통해 수집하여 차단 문제를 우회합니다.
-    야후 파이낸스 조회가 실패하거나 429 등으로 차단될 경우, 네이버 해외 주식 API로 폴백합니다.
+    기업 프로필 및 재무 데이터 조회. 3단계 폴백:
+      1. Yahoo quoteSummary (Crumb 없이 먼저 시도 → 있으면 사용)
+      2. 네이버 해외주식 API (한국 주식은 네이버 KR)
+      3. Yahoo Chart v8 (Crumb 불필요 — HuggingFace에서도 동작 확인)
     """
     if is_korean_stock(symbol):
         return await fetch_company_profile_and_financials_naver(symbol)
 
     global _cached_cookies, _cached_crumb
-    
-    yahoo_success = False
-    result_profile = {}
-    
-    for attempt in range(1):  # 1회만 시도
-        if not _cached_crumb:
-            _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
-            
-        if not _cached_crumb:
-            logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패로 인해 조회 불가")
-            break
-            
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings&crumb={_cached_crumb}"
-        headers = get_headers()
-        
+
+    # Yahoo는 클래스주에 하이픈을 사용 (BRK.B → BRK-B, BF.B → BF-B)
+    yahoo_symbol = symbol.replace(".", "-")
+
+    # ── 1단계: Yahoo quoteSummary (Crumb 없이 먼저 시도) ──────────────────
+    async def _try_quote_summary(crumb: str | None, cookies: dict | None) -> dict:
+        crumb_param = f"&crumb={crumb}" if crumb else ""
+        url = (
+            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{yahoo_symbol}"
+            f"?modules=assetProfile,financialData,defaultKeyStatistics,summaryDetail,earnings"
+            f"{crumb_param}"
+        )
         try:
-            async with httpx.AsyncClient(timeout=2, headers=headers, cookies=_cached_cookies, verify=False) as client:  # 타임아웃 2초
+            async with httpx.AsyncClient(
+                timeout=5, headers=get_headers(),
+                cookies=cookies or {}, verify=False
+            ) as client:
                 resp = await client.get(url)
-                
+
             if resp.status_code == 401:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 401 (크럼 만료). 캐시 초기화 후 재시도...")
-                _cached_cookies = None
-                _cached_crumb = None
-                continue
-                
-            if resp.status_code == 404:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP 404 (존재하지 않는 심볼)")
-                break
-                
+                return {"__need_crumb_refresh": True}
             if resp.status_code != 200:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary HTTP {resp.status_code} (시도 {attempt+1})")
-                await asyncio.sleep(0.5)
-                continue
-                
+                return {}
+
             data = resp.json()
             result = data.get("quoteSummary", {}).get("result")
-            if not result:
-                logger.warning(f"[Yahoo] {symbol} quoteSummary result empty (시도 {attempt+1})")
-                await asyncio.sleep(0.5)
-                continue
-                
-            result_profile = result[0]
-            yahoo_success = True
-            break
+            if result:
+                logger.info(f"[Yahoo] {symbol} quoteSummary 성공")
+                return result[0]
         except Exception as e:
-            logger.error(f"[Yahoo] {symbol} quoteSummary 조회 중 에러 (시도 {attempt+1}): {e}")
-            await asyncio.sleep(0.5)
-            
-    if yahoo_success and result_profile:
-        return result_profile
-        
-    # 야후 파이낸스 조회 실패 시 네이버 해외 주식 API로 폴백
-    logger.info(f"[Yahoo-Fallback] 야후 파이낸스 차단 또는 조회 실패로 네이버 해외 주식 API 폴백 실행: {symbol}")
-    return await fetch_company_profile_and_financials_naver_us(symbol)
+            logger.warning(f"[Yahoo] {symbol} quoteSummary 에러: {e}")
+        return {}
+
+    # Crumb 없이 먼저 시도
+    profile = await _try_quote_summary(None, None)
+    if profile and "__need_crumb_refresh" not in profile:
+        return profile
+
+    # Crumb 획득 후 재시도
+    if not _cached_crumb:
+        _cached_cookies, _cached_crumb = await get_yahoo_cookie_and_crumb()
+
+    if _cached_crumb:
+        profile = await _try_quote_summary(_cached_crumb, _cached_cookies)
+        if profile and "__need_crumb_refresh" not in profile:
+            return profile
+        # 크럼 만료 시 캐시 초기화
+        _cached_cookies = None
+        _cached_crumb = None
+    else:
+        logger.warning(f"[Yahoo] {symbol} Crumb 획득 실패 (HuggingFace IP 차단 가능성)")
+
+    # ── 2단계: 네이버 해외주식 폴백 ──────────────────────────────────────
+    logger.info(f"[Fallback-2] {symbol} 네이버 해외주식 API 시도")
+    naver_result = await fetch_company_profile_and_financials_naver_us(symbol)
+    if naver_result:
+        return naver_result
+
+    # ── 3단계: Yahoo Chart v8 (Crumb 불필요 — 최종 폴백) ────────────────
+    logger.info(f"[Fallback-3] {symbol} Yahoo Chart v8 API 시도 (Crumb 불필요)")
+    return await fetch_company_via_yahoo_chart(yahoo_symbol)
 
 async def fetch_company_news(symbol: str) -> list[dict]:
     """
